@@ -18,8 +18,22 @@ if [ -z "${FLET_ANDROID_SIGNING_KEY_STORE:-}" ]; then
     echo "::warning::No Android release key (repository secrets ANDROID_KEYSTORE_BASE64 and co.): this APK is" \
          "debug-signed, and a phone must uninstall it before installing one signed differently."
 fi
-flet build apk --yes --no-rich-output --skip-flutter-doctor \
-    --build-version "${version%%-*}" --build-number "$number" -o "$out/build"
+# The build downloads a Python runtime for each CPU type from GitHub, and now and then one arrives as
+# a file of null bytes ("Unable to determine the current character... '^@'"), which fails the whole
+# build for no reason of ours. Try again, from a clean build folder, up to three times.
+for attempt in 1 2 3; do
+    if flet build apk --yes --no-rich-output --skip-flutter-doctor \
+        --build-version "${version%%-*}" --build-number "$number" -o "$out/build"; then
+        break
+    fi
+    if [ "$attempt" = 3 ]; then
+        echo "the Android build failed three times" >&2
+        exit 1
+    fi
+    echo "::warning::The Android build failed (attempt $attempt of 3); its runtime download is unreliable. Trying again."
+    rm -rf build "$out/build"
+    sleep 30
+done
 mkdir -p "$out"
 apk="$(find "$out/build" -name '*.apk' | head -n 1)"
 [ -n "$apk" ] || { echo "no APK was built" >&2; exit 1; }
