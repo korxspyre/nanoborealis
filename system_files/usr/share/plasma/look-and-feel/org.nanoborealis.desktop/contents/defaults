@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# From Aurora's look-and-feel defaults (GPL-2.0-or-later), changed for NanoBorealis by korxspyre.
+[kdeglobals][KDE]
+widgetStyle=Breeze
+
+[kdeglobals][General]
+ColorScheme=NanoBorealis
+
+[kdeglobals][Icons]
+Theme=breeze-dark
+
+[plasmarc][Theme]
+name=default
+
+[Wallpaper]
+Image=NanoBorealis
+
+[kcminputrc][Mouse]
+cursorTheme=breeze_cursors
+
+[kwinrc][WindowSwitcher]
+LayoutName=org.kde.breeze.desktop
+
+[kwinrc][DesktopSwitcher]
+LayoutName=org.kde.breeze.desktop
+
+[kwinrc][org.kde.kdecoration2]
+library=org.kde.breeze
+theme=Breeze
+
+[KSplash]
+Theme=org.nanoborealis.desktop

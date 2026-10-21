@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+# NanoBorealis agent image: nanobot from the pinned PyPI release on the same base the
+# official nanobot image uses. The agent runs as the unprivileged user "nanobot" with
+# passwordless sudo inside the container, so it can install and build anything in its
+# own box while having no rights on the host.
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+
+ARG NANOBOT_VERSION=0.3.5
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential ca-certificates curl file git jq less libmagic1 openssh-client \
+      pkg-config procps ripgrep sudo tree unzip wget xz-utils zip \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --create-home --uid 1000 --shell /bin/bash nanobot \
+ && printf 'nanobot ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/nanobot \
+ && chmod 0440 /etc/sudoers.d/nanobot
+
+# nanobot lives outside the home directory, which is a persistent volume, so rebuilding
+# the image delivers new versions instead of leaving an old copy behind in the volume.
+# (The base image also sets UV_TOOL_BIN_DIR=/usr/local/bin; this overrides it.)
+ENV UV_TOOL_DIR=/opt/nanobot/tools \
+    UV_TOOL_BIN_DIR=/opt/nanobot/bin \
+    UV_PYTHON_PREFERENCE=only-system \
+    PATH=/home/nanobot/.local/bin:/opt/nanobot/bin:$PATH \
+    PYTHONUNBUFFERED=1
+# The council's tools (nanoborealis_council) go into nanobot's own environment, where its loader
+# finds them through the nanobot.tools entry points. They stay off unless the agent is a council
+# seat (NANOBOREALIS_HALL_URL and NANOBOREALIS_HALL_TOKEN set). The api extra is `nanobot serve`,
+# which is how seats run.
+COPY council/ /opt/nanobot-council/
+RUN uv tool install --no-cache --python 3.12 "nanobot-ai[api]==${NANOBOT_VERSION}" --with /opt/nanobot-council \
+ && chown -R nanobot:nanobot /opt/nanobot \
+ && nanobot --version \
+ && /opt/nanobot/tools/nanobot-ai/bin/python -c "from importlib.metadata import entry_points; \
+assert 'hall_read' in {e.name for e in entry_points(group='nanobot.tools')}, 'council tools missing'"
+
+COPY entrypoint.sh /usr/local/bin/nanobot-entrypoint
+COPY seed/ /opt/nanobot-seed/
+RUN sed -i 's/\r$//' /usr/local/bin/nanobot-entrypoint \
+ && chmod 0755 /usr/local/bin/nanobot-entrypoint \
+ && chmod -R a+rX /opt/nanobot-seed
+
+# NanoBorealis's own files here are PolyForm-Noncommercial-1.0.0 (the text is in /usr/share/licenses/nanoborealis
+# on the computer that builds this image); nanobot, installed above, is MIT.
+LABEL org.opencontainers.image.licenses="PolyForm-Noncommercial-1.0.0 AND MIT"
+
+USER nanobot
+WORKDIR /home/nanobot
+ENV HOME=/home/nanobot
+
+EXPOSE 8765
+ENTRYPOINT ["/usr/local/bin/nanobot-entrypoint"]
+CMD ["gateway", "--foreground"]

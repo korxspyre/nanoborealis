@@ -1,0 +1,75 @@
+{
+  "providers": {
+    "openrouter": {
+      "apiKey": "${OPENROUTER_API_KEY}",
+      "extraBody": {"provider": {"max_price": {"prompt": 0, "completion": 0, "request": 0, "image": 0}}}
+    }
+  },
+
+  "modelPresets": {
+    "ultra": {
+      "provider": "openrouter",
+      "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "maxTokens": 8192,
+      "contextWindowTokens": 262144,
+      "temperature": 0.2
+    },
+
+    "super": {
+      "provider": "openrouter",
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "maxTokens": 8192,
+      "contextWindowTokens": 262144,
+      "temperature": 0.2
+    },
+
+    "lightning": {
+      "provider": "openrouter",
+      "model": "nvidia/nemotron-3.5-lightning:free",
+      "maxTokens": 8192,
+      "contextWindowTokens": 262144,
+      "temperature": 0.2
+    },
+
+    "qwen": {
+      "provider": "openrouter",
+      "model": "qwen/qwen3.8-27b:free",
+      "maxTokens": 8192,
+      "contextWindowTokens": 262144,
+      "temperature": 0.2
+    },
+
+    "inkling": {
+      "provider": "openrouter",
+      "model": "thinkingmachines/inkling:free",
+      "maxTokens": 8192,
+      "contextWindowTokens": 262144,
+      "temperature": 0.2
+    }
+  },
+
+  "agents": {
+    "defaults": {
+      "modelPreset": "ultra",
+      "fallbackModels": ["super", "lightning"],
+      "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "provider": "openrouter"
+    }
+  },
+
+  "tools": {
+    "exec": {
+      "timeout": 600
+    }
+  },
+
+  "channels": {
+    "websocket": {
+      "enabled": true,
+      "host": "0.0.0.0",
+      "port": 8765,
+      "tokenIssueSecret": "${NANOBOT_WEBUI_SECRET}",
+      "websocketRequiresToken": true
+    }
+  }
+}

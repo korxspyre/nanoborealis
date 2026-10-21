@@ -1,0 +1,1714 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+"""NanoBorealis remote access: pairs the NanoBorealis app with this computer, then lets paired
+devices reach the agent.
+
+It listens on port 8766 with TLS, in front of the agent's WebUI, which stays on 127.0.0.1:8765.
+
+Pairing takes a 6-digit PIN instead of a password. The app and this computer each pick a random
+number (the app commits to its number first), and both derive the PIN from the two numbers and
+this computer's TLS certificate. This computer shows the PIN on its screen. Typing it into the app
+proves that someone at this computer approves, and proves to the app that nothing in between is
+posing as this computer: an impostor has a different certificate, so the app would expect a
+different PIN. (It's the numeric comparison of Bluetooth pairing.) Then this computer generates a
+long random password for the device and sends it over the encrypted connection. The app keeps it,
+with this computer's certificate, and presents it on every connection; only a hash of it is kept
+here, in /var/lib/nanoborealis/remote/devices.json.
+
+Only paired devices get through to the agent. A paired device can also open a terminal on this
+computer, or run a command, as the person who approved it here (whoever was at the screen that
+showed the PIN), never as root: the NanoBorealis app is this computer's remote control. The PIN
+notification says so. `nanoborealis devices` lists and removes devices, and `nanoborealis remote
+off` stops this service.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import hashlib
+import hmac
+import json
+import os
+import re
+import secrets
+import socket
+import ssl
+import subprocess
+import sys
+import time
+import urllib.parse
+from collections import deque
+from dataclasses import dataclass, field
+from pathlib import Path
+
+PORT = int(os.environ.get("NANOBOREALIS_REMOTE_PORT", "8766"))
+UPSTREAM_HOST = os.environ.get("NANOBOREALIS_REMOTE_UPSTREAM_HOST", "127.0.0.1")
+UPSTREAM_PORT = int(os.environ.get("NANOBOREALIS_REMOTE_UPSTREAM_PORT", "8765"))
+STATE = Path(os.environ.get("NANOBOREALIS_REMOTE_STATE", "/var/lib/nanoborealis/remote"))
+# For tests only: the WebUI password to use, a file to write each PIN to instead of the screen,
+# and the account that stands for the person at the screen.
+TEST_SECRET = os.environ.get("NANOBOREALIS_REMOTE_TEST_SECRET")
+TEST_PIN_FILE = os.environ.get("NANOBOREALIS_REMOTE_TEST_PIN_FILE")
+TEST_OWNER = os.environ.get("NANOBOREALIS_REMOTE_TEST_OWNER", "")
+# Where the NanoBorealis app on this computer pairs with it, without a PIN (see pair_here).
+LOCAL_SOCKET = os.environ.get("NANOBOREALIS_REMOTE_LOCAL_SOCKET", "/run/nanoborealis/local.sock")
+LIVE_FILE = Path(os.environ.get("NANOBOREALIS_REMOTE_LIVE", str(Path(LOCAL_SOCKET).parent / "live.json")))
+
+AGENT_USER = "nanobot-agent"
+DEVICE_HEADER = "x-nanoborealis-device"  # carries a paired device's password
+PAIR_SECONDS = 600  # how long a PIN is good for: long enough to read it out to someone
+PIN_TRIES = 5  # wrong PINs before a pairing request is dropped
+# Pairing requests accepted from everyone together. A PIN has a million values; these limits keep
+# anyone from trying requests until one happens to produce a PIN they chose.
+STARTS_PER_MINUTE = 5
+STARTS_PER_HOUR = 30
+MAX_PENDING = 3
+HEAD_LIMIT = 64 * 1024
+BODY_LIMIT = 4096
+UPSTREAM_BOOTSTRAP = "/webui/bootstrap"  # the one WebUI path that takes the WebUI password
+
+
+def log(message: str) -> None:
+    print(f"nanoborealis-remote: {message}", flush=True)
+
+
+def pairing_pin(client_nonce: bytes, server_nonce: bytes, certificate_der: bytes) -> str:
+    """The PIN both sides derive. The app has the same function (client/src/pairing.py)."""
+    digest = hashlib.sha256(b"nanoborealis-pair-v1" + client_nonce + server_nonce
+                            + hashlib.sha256(certificate_der).digest()).digest()
+    return f"{int.from_bytes(digest[:8], 'big') % 1_000_000:06d}"
+
+
+# -- This computer's certificate --------------------------------------------------------------
+
+
+def certificate() -> tuple[Path, Path, bytes]:
+    """This computer's TLS certificate and key, made on first start. Returns their paths and
+    the certificate in DER form."""
+    cert, key = STATE / "cert.pem", STATE / "key.pem"
+    if not (cert.exists() and key.exists()):
+        STATE.mkdir(parents=True, exist_ok=True)
+        os.chmod(STATE, 0o700)
+        subprocess.run(
+            ["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
+             "-nodes", "-keyout", str(key), "-out", str(cert), "-days", "36500", "-subj", "/CN=NanoBorealis"],
+            check=True, capture_output=True)
+        os.chmod(key, 0o600)
+        log("made this computer's TLS certificate")
+    return cert, key, ssl.PEM_cert_to_DER_cert(cert.read_text())
+
+
+# -- Paired devices ---------------------------------------------------------------------------
+
+
+class Devices:
+    """Paired devices in devices.json, re-read whenever it changes (`nanoborealis devices remove`
+    edits it). Only a hash of each device's password is kept."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.stamp: int | None = None
+        self.by_id: dict[str, dict] = {}
+        self.by_hash: dict[str, str] = {}
+
+    def load(self) -> None:
+        try:
+            stamp = self.path.stat().st_mtime_ns
+        except FileNotFoundError:
+            self.by_id, self.by_hash, self.stamp = {}, {}, None
+            return
+        if stamp == self.stamp:
+            return
+        try:
+            data = json.loads(self.path.read_text() or "{}")
+        except (OSError, ValueError) as e:
+            log(f"can't read {self.path}: {e}")
+            return
+        self.by_id = {k: v for k, v in data.items()
+                      if isinstance(v, dict) and isinstance(v.get("password_sha256"), str)}
+        self.by_hash = {v["password_sha256"]: k for k, v in self.by_id.items()}
+        self.stamp = stamp
+
+    def save(self) -> None:
+        temporary = self.path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(self.by_id, indent=2) + "\n")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, self.path)
+        self.stamp = self.path.stat().st_mtime_ns
+
+    def find(self, password: str) -> str | None:
+        if not password:
+            return None
+        self.load()
+        return self.by_hash.get(hashlib.sha256(password.encode()).hexdigest())
+
+    def add(self, name: str, address: str, owner: str, here: bool = False) -> tuple[str, str]:
+        self.load()
+        if here:  # the app on this computer pairing again (its settings were lost): it replaces itself
+            for old in [k for k, v in self.by_id.items()
+                        if v.get("here") and v.get("owner") == owner and v.get("name") == name]:
+                del self.by_id[old]
+            self.by_hash = {v["password_sha256"]: k for k, v in self.by_id.items()}
+        device_id = secrets.token_hex(4)
+        password = secrets.token_urlsafe(32)  # 256 random bits
+        digest = hashlib.sha256(password.encode()).hexdigest()
+        now = int(time.time())
+        self.by_id[device_id] = {"name": name, "password_sha256": digest, "paired": now, "seen": now,
+                                 "address": address, "owner": owner, **({"here": True} if here else {})}
+        self.by_hash[digest] = device_id
+        self.save()
+        return device_id, password
+
+    def seen(self, device_id: str, address: str) -> None:
+        entry = self.by_id.get(device_id)
+        if entry is None:
+            return
+        now = int(time.time())
+        if now - int(entry.get("seen", 0)) > 600 or entry.get("address") != address:  # a note now and then
+            entry.update(seen=now, address=address)
+            self.save()
+
+    def remove(self, device_id: str) -> None:
+        self.load()
+        if self.by_id.pop(device_id, None) is not None:
+            self.by_hash = {v["password_sha256"]: k for k, v in self.by_id.items()}
+            self.save()
+
+
+devices = Devices(STATE / "devices.json")
+
+
+# -- The agent's WebUI password -----------------------------------------------------------------
+
+_webui_secret: str | None = None
+
+
+def webui_secret() -> str:
+    """The WebUI password, which paired devices never see: setup leaves a root-only copy here, and
+    an older setup's is read from the agent's secrets once."""
+    global _webui_secret
+    if TEST_SECRET is not None:
+        return TEST_SECRET
+    if _webui_secret:
+        return _webui_secret
+    copy = STATE / "webui-secret"
+    try:
+        _webui_secret = copy.read_text().strip() or None
+    except FileNotFoundError:
+        pass
+    if not _webui_secret:
+        result = agent_podman("secret", "inspect", "--showsecret", "--format", "{{.SecretData}}", "nanobot_webui_secret")
+        _webui_secret = result.stdout.strip() or None
+        if not _webui_secret:
+            raise RuntimeError(f"can't read the agent's WebUI password: {result.stderr.strip()[:200]}")
+        copy.write_text(_webui_secret)
+        os.chmod(copy, 0o600)
+    return _webui_secret
+
+
+def forget_webui_secret() -> None:
+    """The WebUI turned the password down: it was changed. Read it again next time."""
+    global _webui_secret
+    _webui_secret = None
+    (STATE / "webui-secret").unlink(missing_ok=True)
+
+
+# -- Who is connected ----------------------------------------------------------------------------
+
+
+class Live:
+    """The paired devices connected right now, and for what: the app's link to the agent, or a
+    terminal. Kept in LIVE_FILE (root-only) for the lock-screen dashboard (nanoborealis-dashboard)."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.now: dict[str, dict] = {}
+
+    def write(self) -> None:
+        try:
+            temporary = self.path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(list(self.now.values())))
+            os.replace(temporary, self.path)
+        except OSError:
+            pass  # a dashboard nicety: never let it get in the way
+
+    @contextlib.asynccontextmanager
+    async def using(self, device_id: str, kind: str, address: str):
+        key = secrets.token_hex(6)
+        entry = devices.by_id.get(device_id, {})
+        self.now[key] = {"id": device_id, "name": entry.get("name", device_id), "owner": entry.get("owner"),
+                         "here": bool(entry.get("here")), "kind": kind, "address": address, "since": int(time.time())}
+        self.write()
+        try:
+            yield
+        finally:
+            self.now.pop(key, None)
+            self.write()
+
+
+live = Live(LIVE_FILE)
+
+# -- Showing the PIN ----------------------------------------------------------------------------
+
+
+def people_at_screen() -> list[tuple[str, int]]:
+    """Users signed in at this computer's own screen (not remotely, not the login screen)."""
+    try:
+        listing = subprocess.run(["loginctl", "list-sessions", "--no-legend"],
+                                 capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    sessions = []
+    for line in listing.splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        shown = subprocess.run(
+            ["loginctl", "show-session", fields[0], "-p", "Type", "-p", "Class", "-p", "Remote",
+             "-p", "Active", "-p", "Name", "-p", "User"],
+            capture_output=True, text=True, timeout=10).stdout
+        props = dict(entry.split("=", 1) for entry in shown.splitlines() if "=" in entry)
+        if props.get("Type") in ("wayland", "x11") and props.get("Class") == "user" and props.get("Remote") != "yes":
+            sessions.append((props.get("Active") == "yes", props.get("Name", ""), int(props.get("User") or -1)))
+    active = {(name, uid) for is_active, name, uid in sessions if is_active}
+    return sorted(active or {(name, uid) for _, name, uid in sessions})
+
+
+def gvariant_string(text: str) -> str:
+    """A string as gdbus reads its arguments (GVariant text), so no name is taken for anything else."""
+    return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def notify(name: str, uid: int, method: str, *arguments: str) -> subprocess.CompletedProcess:
+    """Call the desktop's notification service in a signed-in user's session."""
+    return subprocess.run(
+        ["runuser", "-u", name, "--", "env", f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
+         "gdbus", "call", "--session", "--dest", "org.freedesktop.Notifications",
+         "--object-path", "/org/freedesktop/Notifications", "--method", f"org.freedesktop.Notifications.{method}",
+         *arguments],
+        capture_output=True, text=True, timeout=15, cwd="/")
+
+
+def show_pin(pin: str, device: str) -> list[tuple[str, int, int]]:
+    """Put the PIN on this computer's screen, as a notification that stays until pairing ends.
+    Returns who it was shown to, as (user, uid, notification id)."""
+    if TEST_PIN_FILE:
+        Path(TEST_PIN_FILE).write_text(pin)
+        return [(TEST_OWNER, -1, 0)]
+    title = f"Pairing PIN: {pin[:3]} {pin[3:]}"
+    body = (f"To let {device} use your agent and a terminal on this computer as you, type this PIN into "
+            "the NanoBorealis app. If you didn't start this, ignore it.")
+    shown = []
+    for name, uid in people_at_screen():
+        if not os.path.exists(f"/run/user/{uid}/bus"):
+            continue
+        result = notify(name, uid, "Notify", gvariant_string("NanoBorealis"), "uint32 0",
+                        gvariant_string("nanoborealis"), gvariant_string(title), gvariant_string(body), "@as []",
+                        "{'urgency': <byte 2>, 'desktop-entry': <'nanoborealis'>}", f"int32 {PAIR_SECONDS * 1000}")
+        if result.returncode == 0:
+            note = re.search(r"uint32 (\d+)", result.stdout)
+            shown.append((name, uid, int(note.group(1)) if note else 0))
+        else:
+            log(f"couldn't show the PIN to {name}: {result.stderr.strip()[:200]}")
+    return shown
+
+
+def close_pin(shown: list[tuple[str, int, int]]) -> None:
+    """Take a PIN off the screen once its pairing has ended, however it ended."""
+    for name, uid, note in shown:
+        if note:
+            notify(name, uid, "CloseNotification", f"uint32 {note}")
+
+
+def clean_name(value: object) -> str:
+    """A device's name as it may appear in a notification: printable, no markup, not too long."""
+    if not isinstance(value, str):
+        return ""
+    text = re.sub(r"[^\w .,:()'@+-]", "", value, flags=re.UNICODE)
+    return " ".join(text.split())[:48]
+
+
+# -- Pairing ------------------------------------------------------------------------------------
+
+
+@dataclass
+class Request:
+    device: str
+    address: str
+    commit: str  # the hash of the app's random number
+    server_nonce: bytes
+    expires: float
+    pin: str | None = None
+    tries: int = 0
+    owner: str = ""  # who saw the PIN: the account a terminal runs as
+    shown: list = field(default_factory=list)  # the PIN's notifications: (user, uid, id)
+
+
+pending: dict[str, Request] = {}
+starts: deque[float] = deque()
+MACHINE = socket.gethostname().split(".")[0]
+CERT_DER = b""
+
+
+async def end(key: str) -> None:
+    """Forget a pairing request, and take its PIN off the screen."""
+    request = pending.pop(key, None)
+    if request is not None and request.shown:
+        await asyncio.to_thread(close_pin, request.shown)
+
+
+async def drop_expired() -> None:
+    now = time.monotonic()
+    for key in [key for key, request in pending.items() if request.expires < now]:
+        await end(key)
+
+
+async def expire_regularly() -> None:
+    while True:
+        await asyncio.sleep(30)
+        await drop_expired()
+
+
+async def pair_start(data: dict, address: str) -> tuple[int, dict]:
+    device, commit = clean_name(data.get("device")), data.get("commit")
+    if not device or not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{64}", commit):
+        return 400, {"error": "That isn't a pairing request."}
+    now = time.monotonic()
+    while starts and now - starts[0] > 3600:
+        starts.popleft()
+    # A device trying again replaces its own unfinished attempt: retries never pile up into the
+    # limit and lock everyone out for the ten minutes a PIN lasts.
+    for key in [key for key, request in pending.items() if request.address == address and request.pin is None]:
+        pending.pop(key, None)
+    if (len(pending) >= MAX_PENDING or len(starts) >= STARTS_PER_HOUR
+            or sum(1 for t in starts if now - t < 60) >= STARTS_PER_MINUTE):
+        log(f"turned down a pairing request from {device} ({address}): too many attempts "
+            f"({len(pending)} waiting, {sum(1 for t in starts if now - t < 60)} in the last minute)")
+        return 429, {"error": "Too many pairing attempts. Wait a few minutes, then try again."}
+    starts.append(now)
+    key = secrets.token_urlsafe(16)
+    pending[key] = Request(device, address, commit, secrets.token_bytes(32), now + PAIR_SECONDS)
+    return 200, {"request": key, "server_nonce": pending[key].server_nonce.hex(), "expires_in": PAIR_SECONDS,
+                 "machine": MACHINE}
+
+
+async def pair_reveal(data: dict, address: str) -> tuple[int, dict]:
+    request = pending.get(str(data.get("request")))
+    if request is None:
+        return 404, {"error": "This pairing request has expired. Start again."}
+    if request.pin is not None:
+        return 409, {"error": "The PIN is already on the screen."}
+    try:
+        client_nonce = bytes.fromhex(str(data.get("client_nonce", "")))
+    except ValueError:
+        client_nonce = b""
+    if len(client_nonce) != 32 or hashlib.sha256(client_nonce).hexdigest() != request.commit:
+        pending.pop(str(data.get("request")), None)
+        return 400, {"error": "That doesn't match the pairing request."}
+    request.pin = pairing_pin(client_nonce, request.server_nonce, CERT_DER)
+    shown = await asyncio.to_thread(show_pin, request.pin, request.device)
+    if not shown:
+        pending.pop(str(data.get("request")), None)
+        return 409, {"error": f"Nobody is signed in on {MACHINE} to see the PIN. Sign in there, then try again."}
+    request.shown, request.owner = shown, shown[0][0]
+    log(f"showed a pairing PIN for {request.device} ({address}) to {', '.join(name for name, _, _ in shown)}")
+    return 200, {"ok": True}
+
+
+async def pair_finish(data: dict, address: str) -> tuple[int, dict]:
+    key = str(data.get("request"))
+    request = pending.get(key)
+    if request is None or request.pin is None:
+        return 404, {"error": "This pairing request has expired. Start again."}
+    request.tries += 1
+    if not hmac.compare_digest(str(data.get("pin", "")).encode(), request.pin.encode()):
+        left = PIN_TRIES - request.tries
+        if left <= 0:
+            await end(key)
+            log(f"too many wrong PINs from {request.device} ({address}); request dropped")
+            return 403, {"error": "Wrong PIN too many times. Start again.", "tries_left": 0}
+        return 403, {"error": "Wrong PIN.", "tries_left": left}
+    await end(key)
+    device_id, password = devices.add(request.device, address, request.owner)
+    log(f"paired {request.device} ({address}) as device {device_id}, approved by {request.owner or 'nobody'}")
+    return 200, {"device_id": device_id, "password": password, "machine": MACHINE}
+
+
+# -- A terminal, and commands, as the person who approved the device -----------------------------
+
+COMMAND_TIMEOUT_MAX = 600
+OUTPUT_LIMIT = 1 << 20  # the end of a command's output that its answer carries
+
+
+def owner_of(device_id: str) -> str | None:
+    """The account a device's terminal runs as: whoever approved it at this screen. Never root."""
+    name = str(devices.by_id.get(device_id, {}).get("owner") or "")
+    try:
+        import pwd
+        return name if name and pwd.getpwnam(name).pw_uid != 0 else None
+    except (ImportError, KeyError):
+        return None
+
+
+def frame(kind: bytes, payload: bytes) -> bytes:
+    """Terminal traffic, both ways: a kind (d data, r resize "rows cols", x exit status), a 4-byte
+    length, then that many bytes."""
+    return kind + len(payload).to_bytes(4, "big") + payload
+
+
+def clamp(value: object, default: int, top: int) -> int:
+    try:
+        return max(4, min(int(str(value)), top))
+    except ValueError:
+        return default
+
+
+def as_owner(owner: str, *args: str) -> list[str] | None:
+    """args as the owner, with their user manager's bus: None when they have no user manager
+    running (not signed in, and not lingering)."""
+    import pwd
+    try:
+        uid = pwd.getpwnam(owner).pw_uid
+    except KeyError:
+        return None
+    if not os.path.exists(f"/run/user/{uid}/bus"):
+        return None
+    return ["runuser", "-u", owner, "--", "env", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+            f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus", *args]
+
+
+def in_owner_session(owner: str, *args: str) -> list[str] | None:
+    """A command line that starts `systemd-run --user args` in the owner's own session, the way
+    their desktop starts things: with the computer's own /tmp, /etc and cgroups. In here, this
+    service's sandbox has a private /tmp and read-only /etc and cgroups, so sudo can't change
+    settings, and podman or toolbox started in here leave the owner's containers unable to start.
+    None when the owner has no session to run in."""
+    return as_owner(owner, "systemd-run", "--user", "--quiet", "--collect", "--wait", "--expand-environment=no", *args)
+
+
+def owner_shell(owner: str) -> str:
+    import pwd
+    shell = pwd.getpwnam(owner).pw_shell
+    return shell if shell and os.path.exists(shell) and not shell.endswith(("nologin", "false")) else "/bin/bash"
+
+
+async def run_command(data: dict, owner: str) -> tuple[int, dict]:
+    """Run one shell command as the owner, in a login shell, and answer with its output."""
+    import signal
+    command = data.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return 400, {"error": "No command."}
+    timeout = clamp(data.get("timeout") or 120, 120, COMMAND_TIMEOUT_MAX)
+    unit = f"nanoborealis-command-{secrets.token_hex(4)}.service"
+    session = in_owner_session(owner, "--pipe", f"--unit={unit}", "--description=NanoBorealis: a command from a paired device",
+                               f"--property=RuntimeMaxSec={timeout + 5}",
+                               "--", owner_shell(owner), "-l", "-c", command)
+    process = await asyncio.create_subprocess_exec(
+        *(session or ["runuser", "-l", owner, "-c", command]), stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, cwd="/", start_new_session=True)
+    timed_out = False
+    try:
+        output, _ = await asyncio.wait_for(process.communicate(), timeout)
+    except asyncio.TimeoutError:
+        timed_out = True
+        os.killpg(process.pid, signal.SIGKILL)
+        stop = as_owner(owner, "systemctl", "--user", "stop", unit) if session else None
+        if stop:  # the command itself runs in the owner's manager, which keeps it going otherwise
+            await asyncio.to_thread(subprocess.run, stop, capture_output=True, timeout=30)
+        output, _ = await process.communicate()
+    return 200, {"exit": None if timed_out else process.returncode, "timed_out": timed_out,
+                 "output": output[-OUTPUT_LIMIT:].decode(errors="replace")}
+
+
+async def open_terminal(target: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, owner: str,
+                        device_id: str, address: str) -> None:
+    """A login shell as the owner in a pseudo-terminal, carried over this connection in frames."""
+    import fcntl
+    import signal
+    import struct
+    import termios
+    query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(target).query))
+    master, slave = os.openpty()
+
+    def resize(rows: object, cols: object) -> None:
+        fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", clamp(rows, 24, 500), clamp(cols, 80, 1000), 0, 0))
+
+    resize(query.get("rows"), query.get("cols"))
+    environment = {"TERM": "xterm-256color", "LANG": os.environ.get("LANG") or "C.UTF-8",
+                   "PATH": "/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin"}
+    if query.get("mode") == "console":  # the app's line-by-line console: no pagers, colors or cursor games
+        # Apps that follow cursor moves and erasing (progress=1) get a real terminal type, so progress
+        # bars draw: with TERM=dumb, tools like bootc's hide them and seem to hang until they finish.
+        environment.update(TERM="xterm" if query.get("progress") == "1" else "dumb", PAGER="cat",
+                           SYSTEMD_PAGER="cat", GIT_PAGER="cat", NO_COLOR="1", SYSTEMD_COLORS="0")
+    # In the owner's own session when there is one (see in_owner_session): systemd-run gives the
+    # shell a terminal of its own there and relays it to this one, window size included. setsid
+    # --ctty makes this terminal the controlling one, so job control and Ctrl+C work as they do at
+    # the computer.
+    session = in_owner_session(owner, "--pty", f"--description=NanoBorealis: a terminal for device {device_id}",
+                               *(f"--setenv={k}={v}" for k, v in environment.items() if k != "PATH"),
+                               "--", owner_shell(owner), "-l")
+    process = subprocess.Popen(["setsid", "--ctty", *(session or ["runuser", "-l", owner])], stdin=slave,
+                               stdout=slave, stderr=slave, env=environment, cwd="/", close_fds=True)
+    os.close(slave)
+    writer.write(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: nanoborealis-terminal\r\nConnection: Upgrade\r\n\r\n")
+    await writer.drain()
+    log(f"terminal opened for device {device_id} ({address}) as {owner}")
+    loop = asyncio.get_running_loop()
+    output: asyncio.Queue[bytes] = asyncio.Queue()
+
+    def readable() -> None:
+        try:
+            data = os.read(master, 65536)
+        except OSError:  # EIO: the shell has ended
+            data = b""
+        if not data:
+            loop.remove_reader(master)
+        output.put_nowait(data)
+
+    loop.add_reader(master, readable)
+
+    async def to_device() -> None:
+        while data := await output.get():
+            writer.write(frame(b"d", data))
+            await writer.drain()
+
+    async def from_device() -> None:
+        while True:
+            head = await reader.readexactly(5)
+            kind, length = head[:1], int.from_bytes(head[1:], "big")
+            if length > 1 << 20:
+                return
+            payload = await reader.readexactly(length)
+            if kind == b"d":
+                view = memoryview(payload)
+                while view:
+                    view = view[os.write(master, view):]
+            elif kind == b"r":
+                rows, _, cols = payload.decode(errors="replace").partition(" ")
+                resize(rows, cols)
+
+    sending, receiving = asyncio.create_task(to_device()), asyncio.create_task(from_device())
+    try:
+        done, _ = await asyncio.wait({sending, receiving}, return_when=asyncio.FIRST_COMPLETED)
+        if sending in done and not sending.exception():  # the shell ended by itself
+            code = await asyncio.to_thread(process.wait)
+            writer.write(frame(b"x", str(code).encode()))
+            await writer.drain()
+    except (ConnectionError, ssl.SSLError, OSError):
+        pass
+    finally:
+        sending.cancel()
+        receiving.cancel()
+        loop.remove_reader(master)
+        os.close(master)  # hangs the terminal up: what still runs in it gets SIGHUP
+        try:
+            await asyncio.wait_for(asyncio.to_thread(process.wait), 5)
+        except asyncio.TimeoutError:
+            os.killpg(process.pid, signal.SIGKILL)
+        log(f"terminal closed for device {device_id}")
+
+
+# -- HTTP ---------------------------------------------------------------------------------------
+
+REASONS = {200: "OK", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found",
+           409: "Conflict", 429: "Too Many Requests", 500: "Internal Server Error", 502: "Bad Gateway"}
+
+
+def header(headers: list[tuple[str, str]], name: str) -> str:
+    return next((value for key, value in headers if key.lower() == name), "")
+
+
+async def reply(writer: asyncio.StreamWriter, status: int, payload: dict) -> None:
+    body = json.dumps(payload).encode()
+    writer.write(f"HTTP/1.1 {status} {REASONS.get(status, 'Error')}\r\nContent-Type: application/json\r\n"
+                 f"Content-Length: {len(body)}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n".encode()
+                 + body)
+    try:
+        await writer.drain()
+    except (ConnectionError, ssl.SSLError, OSError):
+        pass
+
+
+def parse_head(raw: bytes) -> tuple[str, str, str, list[tuple[str, str]]]:
+    lines = raw.decode("latin-1").split("\r\n")
+    parts = lines[0].split(" ")
+    if len(parts) != 3 or not parts[2].startswith("HTTP/1.") or not parts[1].startswith("/"):
+        raise ValueError("not an HTTP request")
+    headers = []
+    for line in lines[1:]:
+        name, colon, value = line.partition(":")
+        if not colon or not name or name != name.strip() or any(c in name for c in " \t"):
+            raise ValueError("bad header")
+        headers.append((name, value.strip()))
+    return parts[0], parts[1], parts[2], headers
+
+
+async def local(method: str, target: str, headers: list[tuple[str, str]], reader: asyncio.StreamReader,
+                writer: asyncio.StreamWriter, address: str) -> None:
+    """This service's own endpoints: pairing, unpairing, and a paired device's terminal and commands."""
+    path = target.split("?", 1)[0]
+    if method == "GET" and path == "/nanoborealis/hello":
+        return await reply(writer, 200, {"service": "nanoborealis-remote", "pairing": 1, "terminal": 1, "admin": 1,
+                                         "machine": MACHINE})
+    if (method, path) in ADMIN_ROUTES or (path.startswith(HALL_PREFIX) and method in ("GET", "POST", "DELETE")):
+        return await admin(method, target, headers, reader, writer, address)
+    owner = None
+    if path in ("/nanoborealis/terminal", "/nanoborealis/command"):
+        device_id = devices.find(header(headers, DEVICE_HEADER))
+        if device_id is None:
+            return await reply(writer, 401, {"error": "This device isn't paired with this computer."})
+        owner = owner_of(device_id)
+        if owner is None:
+            return await reply(writer, 403, {"error": "Pair this device again to use a terminal: it was paired "
+                                                      "before terminals, or with nobody at this computer's screen."})
+        devices.seen(device_id, address)
+        if path == "/nanoborealis/terminal":
+            if method != "GET" or header(headers, "upgrade").lower() != "nanoborealis-terminal":
+                return await reply(writer, 400, {"error": "Bad request."})
+            async with live.using(device_id, "terminal", address):
+                return await open_terminal(target, reader, writer, owner, device_id, address)
+    routes = {"/nanoborealis/pair/start": pair_start, "/nanoborealis/pair/reveal": pair_reveal,
+              "/nanoborealis/pair/finish": pair_finish}
+    if method != "POST" or (path not in routes and path not in ("/nanoborealis/unpair", "/nanoborealis/command")):
+        return await reply(writer, 404, {"error": "Not found."})
+    try:
+        length = int(header(headers, "content-length") or 0)
+        if not 0 <= length <= BODY_LIMIT:
+            raise ValueError("too long")
+        data = json.loads(await asyncio.wait_for(reader.readexactly(length), 15) if length else b"{}")
+        if not isinstance(data, dict):
+            raise ValueError("not an object")
+    except (ValueError, asyncio.TimeoutError, asyncio.IncompleteReadError):
+        return await reply(writer, 400, {"error": "Bad request."})
+    if path == "/nanoborealis/command" and owner is not None:
+        status, payload = await run_command(data, owner)
+        return await reply(writer, status, payload)
+    if path == "/nanoborealis/unpair":
+        device_id = devices.find(header(headers, DEVICE_HEADER))
+        if device_id is None:
+            return await reply(writer, 401, {"error": "This device isn't paired with this computer."})
+        devices.remove(device_id)
+        log(f"device {device_id} unpaired itself")
+        return await reply(writer, 200, {"ok": True})
+    await drop_expired()
+    status, payload = await routes[path](data, address)
+    await reply(writer, status, payload)
+
+
+async def pipe(source: asyncio.StreamReader, sink: asyncio.StreamWriter) -> None:
+    try:
+        while data := await source.read(65536):
+            sink.write(data)
+            await sink.drain()
+    except (ConnectionError, ssl.SSLError, OSError, asyncio.IncompleteReadError):
+        pass
+    finally:
+        try:
+            if sink.can_write_eof():
+                sink.write_eof()
+            else:
+                sink.close()
+        except (OSError, RuntimeError, ssl.SSLError):
+            pass
+
+
+async def proxy(method: str, target: str, version: str, headers: list[tuple[str, str]],
+                reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    """Pass a paired device's request on to the WebUI: one request per connection, or one
+    WebSocket. The device's password stays here; the WebUI's own password is added where it's needed."""
+    path = target.split("?", 1)[0]
+    upgrade = header(headers, "upgrade").lower() == "websocket"
+    kept = []
+    for name, value in headers:
+        lower = name.lower()
+        if lower == DEVICE_HEADER or (lower == "authorization" and path == UPSTREAM_BOOTSTRAP):
+            continue
+        if not upgrade and lower in ("connection", "keep-alive", "proxy-connection"):
+            continue
+        kept.append((name, value))
+    try:
+        if path == UPSTREAM_BOOTSTRAP:
+            kept.append(("Authorization", f"Bearer {await asyncio.to_thread(webui_secret)}"))
+    except (RuntimeError, OSError, KeyError, subprocess.SubprocessError) as e:
+        log(str(e))
+        return await reply(writer, 502, {"error": "The agent isn't set up on this computer yet."})
+    if not upgrade:
+        kept.append(("Connection", "close"))
+    head = f"{method} {target} {version}\r\n" + "".join(f"{n}: {v}\r\n" for n, v in kept) + "\r\n"
+    try:
+        up_reader, up_writer = await asyncio.wait_for(
+            asyncio.open_connection(UPSTREAM_HOST, UPSTREAM_PORT, limit=HEAD_LIMIT), 10)
+    except (OSError, asyncio.TimeoutError):
+        return await reply(writer, 502, {"error": "The agent isn't running on this computer."})
+    try:
+        up_writer.write(head.encode("latin-1"))
+        await up_writer.drain()
+        if path == UPSTREAM_BOOTSTRAP:
+            first = await up_reader.read(65536)
+            if first.startswith((b"HTTP/1.1 401", b"HTTP/1.0 401")):
+                forget_webui_secret()
+            writer.write(first)
+            await writer.drain()
+        await asyncio.gather(pipe(reader, up_writer), pipe(up_reader, writer))
+    except (ConnectionError, ssl.SSLError, OSError):
+        pass
+    finally:
+        up_writer.close()
+
+
+async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    address = str((writer.get_extra_info("peername") or ("?",))[0])
+    try:
+        try:
+            raw = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 30)
+            method, target, version, headers = parse_head(raw[:-4])
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, asyncio.TimeoutError, ValueError,
+                ConnectionError, ssl.SSLError, OSError):
+            return
+        path = target.split("?", 1)[0]
+        if path.startswith("/nanoborealis/"):
+            return await local(method, target, headers, reader, writer, address)
+        device_id = devices.find(header(headers, DEVICE_HEADER))
+        if device_id is None:
+            return await reply(writer, 401, {"error": "This device isn't paired with this computer. "
+                                                      "Pair it from the NanoBorealis app."})
+        devices.seen(device_id, address)
+        if header(headers, "upgrade").lower() == "websocket":  # the app's live link to the agent
+            async with live.using(device_id, "app", address):
+                await proxy(method, target, version, headers, reader, writer)
+        else:
+            await proxy(method, target, version, headers, reader, writer)
+    finally:
+        try:
+            writer.close()
+        except (OSError, RuntimeError, ssl.SSLError):
+            pass
+
+
+# -- Managing the agent -------------------------------------------------------------------------
+# The app's control center: an administrator's paired devices manage the agent from it. Most of it
+# (models, channels, skills, schedules) goes through nanobot's own WebUI settings; this is what
+# nanobot can't do for itself: its container's state, logs and restarts, its OpenRouter key (a
+# Podman secret) and what that key has spent, its memory files, and this computer's paired
+# devices. Everything that touches the agent's files runs as the agent's own account, never as
+# root: the agent may have put anything in its home, links to system files included.
+
+TEST_AGENT_HOME = os.environ.get("NANOBOREALIS_REMOTE_TEST_AGENT_HOME")  # tests: a folder as the agent's home
+ADMIN_BODY_LIMIT = 512 * 1024
+AGENT_UNIT = "nanobot.service"
+AGENT_CONTAINER = "nanobot"
+AGENT_HOME_INSIDE = "/home/nanobot"  # the agent's home, inside its container
+WORKSPACE = ".nanobot/workspace"
+KEY_SECRET = "openrouter_api_key"
+
+# Run as the agent: file work in its home, confined to it by the agent's own permissions as well.
+AGENT_FILES = r"""
+import json, os, sys, time
+root, op = os.path.realpath(sys.argv[1]), sys.argv[2]
+path = os.path.realpath(os.path.join(root, sys.argv[3])) if len(sys.argv) > 3 else root
+if path != root and not path.startswith(root + os.sep):
+    sys.exit("outside the agent's home")
+if op == "read":
+    with open(path, encoding="utf-8", errors="replace") as f:
+        sys.stdout.write(f.read(524288))
+elif op == "write":
+    data = sys.stdin.read()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temporary = f"{path}.nanoborealis-tmp-{os.getpid()}"  # one name per writer: two at once shared one file
+    with open(temporary, "w", encoding="utf-8") as f:
+        f.write(data)
+    if os.path.exists(path):
+        os.chmod(temporary, os.stat(path).st_mode & 0o777)
+    os.replace(temporary, path)
+elif op == "list":
+    found = []
+    for base, dirs, files in os.walk(path):
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d != "__pycache__")
+        for name in sorted(files):
+            full = os.path.join(base, name)
+            try:
+                st = os.lstat(full)
+            except OSError:
+                continue
+            found.append({"path": os.path.relpath(full, root), "size": st.st_size, "modified": int(st.st_mtime)})
+            if len(found) >= 2000:
+                break
+        if len(found) >= 2000 or base.count(os.sep) - path.count(os.sep) >= 4:
+            dirs[:] = []
+    print(json.dumps(found))
+elif op == "delete":
+    os.remove(path)
+"""
+
+
+def agent_run(args: list[str], stdin: str | None = None, timeout: float = 60) -> subprocess.CompletedProcess:
+    """A command as the agent's account (in tests, as this one)."""
+    if TEST_AGENT_HOME is not None:
+        return subprocess.run(args, input=stdin, capture_output=True, text=True, timeout=timeout, cwd="/")
+    import pwd
+    agent = pwd.getpwnam(AGENT_USER)
+    return subprocess.run(
+        ["runuser", "-u", AGENT_USER, "--", "env", f"HOME={agent.pw_dir}", f"XDG_RUNTIME_DIR=/run/user/{agent.pw_uid}",
+         f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{agent.pw_uid}/bus", *args],
+        input=stdin, capture_output=True, text=True, timeout=timeout, cwd="/")
+
+
+def agent_podman(*args: str, stdin: str | None = None, timeout: float = 60) -> subprocess.CompletedProcess:
+    """podman as the agent, started by the agent's own user manager the way its container is, never
+    from in here. The first podman command after boot sets up rootless podman for every later one,
+    the agent's container included; set up inside this service's sandbox (read-only cgroups, a
+    private /tmp), it leaves the agent unable to start ("mkdir /sys/fs/cgroup/...: read-only file
+    system")."""
+    return agent_run(["systemd-run", "--user", "--quiet", "--collect", "--pipe", "--wait", "--expand-environment=no",
+                      f"--description=NanoBorealis: podman {args[0] if args else ''} for the app", "--", "podman", *args],
+                     stdin=stdin, timeout=timeout)
+
+
+def agent_file(op: str, relative: str = "", content: str | None = None) -> str:
+    """File work in the agent's home, done inside its running container (as `nanoborealis compute`
+    does): its files are its container's, and reading them from out here is refused."""
+    rest = [op, *([relative] if relative else [])]
+    if TEST_AGENT_HOME is not None:
+        result = agent_run(["python3", "-c", AGENT_FILES, TEST_AGENT_HOME, *rest], stdin=content)
+    else:
+        result = agent_podman("exec", "-i", AGENT_CONTAINER, "python3", "-c", AGENT_FILES, AGENT_HOME_INSIDE, *rest,
+                              stdin=content)
+    if result.returncode != 0:
+        detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else f"{op} failed"
+        if any(sign in detail.lower() for sign in ("no such container", "not running", "state improper")):
+            raise RuntimeError("The agent isn't running. Restart it from the Overview, then try again.")
+        raise RuntimeError(detail)
+    return result.stdout
+
+
+def agent_systemctl(*args: str, timeout: float = 30) -> subprocess.CompletedProcess:
+    """systemctl for the agent's own user manager, over its user bus (`-M` doesn't work in here)."""
+    return agent_run(["systemctl", "--user", *args], timeout=timeout)
+
+
+def agent_answers() -> bool:
+    """Whether the agent's WebUI takes connections: the surest sign it's up."""
+    try:
+        with socket.create_connection((UPSTREAM_HOST, UPSTREAM_PORT), timeout=2):
+            return True
+    except OSError:
+        return False
+
+
+def unit_state() -> dict:
+    answering = agent_answers()
+    if TEST_AGENT_HOME is not None:
+        return {"running": True, "state": "active", "since": None}
+    result = agent_systemctl("show", AGENT_UNIT, "-p", "ActiveState", "-p", "SubState", "-p", "ActiveEnterTimestamp",
+                             timeout=20)
+    props = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    if not props:
+        log(f"couldn't ask systemd about the agent: {result.stderr.strip()[:200]}")
+    state = props.get("SubState") or props.get("ActiveState") or ("running" if answering else "stopped")
+    return {"running": answering or props.get("ActiveState") == "active", "state": state,
+            "since": props.get("ActiveEnterTimestamp") or None}
+
+
+def os_release() -> dict:
+    info = {}
+    try:
+        for line in Path("/usr/lib/os-release").read_text().splitlines():
+            key, _, value = line.partition("=")
+            if key in ("PRETTY_NAME", "VERSION", "IMAGE_VERSION", "VERSION_ID"):
+                info[key.lower()] = value.strip().strip('"')
+    except OSError:
+        pass
+    return info
+
+
+async def agent_overview(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    return 200, {"machine": MACHINE, "os": os_release(), "agent": await asyncio.to_thread(unit_state)}
+
+
+FILE_ROOTS = (WORKSPACE, ".nanobot/cron")
+
+
+def allowed_file(path: object) -> str | None:
+    if not isinstance(path, str) or not path or "\0" in path or path.startswith("/") or ".." in path.split("/"):
+        return None
+    return path if any(path == root or path.startswith(root + "/") for root in FILE_ROOTS) else None
+
+
+async def agent_file_read(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    path = allowed_file(query.get("path"))
+    if path is None:
+        return 400, {"error": "That file isn't one the app manages."}
+    try:
+        return 200, {"path": path, "content": await asyncio.to_thread(agent_file, "read", path)}
+    except RuntimeError as e:
+        return 404, {"error": str(e)}
+
+
+async def agent_file_list(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    path = allowed_file(query.get("path") or WORKSPACE)
+    if path is None:
+        return 400, {"error": "That folder isn't one the app manages."}
+    try:
+        return 200, {"path": path, "files": json.loads(await asyncio.to_thread(agent_file, "list", path) or "[]")}
+    except (RuntimeError, ValueError) as e:
+        return 404, {"error": str(e)}
+
+
+async def agent_file_write(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    path, content = allowed_file(data.get("path")), data.get("content")
+    if path is None or not isinstance(content, str):
+        return 400, {"error": "That file isn't one the app manages."}
+    if data.get("delete"):
+        await asyncio.to_thread(agent_file, "delete", path)
+        log(f"{owner} deleted the agent's {path}")
+        return 200, {"path": path, "deleted": True}
+    await asyncio.to_thread(agent_file, "write", path, content)
+    log(f"{owner} saved the agent's {path}")
+    return 200, {"path": path, "saved": True}
+
+
+async def agent_logs(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    lines = clamp(query.get("lines") or 300, 300, 5000)
+    if TEST_AGENT_HOME is not None:
+        return 200, {"lines": []}
+    import pwd
+    uid = pwd.getpwnam(AGENT_USER).pw_uid
+    result = await asyncio.to_thread(subprocess.run, ["journalctl", f"_UID={uid}", "-n", str(lines), "--no-pager",
+                                                      "-o", "short-iso", "-q"],
+                                     capture_output=True, text=True, timeout=30)
+    return 200, {"lines": result.stdout.splitlines()[-lines:]}
+
+
+async def restart_agent() -> None:
+    """Restart the agent's container, with its rootless podman set up afresh on the way (its pause
+    process goes too), which also clears a setup that keeps the container from starting."""
+    if TEST_AGENT_HOME is not None:
+        return
+
+    def restart() -> subprocess.CompletedProcess:
+        agent_systemctl("stop", AGENT_UNIT, timeout=300)
+        agent_systemctl("stop", "podman-pause-*.scope", timeout=60)
+        return agent_systemctl("start", AGENT_UNIT, timeout=300)
+
+    result = await asyncio.to_thread(restart)
+    if result.returncode != 0:
+        log(f"the agent didn't start again: {result.stderr.strip()[:300]}")
+        raise RuntimeError("The agent didn't start again. Its logs say why.")
+
+
+async def agent_restart(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    log(f"{owner} restarted the agent")
+    await restart_agent()
+    return 200, {"agent": await asyncio.to_thread(unit_state)}
+
+
+def openrouter_key() -> str:
+    if TEST_AGENT_HOME is not None:
+        return (Path(TEST_AGENT_HOME) / ".openrouter-key").read_text().strip() if \
+            (Path(TEST_AGENT_HOME) / ".openrouter-key").exists() else ""
+    result = agent_podman("secret", "inspect", "--showsecret", "--format", "{{.SecretData}}", KEY_SECRET)
+    return result.stdout.strip()
+
+
+_usage: tuple[float, dict] | None = None
+
+
+async def agent_usage(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    """What the agent's OpenRouter key has spent (OpenRouter's own count). The key never leaves."""
+    global _usage
+    if _usage is not None and time.time() - _usage[0] < 60 and not query.get("fresh"):
+        return 200, _usage[1]
+
+    def fetch() -> dict:
+        import urllib.request
+        key = openrouter_key()
+        if not key:
+            return {"error": "The agent has no OpenRouter key."}
+        request = urllib.request.Request("https://openrouter.ai/api/v1/key",
+                                         headers={"Authorization": f"Bearer {key}", "User-Agent": "NanoBorealis"})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            info = json.loads(response.read()).get("data") or {}
+        keep = ("label", "usage", "usage_daily", "usage_weekly", "usage_monthly", "limit", "limit_remaining",
+                "is_free_tier")
+        return {k: info.get(k) for k in keep}
+
+    try:
+        answer = await asyncio.to_thread(fetch)
+    except Exception as e:  # offline, or OpenRouter turned the key down
+        return 502, {"error": f"OpenRouter didn't answer: {e}"}
+    if "error" not in answer:
+        _usage = (time.time(), answer)
+    return 200, answer
+
+
+HALL_STATE = Path(os.environ.get("NANOBOREALIS_REMOTE_HALL_STATE", "/var/lib/nanoborealis/hall"))
+HALL_URL = os.environ.get("NANOBOREALIS_REMOTE_HALL_URL", "http://127.0.0.1:11437")
+
+
+HALL_PREFIX = "/nanoborealis/hall/"
+
+
+def hall_proxy(method: str, path: str, query_string: str, body: dict | None) -> tuple[int, dict]:
+    """The council's Hall, for the app on an administrator's device: it speaks there as "you"."""
+    import urllib.error
+    import urllib.request
+    try:
+        token = (HALL_STATE / "admin.token").read_text().strip()
+    except OSError:
+        return 404, {"error": "This computer has no council yet. Seat one with: nanoborealis council apply"}
+    url = HALL_URL + path + (f"?{query_string}" if query_string else "")
+    request = urllib.request.Request(url, method=method, data=json.dumps(body).encode() if body is not None else None,
+                                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        try:
+            return error.code, json.loads(error.read())
+        except ValueError:
+            return error.code, {"error": f"The Hall answered HTTP {error.code}."}
+    except (urllib.error.URLError, OSError):
+        return 503, {"error": "The council's Hall isn't running. Start it with: nanoborealis council apply"}
+
+
+def hall_key(key: str) -> None:
+    """The council's Hall asks free models with the same key when it escalates; keep its copy current."""
+    import urllib.request
+    try:
+        token = (HALL_STATE / "admin.token").read_text().strip()
+    except OSError:
+        return  # no council on this computer
+    request = urllib.request.Request(f"{HALL_URL}/escalation-key", data=json.dumps({"key": key}).encode(), method="POST",
+                                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(request, timeout=10).close()
+    except OSError as e:
+        log(f"couldn't give the council's Hall the new key: {e}")
+
+
+async def set_agent_key(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    """A new OpenRouter key for the agent (typed into the app by its owner). The agent restarts."""
+    global _usage
+    key = data.get("key")
+    if not isinstance(key, str) or not re.fullmatch(r"sk-or-[\w\-]{16,200}", key.strip()):
+        return 400, {"error": "That doesn't look like an OpenRouter key (they start with sk-or-)."}
+    if TEST_AGENT_HOME is not None:
+        (Path(TEST_AGENT_HOME) / ".openrouter-key").write_text(key.strip())
+    else:
+        result = await asyncio.to_thread(agent_podman, "secret", "create", "--replace", KEY_SECRET, "-",
+                                         stdin=key.strip())
+        if result.returncode != 0:
+            return 502, {"error": f"Couldn't save the key: {result.stderr.strip()[:200]}"}
+    _usage = None
+    log(f"{owner} gave the agent a new OpenRouter key")
+    await asyncio.to_thread(hall_key, key.strip())
+    await restart_agent()
+    return 200, {"saved": True}
+
+
+async def list_devices(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    devices.load()
+    keep = ("name", "owner", "paired", "seen", "address", "here")
+    return 200, {"devices": [{"id": k, "this": k == device_id, **{f: v.get(f) for f in keep}}
+                             for k, v in sorted(devices.by_id.items(), key=lambda kv: -int(kv[1].get("seen", 0)))]}
+
+
+async def remove_device(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    target = data.get("id")
+    if not isinstance(target, str) or target not in devices.by_id:
+        return 404, {"error": "No such device."}
+    devices.remove(target)
+    log(f"{owner} unpaired device {target}")
+    return 200, {"removed": target}
+
+
+FREE_ONLY = {"provider": {"max_price": {"prompt": 0, "completion": 0, "request": 0, "image": 0}}}
+FREE_DEFAULT = "nvidia/nemotron-3-ultra-550b-a55b:free"
+
+
+def free_only_config(config: dict) -> bool:
+    """Keep an agent's config on free models: nanobot's hidden "default" preset (made from
+    agents.defaults.model, a billed model when unset) points at a free one, and OpenRouter is
+    told to refuse any request that would cost money (the app's "Free models only"). Only where
+    never set, so a deliberate choice stands. True when anything changed."""
+    changed = False
+    defaults = config.setdefault("agents", {}).setdefault("defaults", {})
+    if not defaults.get("model"):
+        defaults["model"], defaults["provider"] = FREE_DEFAULT, "openrouter"
+        changed = True
+    openrouter = config.setdefault("providers", {}).setdefault("openrouter", {})
+    if openrouter.get("extraBody") is None and openrouter.get("extra_body") is None:
+        openrouter["extraBody"] = json.loads(json.dumps(FREE_ONLY))
+        changed = True
+    return changed
+
+
+async def keep_agent_free() -> None:
+    """Apply free_only_config to agents set up before it existed, once per computer, once the
+    agent's container is up and answering (nanobot rereads its config by itself). Until then it
+    leaves the agent alone."""
+    marker = STATE / "free-only-applied"
+
+    def apply() -> bool:
+        config = json.loads(agent_file("read", ".nanobot/config.json") or "{}")
+        if not isinstance(config, dict):
+            raise ValueError("the agent's config isn't a JSON object")
+        if free_only_config(config):
+            agent_file("write", ".nanobot/config.json", json.dumps(config, indent=2) + "\n")
+            return True
+        return False
+
+    told = False
+    while not marker.exists():
+        if TEST_AGENT_HOME is not None or await asyncio.to_thread(agent_answers):
+            try:
+                if await asyncio.to_thread(apply):
+                    log("kept the agent to free models (its default preset, and OpenRouter's price limit)")
+                marker.touch()
+                return
+            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as e:
+                if not told:
+                    log(f"couldn't check that the agent keeps to free models yet, trying again every minute: {e}")
+                    told = True
+        await asyncio.sleep(60)
+
+
+def host_time_zone() -> str:
+    """This computer's IANA time zone (America/New_York), or "" when it can't be told."""
+    try:
+        target = os.path.realpath("/etc/localtime")
+    except OSError:
+        return ""
+    marker = "/zoneinfo/"
+    return target.split(marker, 1)[1] if marker in target else ""
+
+
+def time_zone_config(config: dict, zone: str) -> bool:
+    """Put the agent on this computer's time zone. Its container runs on UTC, so a schedule asked
+    for "every day at 3 am" was set for 3 am UTC (11 pm in New York), and the agent told the time
+    in UTC. nanobot's own setting does it: agents.defaults.timezone, taken as given in "manual"
+    mode. Schedules the agent made before stay as they were made. True when anything changed."""
+    defaults = config.setdefault("agents", {}).setdefault("defaults", {})
+    changed = False
+    if defaults.get("timezone") != zone:
+        defaults["timezone"] = zone
+        changed = True
+    if defaults.get("timezoneMode") != "manual":
+        defaults["timezoneMode"] = "manual"
+        changed = True
+    return changed
+
+
+async def keep_agent_time_zone() -> None:
+    """Keep the agent's time zone the computer's, checked each hour (a laptop moves), once the
+    agent's container is up and answering."""
+    def apply(zone: str) -> bool:
+        config = json.loads(agent_file("read", ".nanobot/config.json") or "{}")
+        if not isinstance(config, dict):
+            raise ValueError("the agent's config isn't a JSON object")
+        if time_zone_config(config, zone):
+            agent_file("write", ".nanobot/config.json", json.dumps(config, indent=2) + "\n")
+            return True
+        return False
+
+    # After keep_agent_free has had its turn: both rewrite the same config file.
+    while not (STATE / "free-only-applied").exists():
+        await asyncio.sleep(5)
+    told = False
+    while True:
+        zone = host_time_zone()
+        if zone and (TEST_AGENT_HOME is not None or await asyncio.to_thread(agent_answers)):
+            try:
+                if await asyncio.to_thread(apply, zone):
+                    log(f"set the agent's time zone to this computer's ({zone})")
+                told = False
+                await asyncio.sleep(3600)
+                continue
+            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as e:
+                if not told:
+                    log(f"couldn't set the agent's time zone yet, trying again every minute: {e}")
+                    told = True
+        await asyncio.sleep(60)
+
+
+# -- The pool, for the app's "lend this computer" -----------------------------------------------
+# `nanoborealis pool join` records the pool's name and exo's exact version; the app runs a node of
+# that same version on the computer it's on (exo nodes only pool with their own version), from the
+# pool image where Podman is, else from a bundle published for that version.
+
+POOL_INFO = Path(os.environ.get("NANOBOREALIS_REMOTE_POOL_INFO", "/etc/nanoborealis/pool.json"))
+POOL_RELEASES = "https://github.com/korxspyre/nanoborealis/releases/download"
+
+
+RELEASES_API = os.environ.get("NANOBOREALIS_REMOTE_RELEASES_API",
+                              "https://api.github.com/repos/korxspyre/nanoborealis/releases?per_page=100")
+_bundles: dict[str, tuple[str, float]] = {}
+
+
+def bundles_url(engine: str) -> str:
+    """Where this exo version's node bundles are: its newest release, pool-node-<exo>-r<run> (the
+    releases are immutable, so every publish is a new one), asked of GitHub at most hourly. The
+    first ever, pool-node-<exo>, when GitHub can't say."""
+    short = engine[:7]
+    cached = _bundles.get(short)
+    if cached and time.time() - cached[1] < 3600:
+        return cached[0]
+    url = f"{POOL_RELEASES}/pool-node-{short}"
+    try:
+        import urllib.request
+        request = urllib.request.Request(RELEASES_API, headers={"Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            releases = json.loads(response.read())
+        found = [r for r in releases if isinstance(r, dict) and str(r.get("tag_name", "")).startswith(f"pool-node-{short}-r")
+                 and not r.get("draft") and r.get("assets")]
+        if found:
+            newest = max(found, key=lambda r: str(r.get("published_at") or ""))
+            url = f"{POOL_RELEASES}/{newest['tag_name']}"
+    except (OSError, ValueError):
+        pass
+    _bundles[short] = (url, time.time())
+    return url
+
+
+async def pool_info(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    try:
+        info = json.loads(POOL_INFO.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 200, {"in_pool": False}
+    engine = str(info.get("engine") or "")
+    return 200, {"in_pool": True, "namespace": str(info.get("namespace") or ""), "engine": engine,
+                 "image": str(info.get("image") or ""),
+                 "bundles": await asyncio.to_thread(bundles_url, engine) if engine else ""}
+
+
+# -- Which pool node this computer talks to -------------------------------------------------------
+# Any exo node's API controls the whole pool, so this computer needn't run one to coordinate it:
+# devices lending through the app check in here (their node's port; their address this service
+# already knows), and every half minute the first node that answers, this computer's own included
+# when it has one, is written to POOL_API_FILE, which pool.py and the relay follow.
+
+POOL_NODES = STATE / "pool-nodes.json"
+POOL_API_FILE = Path(os.environ.get("NANOBOREALIS_REMOTE_POOL_API_FILE", "/run/nanoborealis/pool-api"))
+POOL_EVERY = float(os.environ.get("NANOBOREALIS_REMOTE_POOL_EVERY", "30"))
+LOCAL_NODE = "127.0.0.1:52415"
+
+
+def lenders() -> dict:
+    try:
+        found = json.loads(POOL_NODES.read_text(encoding="utf-8"))
+        return found if isinstance(found, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+async def pool_lend(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    """A paired device started (or stopped) lending itself to the pool: where its node answers."""
+    found = lenders()
+    if data.get("lending", True):
+        ports = data.get("ports", [data.get("port", 52415)])  # one per node: its GPU's, its processor's
+        if (not isinstance(ports, list) or not 1 <= len(ports) <= 4
+                or not all(isinstance(p, int) and not isinstance(p, bool) and 1 <= p <= 65535 for p in ports)):
+            return 400, {"error": "ports are 1 to 4 port numbers."}
+        found[device_id] = {"ports": ports, "since": int(time.time())}
+        log(f"{owner}'s device {device_id} lends itself to the pool (its nodes on port(s) {', '.join(map(str, ports))})")
+    else:
+        found.pop(device_id, None)
+        log(f"{owner}'s device {device_id} stopped lending itself to the pool")
+    tmp = POOL_NODES.with_suffix(".tmp")
+    tmp.write_text(json.dumps(found), encoding="utf-8")
+    tmp.replace(POOL_NODES)
+    return 200, {"lending": bool(data.get("lending", True))}
+
+
+def node_answers(address: str) -> bool:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://{address}/node_id", timeout=3) as response:
+            return response.status == 200
+    except (OSError, ValueError):
+        return False
+
+
+def pool_candidates() -> list[str]:
+    """This computer's own node first, then the lenders', newest check-in first."""
+    devices.load()
+    found = [LOCAL_NODE]
+    for device_id, entry in sorted(lenders().items(), key=lambda kv: -int(kv[1].get("since", 0))):
+        address = str((devices.by_id.get(device_id) or {}).get("address") or "")
+        for port in entry.get("ports") or [entry.get("port", 52415)]:
+            candidate = f"{address}:{port}"
+            if address and candidate not in found:  # the app on this computer lends through its own node
+                found.append(candidate)
+    return found
+
+
+def point_pool_api() -> str | None:
+    if not POOL_INFO.exists():  # in no pool: nothing to point at
+        POOL_API_FILE.unlink(missing_ok=True)
+        return None
+    try:
+        current = POOL_API_FILE.read_text().strip()
+    except OSError:
+        current = ""
+    candidates = pool_candidates()
+    chosen = current if current in candidates and node_answers(current) else \
+        next((c for c in candidates if node_answers(c)), None)
+    if chosen is None:
+        POOL_API_FILE.unlink(missing_ok=True)
+    elif chosen != current:
+        tmp = POOL_API_FILE.with_suffix(".tmp")
+        tmp.write_text(chosen + "\n")
+        tmp.chmod(0o644)
+        tmp.replace(POOL_API_FILE)
+        log(f"the pool is reached through the node at {chosen}")
+    return chosen
+
+
+async def follow_pool_api() -> None:
+    while True:
+        try:
+            await asyncio.to_thread(point_pool_api)
+        except OSError as e:
+            log(f"couldn't update which pool node to use: {e}")
+        await asyncio.sleep(POOL_EVERY)
+
+
+# -- The pool's page in the control center --------------------------------------------------------
+# The same pool.py as `nanoborealis pool`, run as the owner, so the planner's policy and bench
+# measurements are the ones they see from a terminal. Changes that move models (apply, drain, a
+# benchmark) take minutes: they run one at a time in the background, and the page follows them.
+
+POOL_PY = os.environ.get("NANOBOREALIS_REMOTE_POOL_PY", "/usr/share/nanoborealis/pool.py")
+POOL_NAME = re.compile(r"[\w][\w.:@/+\-]{0,199}")  # a computer's or a model's name; never an option
+POOL_JOB_LINES = 400
+
+
+@dataclass
+class PoolJob:
+    what: str = ""
+    running: bool = False
+    ok: bool | None = None
+    started: float = 0.0
+    output: deque = field(default_factory=lambda: deque(maxlen=POOL_JOB_LINES))
+    task: object = None  # held here, since asyncio keeps only a weak reference to it
+
+    def public(self) -> dict:
+        return {"what": self.what, "running": self.running, "ok": self.ok, "started": self.started,
+                "output": list(self.output)}
+
+
+pool_job = PoolJob()
+
+
+def pool_command(owner: str, *args: str) -> tuple[list[str], dict]:
+    """pool.py's command line as the owner, and its environment: the pool's exo version for bench
+    records, read from what `pool join` wrote (never from Podman: see the note on in_owner_session)."""
+    env = dict(os.environ, PYTHONUNBUFFERED="1")  # a background change's progress shows line by line
+    try:
+        engine = str(json.loads(POOL_INFO.read_text(encoding="utf-8")).get("engine") or "")
+    except (OSError, ValueError):
+        engine = ""
+    if engine:
+        env["NANOBOREALIS_POOL_ENGINE"] = f"exo@{engine[:12]}"
+    command = [sys.executable, POOL_PY, *args]
+    if TEST_OWNER:
+        return command, env
+    import pwd
+    account = pwd.getpwnam(owner)
+    env.update(HOME=account.pw_dir, USER=owner, LOGNAME=owner)
+    return ["runuser", "-u", owner, "--", *command], env
+
+
+async def pool_run(owner: str, *args: str, timeout: float = 180) -> str:
+    """One quick pool.py command's output; RuntimeError with its complaint when it fails."""
+    command, env = pool_command(owner, *args)
+    process = await asyncio.create_subprocess_exec(*command, env=env, cwd="/", stdin=asyncio.subprocess.DEVNULL,
+                                                   stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        out, err = await asyncio.wait_for(process.communicate(), timeout)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.communicate()
+        raise RuntimeError(f"The pool didn't answer within {timeout:.0f} seconds.")
+    if process.returncode != 0:
+        lines = (err or out).decode(errors="replace").strip().splitlines()
+        raise RuntimeError(lines[-1] if lines else f"pool {args[0]} failed")
+    return out.decode(errors="replace")
+
+
+async def pool_json(owner: str, *args: str) -> object:
+    return json.loads(await pool_run(owner, *args))
+
+
+async def pool_background(owner: str, job: PoolJob, *args: str) -> None:
+    command, env = pool_command(owner, *args)
+    try:
+        process = await asyncio.create_subprocess_exec(*command, env=env, cwd="/", stdin=asyncio.subprocess.DEVNULL,
+                                                       stdout=asyncio.subprocess.PIPE,
+                                                       stderr=asyncio.subprocess.STDOUT)
+        assert process.stdout is not None
+        async for line in process.stdout:
+            job.output.append(line.decode(errors="replace").rstrip())
+        job.ok = await process.wait() == 0
+    except (OSError, ValueError) as e:
+        job.output.append(f"couldn't run it: {e}")
+        job.ok = False
+    finally:
+        job.running = False
+        log(f"{owner}'s pool change finished ({job.what}): {'done' if job.ok else 'failed'}")
+
+
+def pool_start(owner: str, what: str, *args: str) -> tuple[int, dict]:
+    global pool_job
+    if pool_job.running:
+        return 409, {"error": f"The pool is still busy: {pool_job.what}. Wait for it to finish."}
+    pool_job = PoolJob(what=what, running=True, started=time.time())
+    log(f"{owner} changed the pool: {what}")
+    pool_job.task = asyncio.get_running_loop().create_task(pool_background(owner, pool_job, *args))
+    return 200, {"job": pool_job.public()}
+
+
+def pool_name(value: object) -> str:
+    if not isinstance(value, str) or not POOL_NAME.fullmatch(value.strip()):
+        raise ValueError("that isn't a computer or model name")
+    return value.strip()
+
+
+async def pool_overview(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    """Everything the page shows: the computers, the proposed loadout and its changes, what's been
+    measured, and the planner's policy. The plan goes first: it refreshes LiveBench's scores when
+    they're old, which the others then read."""
+    _, info = await pool_info(data, query, owner, device_id)
+    result: dict = {**info, "job": pool_job.public()}
+    if not info.get("in_pool"):
+        return 200, result
+    try:
+        result["plan"] = await pool_json(owner, "plan", "--json", *(["--rebuild"] if query.get("rebuild") else []))
+        result["nodes"], result["bench"], result["policy"] = await asyncio.gather(
+            pool_json(owner, "nodes", "--json"), pool_json(owner, "bench", "--results", "--json"),
+            pool_json(owner, "policy"))
+    except (RuntimeError, ValueError) as e:
+        result["error"] = str(e)
+    return 200, result
+
+
+async def pool_job_state(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    return 200, {"job": pool_job.public()}
+
+
+async def pool_apply(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    rebuild = bool(data.get("rebuild"))
+    return pool_start(owner, "rebuilding the loadout" if rebuild else "applying the loadout",
+                      "apply", "--yes", *(["--rebuild"] if rebuild else []))
+
+
+async def pool_drain(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    node = pool_name(data.get("node"))
+    return pool_start(owner, f"draining {node}", "drain", node, "--yes")
+
+
+async def pool_undrain(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    node = pool_name(data.get("node"))
+    await pool_run(owner, "undrain", node)
+    log(f"{owner} let the planner use {node} again")
+    return 200, {"undrained": node}
+
+
+async def pool_bench(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    """Measure what the pool serves, or try one model briefly (on chosen computers)."""
+    trial = data.get("try")
+    if trial:
+        on = [pool_name(n) for n in data.get("on") or []]
+        return pool_start(owner, f"trying {pool_name(trial)}", "bench", "--try", pool_name(trial),
+                          *(["--on", ",".join(on)] if on else []))
+    return pool_start(owner, "measuring the served models", "bench")
+
+
+async def pool_policy(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    """Change some of the planner's settings: {"changes": {"min_gen_tps": 12, "pinned": [...]}}."""
+    changes = data.get("changes")
+    if not isinstance(changes, dict) or not changes:
+        return 400, {"error": "Nothing to change."}
+    pairs = []
+    for key, value in changes.items():
+        if not isinstance(key, str) or not re.fullmatch(r"[a-z_]{1,40}", key):
+            return 400, {"error": f"Unknown setting {key}."}
+        if isinstance(value, list):
+            value = ",".join(pool_name(v) for v in value)
+        elif isinstance(value, bool) or not isinstance(value, (int, float)):
+            return 400, {"error": f"{key} takes a number or a list."}
+        elif isinstance(value, float) and value.is_integer():
+            value = int(value)  # pool.py reads whole-number settings with int()
+        pairs.append(f"{key}={value}")
+    policy = await pool_json(owner, "policy", *pairs)
+    log(f"{owner} changed the pool's policy: {' '.join(pairs)}")
+    return 200, {"policy": policy}
+
+
+ADMIN_ROUTES = {
+    ("GET", "/nanoborealis/agent"): agent_overview,
+    ("GET", "/nanoborealis/agent/file"): agent_file_read,
+    ("GET", "/nanoborealis/agent/files"): agent_file_list,
+    ("POST", "/nanoborealis/agent/file"): agent_file_write,
+    ("GET", "/nanoborealis/agent/logs"): agent_logs,
+    ("POST", "/nanoborealis/agent/restart"): agent_restart,
+    ("GET", "/nanoborealis/agent/usage"): agent_usage,
+    ("POST", "/nanoborealis/agent/key"): set_agent_key,
+    ("GET", "/nanoborealis/devices"): list_devices,
+    ("POST", "/nanoborealis/devices/remove"): remove_device,
+    ("GET", "/nanoborealis/pool"): pool_info,
+    ("POST", "/nanoborealis/pool/lend"): pool_lend,
+    ("GET", "/nanoborealis/pool/overview"): pool_overview,
+    ("GET", "/nanoborealis/pool/job"): pool_job_state,
+    ("POST", "/nanoborealis/pool/apply"): pool_apply,
+    ("POST", "/nanoborealis/pool/drain"): pool_drain,
+    ("POST", "/nanoborealis/pool/undrain"): pool_undrain,
+    ("POST", "/nanoborealis/pool/bench"): pool_bench,
+    ("POST", "/nanoborealis/pool/policy"): pool_policy,
+}
+
+
+async def admin(method: str, target: str, headers: list[tuple[str, str]], reader: asyncio.StreamReader,
+                writer: asyncio.StreamWriter, address: str) -> None:
+    """The control center's endpoints: for devices paired by an administrator of this computer."""
+    path, _, query_string = target.partition("?")
+    device_id = devices.find(header(headers, DEVICE_HEADER))
+    if device_id is None:
+        return await reply(writer, 401, {"error": "This device isn't paired with this computer."})
+    owner = owner_of(device_id)
+    try:
+        import pwd
+        allowed = owner is not None and administrator(pwd.getpwnam(owner).pw_uid) is not None
+    except (ImportError, KeyError):
+        allowed = False
+    if not allowed:
+        return await reply(writer, 403, {"error": "Only devices paired by an administrator of this computer "
+                                                  "can manage its agent."})
+    devices.seen(device_id, address)
+    data: dict = {}
+    if method == "POST":
+        try:
+            length = int(header(headers, "content-length") or 0)
+            if not 0 <= length <= ADMIN_BODY_LIMIT:
+                raise ValueError("too long")
+            data = json.loads(await asyncio.wait_for(reader.readexactly(length), 30) if length else b"{}")
+            if not isinstance(data, dict):
+                raise ValueError("not an object")
+        except (ValueError, asyncio.TimeoutError, asyncio.IncompleteReadError):
+            return await reply(writer, 400, {"error": "Bad request."})
+    query = {k: v[-1] for k, v in urllib.parse.parse_qs(query_string).items()}
+    try:
+        if (method, path) in ADMIN_ROUTES:
+            status, payload = await ADMIN_ROUTES[(method, path)](data, query, owner, device_id)
+        else:
+            status, payload = await asyncio.to_thread(hall_proxy, method, path[len(HALL_PREFIX) - 1:], query_string,
+                                                      data if method == "POST" else None)
+    except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as e:
+        log(f"managing the agent failed ({path}): {e}")
+        status, payload = 502, {"error": str(e) if isinstance(e, RuntimeError) else f"That didn't work: {e}"}
+    await reply(writer, status, payload)
+
+
+# -- The app on this computer -------------------------------------------------------------------
+
+
+def administrator(uid: int) -> str | None:
+    """The account behind uid if it may pair this computer's own app: an administrator (wheel),
+    never root or the agent's account. In tests, any ordinary account."""
+    import grp
+    import pwd
+    try:
+        account = pwd.getpwuid(uid)
+    except KeyError:
+        return None
+    if uid == 0 or account.pw_name == AGENT_USER:
+        return None
+    if TEST_OWNER:
+        return account.pw_name
+    try:
+        wheel = grp.getgrnam("wheel").gr_gid
+    except KeyError:
+        return None
+    return account.pw_name if wheel in os.getgrouplist(account.pw_name, account.pw_gid) else None
+
+
+async def pair_here(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    """Pairs the NanoBorealis app running on this computer, over a local socket and without a PIN:
+    the kernel says who is asking, and an administrator signed in here needs no proof of presence."""
+    import struct
+    try:
+        sock = writer.get_extra_info("socket")
+        _pid, uid, _gid = struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                                                              struct.calcsize("3i")))
+        request = json.loads(await asyncio.wait_for(reader.readline(), 10) or b"{}")
+        owner = administrator(uid)
+        if owner is None:
+            answer = {"error": "Only an administrator of this computer can pair its own NanoBorealis app."}
+        else:
+            name = clean_name(request.get("device") if isinstance(request, dict) else None) or f"This computer ({owner})"
+            device_id, password = devices.add(name, "this computer", owner, here=True)
+            log(f"paired {name} on this computer for {owner} as device {device_id}")
+            answer = {"device_id": device_id, "password": password, "port": PORT, "machine": MACHINE,
+                      "certificate": ssl.DER_cert_to_PEM_cert(CERT_DER)}
+        writer.write(json.dumps(answer).encode() + b"\n")
+        await writer.drain()
+    except (OSError, ValueError, asyncio.TimeoutError):
+        pass
+    finally:
+        writer.close()
+
+
+async def serve_here() -> asyncio.AbstractServer | None:
+    if os.name != "posix":
+        return None
+    path = Path(LOCAL_SOCKET)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.unlink(missing_ok=True)
+        server = await asyncio.start_unix_server(pair_here, path=str(path))
+        os.chmod(path, 0o666)  # anyone may ask; pair_here decides from the kernel's word who is asking
+    except OSError as e:
+        log(f"the app on this computer can't pair by itself ({path}: {e}); it can still pair with a PIN")
+        return None
+    return server
+
+
+def quiet_tls_errors(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+    # Scanners and dropped connections fail the TLS handshake all the time; that's not news.
+    if isinstance(context.get("exception"), (ssl.SSLError, ConnectionError, TimeoutError)):
+        return
+    loop.default_exception_handler(context)
+
+
+async def main() -> None:
+    global CERT_DER
+    cert, key, CERT_DER = certificate()
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(cert, key)
+    asyncio.get_running_loop().set_exception_handler(quiet_tls_errors)
+    server = await asyncio.start_server(handle, host=None, port=PORT, ssl=context, limit=HEAD_LIMIT,
+                                        ssl_handshake_timeout=20)
+    devices.load()
+    log(f"pairing and paired devices on port {PORT} ({len(devices.by_id)} paired); certificate "
+        f"{hashlib.sha256(CERT_DER).hexdigest()[:16]}")
+    here = await serve_here()
+    expiring = asyncio.create_task(expire_regularly())  # PINs of abandoned pairings leave the screen too
+    freeing = asyncio.create_task(keep_agent_free())
+    zoning = asyncio.create_task(keep_agent_time_zone())
+    pointing = asyncio.create_task(follow_pool_api())
+    async with server:
+        await server.serve_forever()
+    expiring.cancel()
+    freeing.cancel()
+    zoning.cancel()
+    pointing.cancel()
+    if here is not None:
+        here.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

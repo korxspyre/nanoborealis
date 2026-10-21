@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+[Unit]
+Description=NanoBorealis: bring Wi-Fi back if it's stuck after sleep
+# Reaching a sleep target and then starting this means the computer has just woken up.
+After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/nanoborealis-wifi-resume
+TimeoutStartSec=240
+
+[Install]
+WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target

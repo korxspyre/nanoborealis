@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+[Unit]
+Description=NanoBorealis Hall (where the council's seats meet: the floor, the task board, votes and trust)
+Documentation=file:///usr/share/nanoborealis/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Started by `nanoborealis council apply`, which hands each seat its token. The admin token stays in
+# the state directory, readable by root only (nanoborealis-remote uses it for the app).
+# All addresses, so seats reach it from their containers; nanoborealis-firewall drops it from the network.
+Environment=NANOBOREALIS_HALL_STATE=/var/lib/nanoborealis/hall NANOBOREALIS_HALL_LISTEN=0.0.0.0:11437
+ExecStart=/usr/libexec/nanoborealis-hall
+StateDirectory=nanoborealis/hall
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

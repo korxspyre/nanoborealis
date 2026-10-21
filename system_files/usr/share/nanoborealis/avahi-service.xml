@@ -1,0 +1,14 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!-- SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 -->
+<!-- Copyright (C) 2026 korxspyre -->
+<!-- Lets the NanoBorealis app on other devices find this computer. `nanoborealis remote off` removes it.
+     Nothing may come before the XML declaration, or Avahi can't read the file. -->
+<service-group>
+  <name replace-wildcards="yes">NanoBorealis on %h</name>
+  <service>
+    <type>_nanoborealis._tcp</type>
+    <port>8766</port>
+    <txt-record>protocol=nanoborealis-pair-v1</txt-record>
+  </service>
+</service-group>

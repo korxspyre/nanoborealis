@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: Apache-2.0
+# From the Universal Blue image template (https://github.com/ublue-os/image-template), changed for
+# NanoBorealis by korxspyre. Like the template, this file is under the Apache License 2.0.
+[customizations.installer.kickstart]
+contents = """
+%post
+bootc switch --mutate-in-place --transport registry ghcr.io/korxspyre/nanoborealis:stable
+%end
+
+%post --log=/var/log/nanoborealis-setup.log
+# Keys and settings the NanoBorealis app wrote past the image on the stick, if any. This runs
+# inside the installed system, so the data lands in its real /var, and the log stays there.
+if [ -x /usr/libexec/nanoborealis-setup-from-stick ]; then
+    /usr/libexec/nanoborealis-setup-from-stick || echo "no setup data on any disk here"
+else
+    echo "this image has no nanoborealis-setup-from-stick"
+fi
+%end
+
+%post --nochroot --log=/mnt/sysimage/var/log/nanoborealis-setup-nochroot.log
+# A second try from the installer's side, in case the installed system couldn't see the stick.
+root="${ANACONDA_ROOT_PATH:-/mnt/sysimage}"
+if [ ! -f "$root/var/lib/nanoborealis/setup.json" ]; then
+    reader="$(ls "$root"/usr/libexec/nanoborealis-setup-from-stick "$root"/ostree/deploy/*/deploy/*/usr/libexec/nanoborealis-setup-from-stick 2>/dev/null | head -n 1)"
+    [ -n "$reader" ] && /usr/bin/python3 "$reader" --root "$root" || echo "no setup data found from the installer side"
+fi
+%end
+
+%post --log=/var/log/nanoborealis-channel.log
+# The build chosen on the stick (stable or dev): follow it from the first boot on.
+# First login then moves the computer to that build.
+channel="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("channel", ""))' /var/lib/nanoborealis/setup.json 2>/dev/null)"
+case "$channel" in
+    dev) bootc switch --mutate-in-place --transport registry "ghcr.io/korxspyre/nanoborealis:$channel" && echo "this computer follows the $channel build" ;;
+    *) echo "this computer follows the stable build" ;;
+esac
+%end
+"""
+
+[customizations.installer.modules]
+enable = [
+  "org.fedoraproject.Anaconda.Modules.Storage",
+  "org.fedoraproject.Anaconda.Modules.Runtime",
+  "org.fedoraproject.Anaconda.Modules.Network",
+  "org.fedoraproject.Anaconda.Modules.Security",
+  "org.fedoraproject.Anaconda.Modules.Services",
+  "org.fedoraproject.Anaconda.Modules.Users",
+  "org.fedoraproject.Anaconda.Modules.Timezone"
+]
+
+disable = [
+  "org.fedoraproject.Anaconda.Modules.Subscription",
+]

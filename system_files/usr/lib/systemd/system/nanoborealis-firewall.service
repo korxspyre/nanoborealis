@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+[Unit]
+Description=Keep the NanoBorealis agent off the local network
+Documentation=file:///usr/share/nanoborealis/README.md
+After=firewalld.service
+# user@.service starts after systemd-user-sessions, so the rules are in place
+# before the agent's lingering user services can run.
+Before=systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/nanoborealis-firewall
+
+[Install]
+WantedBy=multi-user.target

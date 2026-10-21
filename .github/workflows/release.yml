@@ -1,0 +1,68 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+---
+name: Release
+
+# A release is a tag: push vX.Y.Z (matching client/VERSION) on a commit of main, and everything for
+# that version is built from it and published.
+#
+#   the OS image      both editions, as :stable and :X.Y.Z (installed computers update onto it)
+#   the app           on the vX.Y.Z release, which the app's updater follows
+#   the installer     on that same release, marked Latest: one page that has every download, and
+#                     the release install sticks write
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+jobs:
+  check:
+    name: The tag matches the version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Check
+        id: check
+        run: |
+          version="$(tr -d '[:space:]' < client/VERSION)"
+          [ "$GITHUB_REF_NAME" = "v$version" ] || { echo "::error::client/VERSION is $version, so the tag must be v$version"; exit 1; }
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::$GITHUB_REF_NAME isn't on main"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing $version from ${GITHUB_SHA:0:7}" >> "$GITHUB_STEP_SUMMARY"
+
+  image:
+    name: OS image
+    needs: check
+    uses: ./.github/workflows/build.yml
+    with:
+      channel: stable
+      version: ${{ needs.check.outputs.version }}
+    secrets: inherit
+
+  app:
+    name: App
+    needs: check
+    uses: ./.github/workflows/client-release.yml
+    with:
+      channel: stable
+    secrets: inherit
+
+  installer:
+    name: Installer
+    needs: [image, app]
+    uses: ./.github/workflows/build-disk.yml
+    with:
+      platform: amd64
+      channel: stable
+      release-tag: ${{ github.ref_name }}
+    secrets: inherit

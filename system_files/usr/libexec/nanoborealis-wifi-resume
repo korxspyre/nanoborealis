@@ -1,0 +1,59 @@
+#!/usr/bin/bash
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+# Some laptop Wi-Fi chips wake from sleep dead: NetworkManager keeps "Looking for Wi-Fi
+# networks" and finds nothing until the driver is reloaded. systemd runs this after every
+# resume (nanoborealis-wifi-resume.service). It does nothing unless Wi-Fi really is stuck, and
+# then tries the gentlest fix first: restart networking, reload the driver, reset the chip.
+set -u
+log() { echo "nanoborealis-wifi: $*"; }
+
+[ "$(nmcli radio wifi 2>/dev/null)" = enabled ] || exit 0  # Wi-Fi is off on purpose
+
+# Wi-Fi controllers on the PCI bus (class 0x0280). USB adapters recover by being replugged.
+controllers=()
+for dev in /sys/bus/pci/devices/*; do
+    [ "$(cat "$dev/class" 2>/dev/null)" = 0x028000 ] && controllers+=("$dev")
+done
+[ ${#controllers[@]} -gt 0 ] || exit 0
+
+alive() {  # connected, or at least seeing networks after a fresh scan
+    nmcli -t -f TYPE,STATE device 2>/dev/null | grep -q '^wifi:connected' && return 0
+    [ -n "$(nmcli -t -f SSID device wifi list --rescan yes 2>/dev/null)" ]
+}
+wait_alive() {  # up to $1 seconds
+    local waited=0
+    while [ "$waited" -lt "$1" ]; do
+        alive && return 0
+        sleep 5
+        waited=$((waited + 5))
+    done
+    return 1
+}
+
+wait_alive 30 && exit 0  # most of the time it comes back by itself
+
+log "Wi-Fi is stuck after sleep; restarting NetworkManager"
+systemctl restart NetworkManager
+wait_alive 20 && { log "Wi-Fi is back"; exit 0; }
+
+for dev in "${controllers[@]}"; do
+    for mod in $(modprobe -R "$(cat "$dev/modalias")" 2>/dev/null); do
+        log "reloading the $mod driver"
+        modprobe -r "$mod" 2>/dev/null
+        sleep 1
+        modprobe "$mod"
+    done
+done
+wait_alive 30 && { log "Wi-Fi is back"; exit 0; }
+
+# Last resort: reset the chip itself, as unplugging and replugging it would.
+for dev in "${controllers[@]}"; do
+    log "resetting $(basename "$dev")"
+    echo 1 > "$dev/remove"
+done
+sleep 2
+echo 1 > /sys/bus/pci/rescan
+wait_alive 30 && { log "Wi-Fi is back"; exit 0; }
+log "Wi-Fi is still stuck; restarting the computer brings it back"
+exit 0

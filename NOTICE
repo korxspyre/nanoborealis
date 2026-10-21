@@ -1,0 +1,27 @@
+NanoBorealis
+Copyright (C) 2026 korxspyre
+
+NanoBorealis's own files are under the PolyForm Noncommercial License 1.0.0. See LICENSE. It is made
+for people and is free for them; commercial use needs a separate license: see docs/COMMERCIAL.md.
+It comes with no warranty.
+
+The text of every license that applies to a part of NanoBorealis is in the LICENSES folder. Every
+source file says which license it is under in its SPDX-License-Identifier line. Files that can't
+carry one (images, JSON, the agent's starting workspace, the message of the day) are NanoBorealis's
+own and under the PolyForm Noncommercial License 1.0.0, unless this notice says otherwise.
+
+Parts that are not under the PolyForm license and keep their own terms:
+
+- Apache License 2.0, from the Universal Blue image template
+  (https://github.com/ublue-os/image-template), changed for NanoBorealis by korxspyre:
+  Containerfile, Justfile, image-template.env, disk_config/disk.toml, disk_config/iso.toml,
+  .github/workflows/build.yml and .github/workflows/build-disk.yml.
+- GPL-2.0-or-later: the Plasma look-and-feel package in
+  system_files/usr/share/plasma/look-and-feel/org.nanoborealis.desktop, made from Aurora's, whose
+  splash screen comes from KDE Plasma's Breeze (Copyright 2014 Marco Martin).
+- SIL Open Font License 1.1: the fonts in client/src/assets/fonts (the license text is beside them).
+
+Software that NanoBorealis installs or ships but does not own keeps its own license: Aurora and
+Universal Blue, the Fedora and KDE software underneath, nanobot (MIT), exo (Apache License 2.0), and
+Flet and the other packages the app bundles. Each app installer lists those packages, with their
+licenses, in THIRD-PARTY-LICENSES.txt. None of them is relicensed by being used here.

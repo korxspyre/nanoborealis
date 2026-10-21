@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+[Unit]
+Description=NanoBorealis dashboard: what the lock screen shows (the agent, devices, calendar, this computer)
+Documentation=file:///usr/share/nanoborealis/README.md
+After=network-online.target nanoborealis-remote.service
+
+[Service]
+ExecStart=/usr/libexec/nanoborealis-dashboard
+Restart=always
+RestartSec=10
+# Its file, readable by root and administrators (the lock screen runs as one of them).
+RuntimeDirectory=nanoborealis-dashboard
+RuntimeDirectoryMode=0755
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

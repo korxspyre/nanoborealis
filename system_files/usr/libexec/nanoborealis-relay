@@ -1,0 +1,122 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+"""Lets the agent use this machine's pool node, and nothing more.
+
+Forwards OpenAI-style chat requests to the local exo node (which has no authentication of its
+own). Requests need `Authorization: Bearer <token>`, and only the chat API is exposed, so
+neither the agent nor anything else on the network can place, delete or download models.
+
+    nanoborealis-relay               # reads NANOBOREALIS_RELAY_TOKEN, _LISTEN and _UPSTREAM
+
+The pool node it forwards to is the one named in NANOBOREALIS_RELAY_UPSTREAM_FILE (default
+/run/nanoborealis/pool-api), read for every request: nanoborealis-remote keeps it pointing at a
+node that answers, which on a computer that only coordinates the pool is another computer's.
+_UPSTREAM is used when there's no such file.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hmac
+import json
+import os
+import sys
+
+ALLOWED = ("/v1/chat/completions", "/v1/completions", "/v1/models")
+HOP_BY_HOP = {"authorization", "connection", "host", "keep-alive", "proxy-connection", "transfer-encoding",
+              "upgrade", "content-length", "te", "trailer"}
+MAX_BODY = 32 * 1024 * 1024
+
+
+def split_hostport(value: str, default_port: int) -> tuple[str, int]:
+    host, _, port = value.rpartition(":")
+    return (host or value, int(port or default_port)) if port.isdigit() else (value, default_port)
+
+
+UPSTREAM_FILE = os.environ.get("NANOBOREALIS_RELAY_UPSTREAM_FILE", "/run/nanoborealis/pool-api")
+
+
+class Relay:
+    def __init__(self, token: str, upstream: tuple[str, int]):
+        self.token = token
+        self.default = upstream
+
+    @property
+    def upstream(self) -> tuple[str, int]:
+        try:
+            with open(UPSTREAM_FILE, encoding="utf-8") as f:
+                named = f.read().strip()
+        except OSError:
+            return self.default
+        return split_hostport(named.removeprefix("http://").rstrip("/"), 52415) if named else self.default
+
+    async def respond(self, writer: asyncio.StreamWriter, status: str, message: str) -> None:
+        body = json.dumps({"error": message}).encode()
+        writer.write(f"HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n"
+                     "Connection: close\r\n\r\n".encode() + body)
+        await writer.drain()
+
+    async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 30)
+            request_line, *lines = head.decode("latin-1").split("\r\n")
+            method, target, _ = request_line.split(" ", 2)
+            headers = [(k.strip(), v.strip()) for k, _, v in (line.partition(":") for line in lines if ":" in line)]
+            lookup = {k.lower(): v for k, v in headers}
+            if not hmac.compare_digest(lookup.get("authorization", "").encode(), f"Bearer {self.token}".encode()):
+                await self.respond(writer, "401 Unauthorized", "missing or wrong token")
+                return
+            if target.split("?", 1)[0] not in ALLOWED:
+                await self.respond(writer, "403 Forbidden", "only the chat API is shared")
+                return
+            if "chunked" in lookup.get("transfer-encoding", "").lower():
+                await self.respond(writer, "411 Length Required", "send Content-Length")
+                return
+            length = int(lookup.get("content-length") or 0)
+            if length > MAX_BODY:
+                await self.respond(writer, "413 Payload Too Large", "request too large")
+                return
+            body = await reader.readexactly(length) if length else b""
+            upstream = self.upstream
+            up_reader, up_writer = await asyncio.open_connection(*upstream)
+            forwarded = "".join(f"{k}: {v}\r\n" for k, v in headers if k.lower() not in HOP_BY_HOP)
+            up_writer.write(f"{method} {target} HTTP/1.1\r\nHost: {upstream[0]}:{upstream[1]}\r\n"
+                            f"{forwarded}Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode("latin-1") + body)
+            await up_writer.drain()
+            try:
+                while chunk := await up_reader.read(65536):
+                    writer.write(chunk)
+                    await writer.drain()
+            finally:
+                up_writer.close()
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, asyncio.TimeoutError, ValueError):
+            pass
+        except OSError:
+            try:
+                await self.respond(writer, "502 Bad Gateway", "the pool node isn't answering")
+            except OSError:
+                pass
+        finally:
+            try:
+                writer.close()
+            except OSError:
+                pass
+
+
+async def main() -> int:
+    token = os.environ.get("NANOBOREALIS_RELAY_TOKEN", "")
+    if len(token) < 16:
+        print("NANOBOREALIS_RELAY_TOKEN must be set (16+ characters)", file=sys.stderr)
+        return 2
+    host, port = split_hostport(os.environ.get("NANOBOREALIS_RELAY_LISTEN", "0.0.0.0:11436"), 11436)
+    upstream = split_hostport(os.environ.get("NANOBOREALIS_RELAY_UPSTREAM", "127.0.0.1:52415"), 52415)
+    server = await asyncio.start_server(Relay(token, upstream).handle, host=host, port=port)
+    print(f"relaying {host}:{port} to {upstream[0]}:{upstream[1]}", flush=True)
+    async with server:
+        await server.serve_forever()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))

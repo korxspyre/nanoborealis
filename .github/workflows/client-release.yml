@@ -1,0 +1,350 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+---
+name: Release the app
+
+# Freezes the NanoBorealis app with PyInstaller (through `flet pack`, which bundles Flet's own
+# runtime so nothing downloads on first launch) on each platform, checks that the frozen app
+# really runs, packages it, and publishes a release: a Windows installer, a macOS disk image, a
+# Linux archive with an install script, and an Android APK.
+#
+# Two channels, as for the OS:
+#
+#   dev      every push to main releases vX.Y.Z-dev.N as a pre-release
+#   stable   a release tag vX.Y.Z runs this through the Release workflow, and the app goes on that
+#            tag's release, which the installer then joins: one release for everything
+#
+# X.Y.Z is client/VERSION; once it has shipped as stable, dev builds count towards the next
+# patch until the file is raised. Dev builds are never Latest: that's the stable release, which
+# install sticks and the README's download links follow.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'client/**'
+      - '.github/workflows/client-release.yml'
+  workflow_dispatch:  # a dev build again after a failed run
+    inputs:
+      channel:
+        description: "Channel to release on (stable comes from a release tag)"
+        type: choice
+        options: [dev]
+        default: dev
+  workflow_call:
+    inputs:
+      channel:
+        type: string
+        default: dev
+
+permissions:
+  contents: write
+
+concurrency:
+  group: client-release-${{ inputs.channel || 'dev' }}
+  cancel-in-progress: ${{ (inputs.channel || 'dev') == 'dev' }}  # a newer dev build replaces an older one
+
+jobs:
+  plan:
+    name: Plan the release
+    runs-on: ubuntu-24.04
+    outputs:
+      channel: ${{ steps.plan.outputs.channel }}
+      version: ${{ steps.plan.outputs.version }}
+      numeric: ${{ steps.plan.outputs.numeric }}
+      ref: ${{ steps.plan.outputs.ref }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - id: plan
+        env:
+          # RELEASE_TOKEN (optional): a token of the owner's with the workflows permission. A
+          # workflow's own token can't tag a commit whose workflow files differ from main's, which
+          # dev builds can be when a push lands mid-build; without it, those releases wait for main.
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+        run: |
+          CHANNEL="${{ inputs.channel || 'dev' }}"
+          base="$(tr -d '[:space:]' < client/VERSION)"
+          [[ "$base" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::client/VERSION isn't X.Y.Z"; exit 1; }
+          if [ "$CHANNEL" = stable ]; then
+            [ "$GITHUB_REF" = "refs/tags/v$base" ] || { echo "::error::A stable release comes from the tag v$base (this is $GITHUB_REF)"; exit 1; }
+          else
+            [ "$GITHUB_REF_NAME" = main ] || { echo "::error::Dev builds come from main (this is $GITHUB_REF_NAME)"; exit 1; }
+          fi
+          # The newest stable version: once client/VERSION has shipped, dev builds count towards the next.
+          # (Releases before 0.7.1 were tagged client-vX.Y.Z.)
+          stable="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-pre-releases --limit 100 --json tagName \
+            --jq '[.[].tagName | select(test("^(client-)?v[0-9]+\\.[0-9]+\\.[0-9]+$")) | sub("^(client-)?v"; "")]
+                  | sort_by(split(".") | map(tonumber)) | last // "0.0.0"')"
+          newest="$(printf '%s\n%s\n' "$base" "$stable" | sort -V | tail -n 1)"
+          if [ "$CHANNEL" = stable ]; then
+            version="$base"  # already released: the check below says to raise client/VERSION
+          else
+            if [ "$newest" = "$stable" ]; then
+              IFS=. read -r major minor patch <<<"$stable"
+              base="$major.$minor.$((patch + 1))"
+            fi
+            version="$base-dev.$GITHUB_RUN_NUMBER"
+          fi
+          if gh release view "v$version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::v$version is already released: raise client/VERSION for the next stable release"; exit 1
+          fi
+          # Windows' file-version field takes numbers only.
+          numeric="$base.$([ "$CHANNEL" = stable ] && echo 0 || echo "$GITHUB_RUN_NUMBER")"
+          ref="$GITHUB_SHA"
+          # The release's tag, made now rather than when the builds are done. This token can't make a
+          # tag on a commit whose workflow files differ from the default branch's newest ones (that
+          # takes the "workflows" permission, which a workflow's own token never has), so a push to
+          # main that changes a workflow while the builds run made publishing fail with HTTP 403.
+          # (On a 404, gh prints GitHub's reply to stdout, so only its exit status says the tag exists.)
+          # (A stable release's tag is the one that started it.)
+          tagged="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$version" --jq .object.sha 2>/dev/null)" || tagged=""
+          if [ -n "$tagged" ] && [ "$tagged" != "$ref" ]; then
+            echo "::error::v$version already tags another commit ($tagged)"; exit 1
+          elif [ -z "$tagged" ] && ! gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/v$version" \
+                                       -f sha="$ref" >/dev/null; then
+            echo "::error::Couldn't tag $ref as v$version. Its workflow files likely differ from main's: add the" \
+                 "RELEASE_TOKEN secret (a token with the workflows permission)"
+            exit 1
+          fi
+          echo "Releasing $version on the $CHANNEL channel from $ref (newest stable: $stable)"
+          { echo "channel=$CHANNEL"; echo "version=$version"; echo "numeric=$numeric"; echo "ref=$ref"; } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build (${{ matrix.os }})
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      NUMERIC: ${{ needs.plan.outputs.numeric }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.plan.outputs.ref }}
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      # The app carries the license it's under (PolyForm-Noncommercial-1.0.0), its NOTICE, the text of every
+      # license that applies to a part of it, and the licenses of the Python packages it bundles.
+      - name: Put the licenses in the app
+        run: |
+          mkdir -p client/src/assets/licenses
+          cp -R LICENSE NOTICE LICENSES client/src/assets/licenses/
+          python -m pip install --quiet "flet[desktop]==1.0.1" "websockets>=14" "zeroconf>=0.130"
+          python client/packaging/third-party-licenses.py client/src/assets/licenses/THIRD-PARTY-LICENSES.txt \
+            flet flet-desktop websockets zeroconf
+
+      - name: Linux libraries for Flet's window
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libgtk-3-0 libmpv2 xvfb
+
+      - name: Freeze with PyInstaller
+        working-directory: client/src
+        run: |
+          printf 'VERSION = "%s"\n' "$VERSION" > version.py  # the app compares this with newer releases
+          python -m pip install --quiet "flet[desktop]==1.0.1" "flet-cli==1.0.1" "websockets>=14" "zeroconf>=0.130" pyinstaller pillow
+          sep=":"; icon=assets/icon.png; layout=--onedir
+          if [ "$RUNNER_OS" = Windows ]; then sep=";"; icon=assets/icon.ico; fi
+          if [ "$RUNNER_OS" = macOS ]; then layout=""; fi  # an .app is a folder already
+          # The bundle id keeps the project's first GitHub name: macOS ties the app's settings and
+          # permissions to it, so changing it would make installed copies start over.
+          flet pack main.py --yes $layout --name NanoBorealis --icon "$icon" \
+            --add-data "assets${sep}assets" \
+            --product-name NanoBorealis --product-version "$NUMERIC" --file-version "$NUMERIC" \
+            --file-description "NanoBorealis $VERSION" --company-name "NanoBorealis contributors" \
+            --copyright "Copyright (C) 2026 korxspyre. PolyForm Noncommercial 1.0.0." --bundle-id io.github.more-than-just-kyrion.nanoborealis \
+            --distpath ../dist
+          ls ../dist
+
+      # The frozen app must reach the stick writer, which is how it writes install sticks with
+      # administrator rights. A missing setup file makes it report an error without a window.
+      - name: The frozen app runs
+        working-directory: client
+        run: |
+          case "$RUNNER_OS" in
+            Windows) app=dist/NanoBorealis/NanoBorealis.exe ;;
+            macOS)   app=dist/NanoBorealis.app/Contents/MacOS/NanoBorealis ;;
+            *)       app=dist/NanoBorealis/NanoBorealis ;;
+          esac
+          progress="$RUNNER_TEMP/progress.json"
+          "$app" write --disk 0 --serial none --source latest --setup-file "$RUNNER_TEMP/missing.json" --progress "$progress" || true
+          for i in $(seq 1 30); do [ -f "$progress" ] && break; sleep 1; done
+          cat "$progress"
+          grep -q '"phase": "error"' "$progress"
+
+      - name: Package (Windows installer)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          & $iscc /Qp "/DAppVersion=$env:VERSION" "/DSourceDir=$PWD\client\dist\NanoBorealis" client\packaging\windows.iss
+          New-Item -ItemType Directory -Force out | Out-Null
+          Move-Item client\packaging\Output\*.exe out\
+
+      - name: Package (macOS disk image)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p out dmg
+          cp -R client/dist/NanoBorealis.app dmg/
+          cp -R client/src/assets/licenses/. dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname NanoBorealis -srcfolder dmg -ov -format UDZO "out/NanoBorealis-$VERSION-macos.dmg"
+
+      - name: Package (Linux archive)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p out "stage/NanoBorealis-$VERSION"
+          cp -a client/dist/NanoBorealis "stage/NanoBorealis-$VERSION/"
+          cp client/packaging/install-linux.sh "stage/NanoBorealis-$VERSION/install.sh"
+          cp client/src/assets/icon.png "stage/NanoBorealis-$VERSION/"
+          cp -R client/src/assets/licenses/. "stage/NanoBorealis-$VERSION/"
+          chmod +x "stage/NanoBorealis-$VERSION/install.sh"
+          tar -C stage -czf "out/NanoBorealis-$VERSION-linux-x86_64.tar.gz" "NanoBorealis-$VERSION"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: app-${{ runner.os }}
+          path: out/*
+
+  android:
+    name: Build (Android)
+    needs: plan
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.plan.outputs.ref }}
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Put the licenses in the app
+        run: |
+          mkdir -p client/src/assets/licenses
+          cp -R LICENSE NOTICE LICENSES client/src/assets/licenses/
+          python -m pip install --quiet "flet==1.0.1" "websockets>=14" "zeroconf>=0.130"
+          python client/packaging/third-party-licenses.py client/src/assets/licenses/THIRD-PARTY-LICENSES.txt \
+            flet websockets zeroconf
+
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # The release key keeps every APK updatable over the last one; without it, debug-signed.
+      - name: Build the APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          FLET_ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          FLET_ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            export FLET_ANDROID_SIGNING_KEY_STORE="$RUNNER_TEMP/release.jks"
+          fi
+          client/packaging/build-android.sh "$VERSION" "$GITHUB_RUN_NUMBER" out
+
+      - name: The APK is whole
+        run: |
+          aapt="$(ls "$ANDROID_HOME"/build-tools/*/aapt | sort -V | tail -n 1)"
+          "$aapt" dump badging out/*.apk | tee badging.txt | head -n 5
+          grep -q "versionName='${VERSION%%-*}'" badging.txt
+          grep -q "uses-permission: name='android.permission.CHANGE_WIFI_MULTICAST_STATE'" badging.txt
+          grep -q "uses-permission: name='android.permission.REQUEST_INSTALL_PACKAGES'" badging.txt  # self-updates
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: app-Android
+          path: out/*.apk
+
+  release:
+    name: Publish the release
+    needs: [plan, build, android]
+    runs-on: ubuntu-24.04
+    env:
+      CHANNEL: ${{ needs.plan.outputs.channel }}
+      VERSION: ${{ needs.plan.outputs.version }}
+      REF: ${{ needs.plan.outputs.ref }}
+      GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: out
+          merge-multiple: true
+      - name: Release
+        run: |
+          v="$VERSION"
+          ls -la out
+          if [ "$CHANNEL" = stable ]; then
+            # Apps that came before 0.7.1 only look for client-vX.Y.Z releases, with versioned file
+            # names: 0.7.1 goes out that way once too, so they update onto the updater that follows
+            # vX.Y.Z. Remove this once 0.7.1 is out.
+            if [ "$v" = 0.7.1 ]; then
+              mkdir bridge && cp out/* bridge/ && (cd bridge && sha256sum * > SHA256SUMS)
+              gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/client-v$v" -f sha="$REF" >/dev/null
+              gh release create "client-v$v" bridge/* --repo "$GITHUB_REPOSITORY" --verify-tag --latest=false \
+                --title "NanoBorealis app $v (for apps before 0.7.1)" \
+                --notes "Moves apps older than 0.7.1 onto the releases they follow now: see v$v."
+            fi
+            # One name for good, so releases/latest/download/<name> always fetches the newest.
+            mv out/*.exe out/NanoBorealis-Setup.exe
+            mv out/*.dmg out/NanoBorealis-macos.dmg
+            mv out/*linux*.tar.gz out/NanoBorealis-linux-x86_64.tar.gz
+            mv out/*.apk out/NanoBorealis-android.apk
+            win=NanoBorealis-Setup.exe mac=NanoBorealis-macos.dmg linux=NanoBorealis-linux-x86_64.tar.gz apk=NanoBorealis-android.apk
+            # Latest once the installer joins it (build-disk.yml): install sticks follow Latest.
+            title="NanoBorealis $v"; flags=(--latest=false)
+            lead="NanoBorealis $v: the app, and (once it's built) the OS installer."
+          else
+            win="NanoBorealis-Setup-$v.exe" mac="NanoBorealis-$v-macos.dmg" linux="NanoBorealis-$v-linux-x86_64.tar.gz"
+            apk="NanoBorealis-$v-android.apk"
+            title="NanoBorealis $v (dev build)"; flags=(--prerelease --latest=false)
+            lead="**Development build** of the app from ${REF:0:7}: newest changes, not yet tested. Only apps on the Development channel get it."
+          fi
+          (cd out && sha256sum * > SHA256SUMS)
+          cat > notes.md <<EOF
+          $lead
+
+          ## The app
+
+          Chat with your agent from any computer, share this computer's hardware with it, and make install sticks. No Python needed.
+
+          | Platform | Download | Install |
+          |---|---|---|
+          | Windows 10/11 | \`$win\` | Run it. It installs for your user, with Start menu and desktop shortcuts. |
+          | macOS | \`$mac\` | Open it and drag NanoBorealis to Applications. The app isn't notarized yet: the first time, right-click it and choose Open. |
+          | Linux (x86-64) | \`$linux\` | Unpack it and run \`./install.sh\`. Needs GTK 3 (on every desktop Linux). |
+          | Android | \`$apk\` | Open it on the phone and allow installing from your browser. |
+
+          Making install sticks works on Windows and Linux. \`SHA256SUMS\` lists the checksums. The update channel is under **App updates** in the app.
+          EOF
+          # Onto the tag the release came from: a stable release's own, or the one planned for a dev build.
+          gh release create "v$v" out/* --repo "$GITHUB_REPOSITORY" --verify-tag --title "$title" \
+            --notes-file notes.md "${flags[@]}"
+
+      # Keep the releases page readable: only the five newest dev builds stay.
+      - name: Tidy old dev builds
+        if: needs.plan.outputs.channel == 'dev'
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName,isPrerelease,createdAt \
+            --jq '[.[] | select(.isPrerelease and (.tagName | test("^(client-)?v.*-dev\\.")))] | sort_by(.createdAt) | reverse | .[5:] | .[].tagName' \
+          | while read -r old; do
+              gh release delete "$old" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag \
+                || echo "::warning::couldn't remove $old"
+            done

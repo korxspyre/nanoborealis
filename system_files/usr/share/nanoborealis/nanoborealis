@@ -1,0 +1,700 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+# Manage NanoBorealis and its agent. `nanoaurora` and `nanobot-os` are older names for it.
+# Run as your normal user; it uses sudo where it needs to.
+set -euo pipefail
+
+AGENT_USER="nanobot-agent"
+IMAGE="localhost/nanoborealis-agent:latest"
+WEBUI_URL="http://127.0.0.1:8765"
+OS_IMAGE="ghcr.io/korxspyre/nanoborealis"
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") <command>
+
+  update [--stable|--dev] [--nvidia|--standard] [--yes]
+                    check for a newer NanoBorealis build, then download it and your app updates
+                    (reboot to apply). This computer stays on the build it follows; --stable
+                    or --dev moves it (dev: every build, newest and least tested).
+                    --nvidia moves it to the NVIDIA edition (NVIDIA's driver, so the pool can use
+                    its GPU), --standard back.
+  rollback          go back to the build you ran before the last update (reboot to apply)
+  version           show which build is running and which channel it follows
+  open [--web]      open the NanoBorealis app (--web: the agent's page in a browser)
+  status            show the service status
+  logs              follow the agent's logs
+  restart           restart the agent (fresh container, same memory and settings)
+  shell             open a shell inside the agent's container
+  password          show the WebUI password (for the agent's page in a browser on this computer)
+  remote on|off     let the NanoBorealis app on your other devices pair with this computer (on by default)
+  devices           list the devices paired with this computer; \`devices remove <id>\` unpairs one
+  pool ...          pool this computer with others on your network to run models none could alone:
+                    join [--private NAME] [--cpu], serve MODEL, stop MODEL, status, logs, leave; and a
+                    council of models at once: nodes, plan, apply, drain, undrain, bench, scores, policy
+  council ...       seat a council on the pool's loadout, one agent per model, meeting in the Hall:
+                    apply, status, autonomy on-task|continuous, escalation on|off, remove
+  set-key           replace the OpenRouter API key
+  rebuild [X.Y.Z]   rebuild the image (optionally at a new nanobot version) and restart
+  reset             DELETE the agent's home: memory, sessions, skills, settings, its tools
+  uninstall         remove the agent and the $AGENT_USER account (projects are kept)
+EOF
+}
+
+tracked_image() {
+    # The image `bootc upgrade` follows, from bootc's own status.
+    { sudo bootc status --format=json 2>/dev/null || sudo bootc status --json 2>/dev/null; } \
+        | python3 -c 'import json, sys; print(((json.load(sys.stdin).get("spec") or {}).get("image") or {}).get("image", ""))' \
+          2>/dev/null || true
+}
+
+agent_installed() { id "$AGENT_USER" >/dev/null 2>&1; }
+if agent_installed; then
+    AGENT_UID="$(id -u "$AGENT_USER")"
+    AGENT_HOME="$(getent passwd "$AGENT_USER" | cut -d: -f6)"
+fi
+
+as_agent() {
+    ( cd / && sudo -u "$AGENT_USER" env \
+        HOME="$AGENT_HOME" \
+        XDG_RUNTIME_DIR="/run/user/$AGENT_UID" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$AGENT_UID/bus" \
+        "$@" )
+}
+agentctl() { sudo systemctl --user -M "$AGENT_USER@" "$@"; }
+# Edits the agent's model settings from inside its container, so the file keeps its owner.
+in_agent() { as_agent podman exec -i nanobot python3 - "$@" < /usr/share/nanoborealis/compute-config.py; }
+
+# Models on your own machines can take minutes to read the agent's long prompt before the first
+# word comes back; nanobot would give up after 90 seconds of silence.
+agent_patience() {
+    local quadlet="$AGENT_HOME/.config/containers/systemd/nanobot.container"
+    sudo grep -q '^Environment=NANOBOT_STREAM_IDLE_TIMEOUT_S=' "$quadlet" 2>/dev/null && return 0
+    sudo sed -i '/^\[Container\]/a Environment=NANOBOT_STREAM_IDLE_TIMEOUT_S=1800' "$quadlet"
+    agentctl daemon-reload
+    agentctl restart nanobot.service
+}
+
+cmd="${1:-help}"
+case "$cmd" in
+    help|-h|--help) usage; exit 0 ;;
+    update)
+        # Works even before the agent is installed. Updates never happen on their own, and a
+        # computer keeps following its build (stable or dev) until told otherwise.
+        channel=""; assume_yes=0; edition=""
+        for arg in "${@:2}"; do
+            case "$arg" in
+                --stable) channel=stable ;;
+                --testing) channel=dev; echo "The testing channel is retired; its builds are on dev now." >&2 ;;
+                --dev) channel=dev ;;
+                --nvidia) edition=-nvidia ;;
+                --standard) edition=standard ;;
+                --yes|-y) assume_yes=1 ;;
+                *) echo "unknown option: $arg" >&2; exit 2 ;;
+            esac
+        done
+        tracked="$(tracked_image)"
+        if [ -z "$channel" ]; then
+            case "$tracked" in  # under this name or an earlier one, in either edition
+                */nanoborealis:dev|*/nanoborealis-nvidia:dev) channel=dev ;;
+                */nanoborealis:testing|*/nanoborealis-nvidia:testing) channel=dev ;;  # retired: testing builds are dev now
+                *) channel=stable ;;
+            esac
+        fi
+        if [ -z "$edition" ]; then  # the edition this computer follows stays
+            case "$tracked" in */nanoborealis-nvidia:*) edition=-nvidia ;; esac
+        fi
+        [ "$edition" = standard ] && edition=""
+        want="$OS_IMAGE$edition:$channel"
+        # Only move to a new address once it's published there (e.g. while the project moves
+        # to a new GitHub name); until then, keep updating from where this system already is.
+        if [ -n "$tracked" ] && [ "$tracked" != "$want" ] && command -v skopeo >/dev/null \
+            && ! skopeo inspect --raw "docker://$want" >/dev/null 2>&1; then
+            echo "$want isn't published yet; checking $tracked instead."
+            want="$tracked"
+        fi
+        if [ "$tracked" != "$want" ]; then
+            # A new channel, or a system still following an earlier name: switch the tracked image.
+            echo "This system follows ${tracked:-an unknown image}; updates will come from $want."
+            action=(bootc switch --transport registry "$want")
+        else
+            echo "Checking $want for a newer build..."
+            check="$(sudo bootc upgrade --check 2>&1 || true)"
+            # Right after an install, the registry's copy of the very same build looks new: the
+            # installer carries the image in another format. Same version, nothing to get.
+            offered="$(sed -n 's/^ *Version: *//p' <<<"$check" | head -n 1)"
+            running="$(sudo bootc status --format=json 2>/dev/null | python3 -c \
+                'import json, sys; print((((json.load(sys.stdin).get("status") or {}).get("booted") or {}).get("image") or {}).get("version") or "")' \
+                2>/dev/null || true)"
+            if ! grep -q "Update available for:" <<<"$check" || { [ -n "$offered" ] && [ "$offered" = "$running" ]; }; then
+                echo "NanoBorealis is up to date${running:+ ($running)}."
+                flatpak update -y --noninteractive || true
+                exit 0
+            fi
+            echo "$check"  # version, digest, and how much would download
+            action=(bootc upgrade)
+        fi
+        if [ "$assume_yes" -eq 0 ]; then
+            read -r -p "Download it now? It takes effect after a reboot, and the current build stays in the boot menu. [y/N] " reply
+            [[ "$reply" =~ ^[Yy] ]] || { echo "Nothing changed."; exit 0; }
+        fi
+        sudo "${action[@]}"
+        flatpak update -y --noninteractive || true
+        if [ -n "$edition" ] && [[ "$tracked" != */nanoborealis-nvidia:* ]] \
+            && mokutil --sb-state 2>/dev/null | grep -qi 'SecureBoot enabled'; then
+            echo
+            echo "Secure Boot is on: NVIDIA's driver starts only once Universal Blue's key is enrolled."
+            echo "Run this once, set the password it asks for, and confirm it in the blue screen at the reboot:"
+            echo "  ujust enroll-secure-boot-key"
+        fi
+        echo
+        echo "Reboot to start the new build: systemctl reboot"
+        echo "If anything misbehaves, pick the previous entry in the boot menu, or run: $(basename "$0") rollback"
+        exit 0 ;;
+    rollback)
+        sudo bootc rollback
+        echo "Reboot to go back to the previous build: systemctl reboot"
+        exit 0 ;;
+    version)
+        sudo bootc status
+        exit 0 ;;
+    pool)
+        # A pool is exo nodes on one network lending each other memory, so together they run
+        # models too big for any one of them. Any computer can join, with or without the agent;
+        # the node runs as its own account, like the agent does.
+        POOL_USER="nanoborealis-pool"
+        POOL_REPO="ghcr.io/korxspyre/nanoborealis-pool"
+        me="$(basename "$0")"
+        pool_py() { python3 /usr/share/nanoborealis/pool.py "$@"; }
+        pool_home() { getent passwd "$POOL_USER" | cut -d: -f6; }
+        pool_ready() { id "$POOL_USER" >/dev/null 2>&1 && sudo test -f "$(pool_home)/.config/containers/systemd/exo.container"; }
+        # In a pool: with a node of its own (pool join), or coordinating it without one (pool coordinate).
+        pool_active() { pool_ready || test -f /etc/nanoborealis/pool.json; }
+        as_pool() {
+            local uid; uid="$(id -u "$POOL_USER")"
+            ( cd / && sudo -u "$POOL_USER" env HOME="$(pool_home)" XDG_RUNTIME_DIR="/run/user/$uid" \
+                DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" "$@" )
+        }
+        poolctl() { sudo systemctl --user -M "$POOL_USER@" "$@"; }
+        pool_image() {  # the node image this computer runs: its processor build, or its NVIDIA one
+            sudo sed -n 's/^Image=//p' "$(pool_home)/.config/containers/systemd/exo.container" 2>/dev/null \
+                || echo "$POOL_REPO:cpu"
+        }
+        pool_ports() {  # add|remove: discovery, links between nodes, the API peers check, model layers
+            sudo firewall-cmd --state >/dev/null 2>&1 || return 0
+            local p
+            for p in 52413/udp 52414/tcp 52415/tcp 49152-65535/tcp; do
+                sudo firewall-cmd --quiet --permanent "--$1-port=$p" || true
+            done
+            sudo firewall-cmd --quiet --reload
+        }
+        relay_up() {  # this computer's agent reaches the pool through the relay: chat only, with a token
+            agent_installed || return 0
+            if ! sudo test -f /etc/nanoborealis/pool.env; then
+                sudo install -d -m 0755 /etc/nanoborealis
+                python3 -c 'import secrets; print("NANOBOREALIS_RELAY_TOKEN=" + secrets.token_urlsafe(32))' \
+                    | sudo sh -c 'umask 077 && cat > /etc/nanoborealis/pool.env'
+            fi
+            sudo systemctl restart nanoborealis-firewall.service
+            sudo systemctl enable --quiet nanoborealis-pool-relay.service
+            sudo systemctl restart nanoborealis-pool-relay.service
+        }
+        agent_pool_model() { agent_installed && in_agent list 2>/dev/null | awk -F'\t' '$1 == "pool" { print $2 }'; }
+        case "${2:-status}" in
+            coordinate)
+                # Coordinate the pool without lending this computer to it: its planner, Pool page and
+                # council use the nodes of the devices lending through the app (nanoborealis-remote
+                # follows whichever answers). For a computer too small to hold models itself.
+                namespace=""
+                set -- "${@:3}"
+                while [ $# -gt 0 ]; do
+                    if [ "$1" = --private ] && [[ "${2:-}" =~ ^[a-z0-9][a-z0-9-]{2,31}$ ]]; then
+                        namespace="nanoborealis-$2"; shift 2
+                    else
+                        echo "usage: $me pool coordinate [--private <name>]   (a name of 3-32 letters, digits and dashes)" >&2
+                        exit 2
+                    fi
+                done
+                engine="$(cat /usr/share/nanoborealis/pool/exo-commit)"
+                sudo install -d -m 0755 /etc/nanoborealis
+                python3 -c 'import json, sys; print(json.dumps({"namespace": sys.argv[1], "engine": sys.argv[2],
+                    "image": sys.argv[3], "role": "coordinator"}))' "$namespace" "$engine" "$POOL_REPO" \
+                    | sudo sh -c 'umask 022 && cat > /etc/nanoborealis/pool.json'
+                relay_up
+                echo "This computer coordinates the pool${namespace:+ \"${namespace#nanoborealis-}\"}, without lending itself to it."
+                echo "Lend your other computers from the NanoBorealis app on them (\"Lend this computer to the pool\");"
+                echo "this computer finds their nodes as they start. Then see: $me pool nodes" ;;
+            join)
+                exec_args="" force_cpu="" anyway=""
+                set -- "${@:3}"
+                while [ $# -gt 0 ]; do
+                    if [ "$1" = --private ] && [[ "${2:-}" =~ ^[a-z0-9][a-z0-9-]{2,31}$ ]]; then
+                        exec_args="--namespace nanoborealis-$2"; shift 2
+                    elif [ "$1" = --cpu ]; then
+                        force_cpu=1; shift
+                    elif [ "$1" = --anyway ]; then
+                        anyway=1; shift
+                    else
+                        echo "usage: $me pool join [--private <name>] [--cpu] [--anyway]   (a name of 3-32 letters, digits and dashes)" >&2
+                        exit 2
+                    fi
+                done
+                # An NVIDIA GPU runs the pool's models when it can (Turing or newer, driver 580+, the
+                # NVIDIA Container Toolkit); otherwise, or with --cpu, the processor does.
+                gpu="$(pool_py gpu --line)"
+                gpu_field() { python3 -c 'import json, sys; print(json.loads(sys.argv[1]).get(sys.argv[2], ""))' "$gpu" "$1"; }
+                variant="$(gpu_field variant)"
+                [ -z "$force_cpu" ] || variant=cpu
+                # A node without a usable GPU holds models in memory: too little, and it only slows the
+                # pool down. Such a computer can still coordinate the pool (`pool coordinate`).
+                mem_gb="$(awk '/^MemTotal:/ { printf "%d", $2 / 1048576 }' /proc/meminfo)"
+                if [ "$variant" != cuda13 ] && [ "${mem_gb:-0}" -lt "${NANOBOREALIS_POOL_MIN_MEMORY_GB:-8}" ] && [ -z "$anyway" ]; then
+                    echo "This computer has ${mem_gb} GB of memory and no NVIDIA GPU the pool can use: too little to hold" >&2
+                    echo "models for the pool. It can coordinate the pool instead, with your other computers lending" >&2
+                    echo "theirs: $me pool coordinate   (or join all the same: $me pool join --anyway)" >&2
+                    exit 1
+                fi
+                gpu_lines=""
+                if [ "$variant" = cuda13 ]; then
+                    gpu_lines="AddDevice=nvidia.com/gpu=all\nEnvironment=OVERRIDE_MEMORY_MB=$(gpu_field override_mb)"
+                fi
+                cat <<'TXT'
+Joining a pool lends this computer's memory and processor to the other pool computers on this
+network, so together they can run models too big for any one of them. Every computer here that
+runs a pool node of the same version is in the same pool, including exo on a Mac.
+
+The pool has no password: anyone on this network can use it and pick what it serves, which
+downloads models onto the computers in it. Only join on networks you trust, or use
+--private <name> so only computers that joined with that name pool with this one.
+The node runs under its own account, away from your files and the agent. Joining opens the
+network ports the pool uses (52413-52415, and 49152-65535 for model layers).
+TXT
+                if [ -n "$(gpu_field gpu)" ]; then
+                    echo
+                    if [ -n "$force_cpu" ]; then
+                        echo "GPU: $(gpu_field gpu), left out (--cpu): the processor runs this node."
+                    elif [ "$variant" = cuda13 ]; then
+                        echo "GPU: $(gpu_field reason)."
+                    else
+                        echo "GPU: $(gpu_field gpu), not used, because $(gpu_field reason). The processor runs this node."
+                    fi
+                fi
+                read -r -p "Join the pool? [y/N] " reply
+                [[ "$reply" =~ ^[Yy] ]] || { echo "Nothing changed."; exit 0; }
+                if ! id "$POOL_USER" >/dev/null 2>&1; then
+                    sudo useradd --create-home --shell /usr/sbin/nologin --comment "NanoBorealis pool node" "$POOL_USER"
+                fi
+                if ! grep -q "^${POOL_USER}:" /etc/subuid || ! grep -q "^${POOL_USER}:" /etc/subgid; then
+                    echo "$POOL_USER has no subuid/subgid range, which rootless Podman needs (see 'man usermod')" >&2
+                    exit 1
+                fi
+                sudo loginctl enable-linger "$POOL_USER"
+                for _ in $(seq 1 30); do
+                    sudo test -S "/run/user/$(id -u "$POOL_USER")/bus" && break
+                    sleep 1
+                done
+                if [ "$variant" = cuda13 ] && command -v getsebool >/dev/null \
+                    && getsebool container_use_devices 2>/dev/null | grep -q -- '--> off'; then
+                    # SELinux keeps containers off host devices unless this is on; the node still runs confined.
+                    sudo setsebool -P container_use_devices on
+                fi
+                as_pool mkdir -p "$(pool_home)/.config/containers/systemd"
+                sed -e "s|^Exec=@EXEC_ARGS@\$|${exec_args:+Exec=$exec_args}|" \
+                    -e "s|^Image=$POOL_REPO:.*\$|Image=$POOL_REPO:$variant|" \
+                    -e "s|^@GPU@\$|$gpu_lines|" /usr/share/nanoborealis/exo.container \
+                    | as_pool tee "$(pool_home)/.config/containers/systemd/exo.container" >/dev/null
+                pool_ports add
+                if [ "$variant" = cuda13 ]; then
+                    echo "Downloading the NVIDIA pool node (about 8 GB the first time; joining again updates it)..."
+                else
+                    echo "Downloading the pool node (about 1.5 GB the first time; joining again updates it)..."
+                fi
+                as_pool podman pull "$(pool_image)"
+                poolctl daemon-reload
+                poolctl restart exo.service
+                pool_py wait
+                relay_up
+                # What the NanoBorealis app needs to run a matching node on the computer it's on: the
+                # pool's name and exo's exact version (nodes only pool with the same one).
+                engine="$(as_pool podman run --rm --entrypoint cat "$(pool_image)" /opt/exo/ENGINE_COMMIT 2>/dev/null || true)"
+                sudo install -d -m 0755 /etc/nanoborealis
+                python3 -c 'import json, sys; print(json.dumps({"namespace": sys.argv[1], "engine": sys.argv[2],
+                    "image": sys.argv[3], "variant": sys.argv[4], "role": "node"}))' "${exec_args#--namespace }" "$engine" "$POOL_REPO" "$variant" \
+                    | sudo sh -c 'umask 022 && cat > /etc/nanoborealis/pool.json'
+                echo
+                echo "This computer is in the pool."
+                pool_py status
+                echo
+                echo "Serve a model on it with: $me pool serve <model>"
+                echo "Models are Hugging Face names, e.g. mlx-community/Qwen3-30B-A3B-4bit (needs about 17 GB"
+                echo "of memory across the pool) or mlx-community/Qwen3-4B-4bit (about 3 GB)." ;;
+            serve)
+                model="${3:-}"
+                if [[ ! "$model" =~ ^[A-Za-z0-9._-]{1,64}/[A-Za-z0-9._-]{1,96}$ ]]; then
+                    echo "usage: $me pool serve <model>   e.g. mlx-community/Qwen3-30B-A3B-4bit" >&2
+                    exit 2
+                fi
+                pool_active || { echo "Join a pool first: $me pool join (or $me pool coordinate)" >&2; exit 1; }
+                pool_py serve "$model"
+                if agent_installed; then
+                    relay_up
+                    token="$(sudo sed -n 's/^NANOBOREALIS_RELAY_TOKEN=//p' /etc/nanoborealis/pool.env)"
+                    in_agent add pool "http://host.containers.internal:11436/v1" "$token" "$model"
+                    in_agent use pool
+                    agent_patience
+                    echo "The agent now uses $model on the pool first, and the cloud models when the pool is busy or off."
+                    echo "Back to the cloud first: $me pool stop $model"
+                fi ;;
+            stop)
+                [ -n "${3:-}" ] || { echo "usage: $me pool stop <model>" >&2; exit 2; }
+                pool_active || { echo "This computer isn't in a pool." >&2; exit 1; }
+                pool_py stop "$3"
+                if [ "$(agent_pool_model)" = "$3" ]; then
+                    in_agent remove pool
+                    echo "The agent is back on the cloud models."
+                fi ;;
+            status)
+                pool_active || { echo "This computer isn't in a pool. Join one with: $me pool join (or coordinate one: $me pool coordinate)"; exit 0; }
+                pool_ready || echo "This computer coordinates the pool without a node of its own."
+                pool_py status
+                used="$(agent_pool_model || true)"
+                [ -z "$used" ] || echo "This computer's agent can use: $used" ;;
+            logs)
+                pool_ready || { echo "This computer runs no pool node of its own." >&2; exit 1; }
+                as_pool podman logs --follow --tail 200 exo ;;
+            gpu)  # what joining would run here: the NVIDIA node or the processor one, and why
+                pool_py gpu ;;
+            nodes|plan|apply|drain|undrain|bench|scores|policy)
+                # The loadout: as many models as the pool runs fast enough for an agent, spread over
+                # its computers by the planner, which learns from what `bench` measures.
+                pool_active || { echo "Join a pool first: $me pool join (or $me pool coordinate)" >&2; exit 1; }
+                if [ "$2" = bench ]; then  # exo's version, recorded when this computer joined or began coordinating
+                    NANOBOREALIS_POOL_ENGINE="exo@$(python3 -c 'import json; print(json.load(open("/etc/nanoborealis/pool.json"))["engine"][:12])')"
+                    export NANOBOREALIS_POOL_ENGINE
+                fi
+                pool_py "$2" "${@:3}" ;;
+            leave)
+                if pool_ready; then
+                    [ -z "$(agent_pool_model || true)" ] || in_agent remove pool
+                    poolctl stop exo.service || true
+                    sudo rm -f "$(pool_home)/.config/containers/systemd/exo.container"
+                    poolctl daemon-reload || true
+                    pool_ports remove
+                    sudo systemctl disable --now --quiet nanoborealis-pool-relay.service 2>/dev/null || true
+                    sudo rm -f /etc/nanoborealis/pool.env /etc/nanoborealis/pool.json
+                    ! agent_installed || sudo systemctl restart nanoborealis-firewall.service
+                    echo "This computer has left the pool."
+                elif test -f /etc/nanoborealis/pool.json; then  # it only coordinated the pool
+                    [ -z "$(agent_pool_model || true)" ] || in_agent remove pool
+                    sudo systemctl disable --now --quiet nanoborealis-pool-relay.service 2>/dev/null || true
+                    sudo rm -f /etc/nanoborealis/pool.env /etc/nanoborealis/pool.json
+                    ! agent_installed || sudo systemctl restart nanoborealis-firewall.service
+                    echo "This computer no longer coordinates the pool."
+                fi
+                if [ "${3:-}" = --delete-models ] && id "$POOL_USER" >/dev/null 2>&1; then
+                    as_pool podman volume rm --force exo-home >/dev/null && echo "Its downloaded models are deleted."
+                elif id "$POOL_USER" >/dev/null 2>&1; then
+                    echo "Downloaded models stay for next time; delete them with: $me pool leave --delete-models"
+                fi ;;
+            *)
+                echo "usage: $me pool join [--private NAME] [--cpu] [--anyway] | coordinate [--private NAME]" >&2
+                echo "       $me pool serve MODEL | stop MODEL | status | logs | leave [--delete-models]" >&2
+                echo "       $me pool nodes | plan [--rebuild] | apply [--rebuild] [--yes] | drain NAME | undrain NAME" >&2
+                echo "       $me pool bench [MODEL...] [--prompt N] [--try MODEL [--on A,B]] [--results]" >&2
+                echo "       $me pool scores [refresh] | policy [KEY=VALUE...] | gpu" >&2
+                exit 2 ;;
+        esac
+        exit 0 ;;
+esac
+
+agent_installed || { echo "the NanoBorealis agent is not installed ($AGENT_USER not found)" >&2; exit 1; }
+
+confirm() {
+    local reply
+    read -r -p "$1 Type 'yes' to continue: " reply
+    [ "$reply" = "yes" ]
+}
+
+case "$cmd" in
+    council)
+        # The council (docs/council/README.md): one seat per model of the pool's loadout, each its own
+        # agent with its own memory, meeting the others in the Hall. The agent you already have is the
+        # chair. Seats reach their models through the pool relay, and the Hall with a token of their own.
+        me="$(basename "$0")"
+        council_dir="$AGENT_HOME/council"
+        qdir="$AGENT_HOME/.config/containers/systemd"
+        council_py() { python3 /usr/share/nanoborealis/council.py "$@"; }
+        hall() { sudo python3 /usr/share/nanoborealis/council.py hall "$@"; }
+        seat_ids() { sudo cat "$council_dir/seats.json" 2>/dev/null | python3 -c 'import json, sys
+for s in json.load(sys.stdin): print(s["id"])' 2>/dev/null || true; }
+        secret() {  # name, value on stdin: a Podman secret of the agent account's
+            as_agent podman secret create --replace "$1" - >/dev/null
+        }
+        case "${2:-status}" in
+            apply)
+                sudo test -f /etc/nanoborealis/pool.env || {
+                    echo "The council runs on the pool: join one first ($me pool join), then serve its loadout ($me pool apply)." >&2
+                    exit 1; }
+                tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+                python3 /usr/share/nanoborealis/pool.py plan --json > "$tmp/plan.json"
+                # shellcheck disable=SC2024  # sudo reads the root-only file; the copy is ours to write
+                sudo cat "$council_dir/seats.json" > "$tmp/old.json" 2>/dev/null || echo '[]' > "$tmp/old.json"
+                council_py seats "$tmp/plan.json" "$tmp/old.json" > "$tmp/seats.json"
+                count="$(python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))))' "$tmp/seats.json")"
+                [ "$count" -gt 0 ] || { echo "The pool's loadout has no models, so there's no one to seat. See: $me pool plan" >&2; exit 1; }
+
+                # The Hall, and the firewall opening that lets seats (and only they) reach it.
+                sudo install -d -m 0755 /etc/nanoborealis
+                sudo sh -c 'umask 022 && echo "# written by nanoborealis council apply" > /etc/nanoborealis/council.env'
+                sudo systemctl enable --now --quiet nanoborealis-hall.service
+                sudo systemctl restart nanoborealis-firewall.service
+                for _ in $(seq 1 30); do hall GET /me >/dev/null 2>&1 && break; sleep 1; done
+                sudo sed -n 's/^NANOBOREALIS_RELAY_TOKEN=//p' /etc/nanoborealis/pool.env | secret pool_relay_token
+
+                # Seats that left the loadout: their containers go, their homes (memory) stay.
+                keep="$(python3 -c 'import json, sys; print(" ".join(s["id"] for s in json.load(open(sys.argv[1]))))' "$tmp/seats.json")"
+                for old in $(seat_ids); do
+                    case " $keep " in *" $old "*) continue ;; esac
+                    agentctl stop "seat-$old.service" 2>/dev/null || true
+                    sudo rm -f "$qdir/seat-$old.container"
+                    hall DELETE "/seats/$old" >/dev/null 2>&1 || true
+                    echo "unseated $old (its memory stays, for if its model comes back)"
+                done
+
+                as_agent mkdir -p "$council_dir"
+                sudo install -o "$AGENT_USER" -g "$AGENT_USER" -m 0644 "$tmp/seats.json" "$council_dir/seats.json"
+                for id in $keep; do
+                    fields="$(python3 -c 'import json, sys
+s = next(s for s in json.load(open(sys.argv[1])) if s["id"] == sys.argv[2])
+print(json.dumps({k: s[k] for k in ("id", "name", "model", "family", "capability", "port")} | {"rotate": True}))' "$tmp/seats.json" "$id")"
+                    # A fresh Hall token and API key on every apply, straight into the seat's secrets.
+                    hall POST /seats "$fields" > "$tmp/seat.json"
+                    python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["token"], end="")' "$tmp/seat.json" \
+                        | secret "seat-$id-hall"
+                    python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["api_key"], end="")' "$tmp/seat.json" \
+                        | secret "seat-$id-api"
+                    rm -f "$tmp/seat.json"
+                    as_agent python3 /usr/share/nanoborealis/council.py files "$council_dir/seats.json" "$id" "$council_dir/$id"
+                    sudo install -o "$AGENT_USER" -g "$AGENT_USER" -m 0644 "$council_dir/$id/seat-$id.container" "$qdir/"
+                    echo "seated $id"
+                done
+
+                # Escalation asks free OpenRouter models with the chair's key (nanoborealis-remote keeps it
+                # current when the app sets a new one).
+                as_agent podman secret inspect --showsecret --format '{{.SecretData}}' openrouter_api_key 2>/dev/null \
+                    | python3 -c 'import json, sys; print(json.dumps({"key": sys.stdin.read().strip()}))' \
+                    | { read -r body; hall POST /escalation-key "$body" >/dev/null 2>&1 \
+                        || echo "note: no OpenRouter key for escalation yet; set one in the app's settings"; }
+
+                # The chair: the agent you already talk to, with its own place in the Hall.
+                hall POST /seats '{"id": "chair", "name": "Chair", "model": "your agent'"'"'s own models", "chair": true, "capability": 50, "rotate": true}' \
+                    | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"], end="")' | secret chair-hall
+                sudo install -d -o "$AGENT_USER" -g "$AGENT_USER" "$qdir/nanobot.container.d"
+                printf '%s\n' "# The chair's place in the council (nanoborealis council apply)." "[Container]" \
+                    "Environment=NANOBOREALIS_HALL_URL=http://host.containers.internal:11437" \
+                    "Secret=chair-hall,type=env,target=NANOBOREALIS_HALL_TOKEN" \
+                    | sudo -u "$AGENT_USER" tee "$qdir/nanobot.container.d/council.conf" >/dev/null
+
+                agentctl daemon-reload
+                for id in $keep; do agentctl restart "seat-$id.service"; done
+                agentctl restart nanobot.service
+                echo "The council has $count seat(s) and the chair. Talk to it from the app, or see: $me council status" ;;
+            status)
+                if ! systemctl is-active --quiet nanoborealis-hall.service; then
+                    echo "No council yet. Seat one on the pool's loadout with: $me council apply"
+                    exit 0
+                fi
+                hall GET /seats | python3 -c 'import json, sys
+for s in json.load(sys.stdin)["seats"]:
+    print("  %-28s %-30s trust %-5s weight %s" % (s["name"], s["id"], s["trust"], s["weight"]))'
+                for id in $(seat_ids); do
+                    printf '  seat-%s: %s\n' "$id" "$(agentctl is-active "seat-$id.service" 2>/dev/null || true)"
+                done
+                hall GET /settings | python3 -c 'import json, sys; s = json.load(sys.stdin)
+escalation = "on, to " + s["escalation_model"] if s["escalation"] else "off"
+print("Autonomy: %s. Escalation: %s." % (s["autonomy"], escalation))' ;;
+            autonomy)
+                case "${3:-}" in
+                    on-task|continuous) hall POST /settings "{\"autonomy\": \"$3\"}" >/dev/null && echo "Autonomy: $3" ;;
+                    *) echo "usage: $me council autonomy on-task|continuous" >&2; exit 2 ;;
+                esac ;;
+            escalation)
+                case "${3:-}" in
+                    on) hall POST /settings '{"escalation": true}' >/dev/null && echo "Escalation is on (free models only)." ;;
+                    off) hall POST /settings '{"escalation": false}' >/dev/null && echo "Escalation is off." ;;
+                    *) echo "usage: $me council escalation on|off" >&2; exit 2 ;;
+                esac ;;
+            remove)
+                for id in $(seat_ids); do
+                    agentctl stop "seat-$id.service" 2>/dev/null || true
+                    sudo rm -f "$qdir/seat-$id.container"
+                done
+                sudo rm -f "$qdir/nanobot.container.d/council.conf"
+                agentctl daemon-reload
+                agentctl restart nanobot.service
+                sudo systemctl disable --now --quiet nanoborealis-hall.service
+                sudo rm -f /etc/nanoborealis/council.env
+                sudo systemctl restart nanoborealis-firewall.service
+                echo "The council is dismissed. The seats' memories and the Hall's history stay, for next time." ;;
+            *)
+                echo "usage: $me council apply | status | autonomy on-task|continuous | escalation on|off | remove" >&2
+                exit 2 ;;
+        esac ;;
+    open)
+        if [ "${2:-}" = "--web" ] || ! command -v nanoborealis-app >/dev/null; then
+            xdg-open "$WEBUI_URL"
+        else
+            setsid -f nanoborealis-app >/dev/null 2>&1
+        fi ;;
+    status)
+        agentctl status nanobot.service --no-pager ;;
+    logs)
+        as_agent podman logs --follow --tail 200 nanobot \
+            || sudo journalctl --follow --lines 200 "_UID=$AGENT_UID" ;;
+    restart)
+        agentctl restart nanobot.service ;;
+    shell)
+        as_agent podman exec -it nanobot bash ;;
+    password)
+        as_agent podman secret inspect --showsecret --format '{{.SecretData}}' nanobot_webui_secret
+        echo ;;
+    remote)
+        # The NanoBorealis app pairs with this computer through nanoborealis-remote.service: a PIN
+        # on this screen, then TLS and a password of its own for each device. The agent's WebUI
+        # itself stays on this computer only.
+        announce=/etc/avahi/services/nanoborealis.service
+        quadlet="${AGENT_HOME:-}/.config/containers/systemd/nanobot.container"
+        firewalld_port() {  # add|remove; no-op when firewalld isn't running
+            if sudo firewall-cmd --state >/dev/null 2>&1; then
+                sudo firewall-cmd --quiet --permanent "--$1-port=8766/tcp" || true
+                [ "$1" = add ] && { sudo firewall-cmd --quiet --permanent --add-service=mdns || true; }
+                sudo firewall-cmd --quiet --reload
+            fi
+        }
+        case "${2:-status}" in
+            on)
+                # Setups from before pairing opened the WebUI to the network with a password;
+                # the pairing service replaces that.
+                if agent_installed && sudo grep -q '^PublishPort=8765:8765$' "$quadlet" 2>/dev/null; then
+                    sudo sed -i 's|^PublishPort=.*|PublishPort=127.0.0.1:8765:8765|' "$quadlet"
+                    agentctl daemon-reload
+                    agentctl restart nanobot.service
+                    sudo firewall-cmd --quiet --permanent --remove-port=8765/tcp 2>/dev/null || true
+                fi
+                sudo systemctl enable --now nanoborealis-remote.service
+                firewalld_port add
+                if [ -d /etc/avahi/services ]; then
+                    sudo install -m 0644 /usr/share/nanoborealis/avahi-service.xml "$announce"
+                    sudo systemctl is-active --quiet avahi-daemon || sudo systemctl enable --now avahi-daemon || true
+                fi
+                echo "Remote access is on. In the NanoBorealis app on your phone or PC, pick this computer:"
+                echo "it shows a 6-digit PIN here, and typing it into the app pairs that device."
+                echo "Connections are encrypted, and each paired device has its own password."
+                echo "'$(basename "$0") devices' lists paired devices." ;;
+            off)
+                sudo systemctl disable --now nanoborealis-remote.service
+                sudo rm -f "$announce"
+                echo "Remote access is off: the agent is reachable from this computer only."
+                echo "Paired devices stay paired and connect again when it's back on." ;;
+            status)
+                if systemctl is-active --quiet nanoborealis-remote.service; then
+                    echo "remote access is on: the NanoBorealis app on your devices can pair and connect (port 8766)"
+                else
+                    echo "remote access is off: only this computer can reach the agent"
+                fi ;;
+            *)
+                echo "usage: $(basename "$0") remote on|off|status" >&2
+                exit 2 ;;
+        esac ;;
+    devices)
+        registry=/var/lib/nanoborealis/remote/devices.json
+        case "${2:-list}" in
+            list)
+                sudo python3 - "$registry" <<'PY'
+import json, sys, time
+try:
+    devices = json.load(open(sys.argv[1]))
+except FileNotFoundError:
+    devices = {}
+if not devices:
+    print("No devices are paired yet. Open the NanoBorealis app on your phone or PC and pick this computer.")
+for device_id, d in sorted(devices.items(), key=lambda item: item[1].get("paired", 0)):
+    day = lambda t: time.strftime("%Y-%m-%d %H:%M", time.localtime(t))
+    owner = f", approved by {d['owner']} (its terminal runs as {d['owner']})" if d.get("owner") else ""
+    print(f"{device_id}  {d.get('name', '?')}\n          paired {day(d.get('paired', 0))}{owner}, "
+          f"last seen {day(d.get('seen', 0))} from {d.get('address', '?')}")
+PY
+                ;;
+            remove)
+                device="${3:-}"
+                [[ "$device" =~ ^[0-9a-f]{8}$ ]] || { echo "usage: $(basename "$0") devices remove <id>   (ids from: $(basename "$0") devices)" >&2; exit 2; }
+                sudo python3 - "$registry" "$device" <<'PY'
+import json, os, sys
+path, device = sys.argv[1], sys.argv[2]
+try:
+    devices = json.load(open(path))
+except FileNotFoundError:
+    devices = {}
+if device not in devices:
+    sys.exit(f"no paired device {device}")
+name = devices.pop(device).get("name", device)
+with open(path + ".tmp", "w") as f:
+    json.dump(devices, f, indent=2)
+os.chmod(path + ".tmp", 0o600)
+os.replace(path + ".tmp", path)
+print(f"unpaired {name}: it can't reach this computer anymore")
+PY
+                ;;
+            *)
+                echo "usage: $(basename "$0") devices [list|remove <id>]" >&2
+                exit 2 ;;
+        esac ;;
+    set-key)
+        read -r -s -p "New OpenRouter API key: " key; echo
+        [ -n "$key" ] || { echo "no key entered" >&2; exit 1; }
+        printf '%s' "$key" | as_agent podman secret create --replace openrouter_api_key - >/dev/null
+        unset key
+        agentctl restart nanobot.service
+        echo "key replaced; agent restarted" ;;
+    rebuild)
+        build="$AGENT_HOME/nanoborealis"
+        if [ -d /usr/share/nanoborealis/image ]; then
+            # On a NanoBorealis image, pick up the container definition shipped with the latest OS update.
+            sudo rm -rf "$build/image"
+            sudo cp -R /usr/share/nanoborealis/image "$build/image"
+            sudo chown -R "$AGENT_USER:$AGENT_USER" "$build/image"
+        fi
+        version="${2:-$(sudo cat "$build/VERSION")}"
+        as_agent podman build --pull=newer --build-arg "NANOBOT_VERSION=$version" -t "$IMAGE" "$build/image"
+        printf '%s\n' "$version" | sudo tee "$build/VERSION" >/dev/null
+        agentctl restart nanobot.service
+        echo "rebuilt with nanobot $version; agent restarted" ;;
+    reset)
+        confirm "This deletes the agent's home: memory, sessions, skills, settings, and tools it installed. The shared projects folder is kept." || exit 1
+        agentctl stop nanobot.service
+        as_agent podman volume rm nanobot-home
+        agentctl start nanobot.service
+        echo "reset; config and skills re-seeded from the image" ;;
+    uninstall)
+        confirm "This removes the agent, its data, its image, its secrets, and the $AGENT_USER account. /srv/nanoborealis/projects is kept." || exit 1
+        agentctl stop nanobot.service 2>/dev/null || true
+        sudo rm -f "$AGENT_HOME/.config/containers/systemd/nanobot.container"
+        agentctl daemon-reload 2>/dev/null || true
+        as_agent podman system reset --force 2>/dev/null || true
+        sudo loginctl disable-linger "$AGENT_USER" || true
+        sudo loginctl terminate-user "$AGENT_USER" 2>/dev/null || true
+        removed=0
+        for _ in $(seq 1 15); do
+            if sudo userdel --remove "$AGENT_USER" 2>/dev/null; then removed=1; break; fi
+            sleep 1
+        done
+        [ "$removed" -eq 1 ] || { echo "could not remove $AGENT_USER; run: sudo userdel --remove $AGENT_USER" >&2; exit 1; }
+        rm -f "$HOME/.local/share/applications/nanoborealis.desktop"
+        sudo rm -f /usr/local/bin/nanoborealis
+        echo "NanoBorealis agent removed" ;;
+    *)
+        echo "unknown command: $cmd" >&2
+        usage >&2
+        exit 2 ;;
+esac

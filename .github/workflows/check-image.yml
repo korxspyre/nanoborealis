@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+---
+name: Check an image
+
+# Runs tests/image-checks.sh (from this commit) against any published image, e.g. stable, to see
+# whether a new check catches a problem in what users already have. Run by hand.
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "Image to check"
+        required: false
+        default: "ghcr.io/korxspyre/nanoborealis:stable"
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Make room
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: Check
+        run: |
+          podman pull "${{ inputs.image }}"
+          podman run --rm --entrypoint /usr/bin/bash -v "$PWD/tests:/tests:ro" "${{ inputs.image }}" /tests/image-checks.sh

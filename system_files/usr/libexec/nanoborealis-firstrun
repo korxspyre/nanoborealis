@@ -1,0 +1,72 @@
+#!/usr/bin/bash
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+# Opens the NanoBorealis agent setup in a terminal at login: once, and only for administrators.
+set -u
+
+marker="${XDG_STATE_HOME:-$HOME/.local/state}/nanoborealis/firstrun-done"
+
+if [ "${1:-}" = "--run" ]; then
+    cd /usr/share/nanoborealis || exit 1
+    # Setup downloads the agent, and right after an install Wi-Fi may not be connected yet.
+    if command -v nm-online >/dev/null && ! nm-online -q -t 10; then
+        echo "Setup needs the internet. Connect to a network from the icon in the panel,"
+        echo "and setup carries on by itself."
+        until nm-online -q -t 30; do :; done
+        echo "Connected."
+    fi
+    if bash install.sh; then
+        mkdir -p "$(dirname "$marker")" && touch "$marker"
+        # An install without a network leaves the clock on UTC. Set the time zone from this
+        # network's location, the way the Fedora installer does.
+        case "$(timedatectl show -p Timezone --value 2>/dev/null)" in
+            ""|UTC|Etc/UTC|Etc/Universal|Universal|Zulu)
+                zone="$(curl -fsS --max-time 10 https://geoip.fedoraproject.org/city 2>/dev/null \
+                    | python3 -c 'import json, sys; print(json.load(sys.stdin).get("time_zone") or "")' 2>/dev/null)"
+                if [ -n "$zone" ] && timedatectl list-timezones 2>/dev/null | grep -qx "$zone" \
+                    && sudo timedatectl set-timezone "$zone"; then
+                    echo
+                    echo "Time zone set to $zone from your network. Change it in System Settings > Date & Time."
+                fi ;;
+        esac
+        # Installed from a stick set to the dev build: bring it up to date now. A stable
+        # installer written for dev has only pointed the computer at it, and a
+        # dev installer can be a build or two behind. `update` says whether to restart.
+        tracked="$(sudo bootc status --format=json 2>/dev/null \
+            | python3 -c 'import json, sys; print(((json.load(sys.stdin).get("spec") or {}).get("image") or {}).get("image", ""))' 2>/dev/null)"
+        # An NVIDIA GPU (display or 3D controller, vendor 10de): the NVIDIA edition carries its
+        # driver, so the pool can run models on it. The update keeps the build this computer follows.
+        if lspci -n 2>/dev/null | grep -qE ' 03(00|02): 10de:' && [[ "$tracked" != */nanoborealis-nvidia:* ]]; then
+            echo
+            echo "This computer has an NVIDIA GPU. Moving it to the NVIDIA edition, whose driver lets your"
+            echo "pool run models on the GPU (a few GB to download; it takes effect after a restart)..."
+            nanoborealis update --nvidia --yes || true
+        else
+            case "$tracked" in
+                *:dev)
+                    echo
+                    echo "This computer follows the ${tracked##*:} build. Checking for a newer one..."
+                    nanoborealis update --yes || true ;;
+            esac
+        fi
+        echo
+        echo "NanoBorealis is ready. Open 'NanoBorealis' from the app menu. You can close this window."
+    else
+        echo
+        echo "Setup didn't finish. It will open again at your next login, or run it any time with:"
+        echo "  bash /usr/share/nanoborealis/install.sh"
+    fi
+    exit 0
+fi
+
+[ -e "$marker" ] && exit 0
+# Set up under an earlier name: already done, don't ask again.
+[ -e "${XDG_STATE_HOME:-$HOME/.local/state}/nanobot-os/firstrun-done" ] && exit 0
+id -nG | tr ' ' '\n' | grep -qx wheel || exit 0
+
+# The Welcome Center opens at first login too: set up the agent once it's closed, not on top of it.
+for _ in 1 2 3 4 5 6; do pgrep -u "$UID" -x plasma-welcome >/dev/null && break; sleep 2; done
+while pgrep -u "$UID" -x plasma-welcome >/dev/null; do sleep 2; done
+
+exec konsole --hold --profile NanoBorealis -p tabtitle="NanoBorealis setup" \
+    -e /usr/libexec/nanoborealis-firstrun --run

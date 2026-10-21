@@ -1,0 +1,19 @@
+{
+  "providers": {
+    "custom": { "apiKey": "stub", "apiBase": "http://127.0.0.1:18080/v1" }
+  },
+  "modelPresets": {
+    "stub": { "provider": "custom", "model": "stub", "maxTokens": 2048, "contextWindowTokens": 32768, "temperature": 0.2 }
+  },
+  "agents": { "defaults": { "modelPreset": "stub" } },
+  "gateway": { "port": 18791 },
+  "channels": {
+    "websocket": {
+      "enabled": true,
+      "host": "127.0.0.1",
+      "port": 18765,
+      "tokenIssueSecret": "test-password",
+      "websocketRequiresToken": true
+    }
+  }
+}

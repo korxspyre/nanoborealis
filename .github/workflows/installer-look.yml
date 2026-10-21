@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+---
+name: Installer look
+
+# Looks inside the latest installer ISO: what the boot menu says, which artwork and stylesheet
+# Anaconda uses, and what the installer screen looks like when booted in a VM. Run by hand
+# while reskinning the installer.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release to inspect (default: latest)"
+        required: false
+        default: ""
+
+jobs:
+  look:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Tools
+        run: sudo apt-get update -q && sudo apt-get install -y -q xorriso squashfs-tools qemu-system-x86 ovmf cpio socat
+
+      - name: Fetch the ISO
+        run: |
+          tag="${{ inputs.tag }}"
+          [ -n "$tag" ] || tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern '*.iso.part*' --dir iso
+          cat iso/*.iso.part* > installer.iso && rm -rf iso
+          ls -la installer.iso
+
+      - name: Boot menu and layout
+        run: |
+          xorriso -indev installer.iso -find / -maxdepth 2 2>/dev/null | head -50
+          for f in /boot/grub2/grub.cfg /EFI/BOOT/grub.cfg /isolinux/isolinux.cfg; do
+            echo "--- $f"; xorriso -osirrox on -indev installer.iso -extract "$f" /tmp/cfg 2>/dev/null && cat /tmp/cfg && rm -f /tmp/cfg
+          done
+          xorriso -indev installer.iso -report_el_torito plain 2>/dev/null
+          xorriso -indev installer.iso -report_system_area plain 2>/dev/null | head -20
+
+      - name: Anaconda's artwork and product name
+        run: |
+          mkdir -p x && xorriso -osirrox on -indev installer.iso -extract /images x/images 2>/dev/null; ls -la x/images
+          img="$(ls x/images/install.img 2>/dev/null || true)"
+          [ -n "$img" ] || { echo "no install.img"; exit 0; }
+          sudo unsquashfs -d stage2 "$img" >/dev/null
+          root=stage2; [ -f stage2/LiveOS/rootfs.img ] && { sudo mkdir -p rootfs; sudo mount -o loop,ro stage2/LiveOS/rootfs.img rootfs; root=rootfs; }
+          echo "--- .buildstamp"; cat "$root/.buildstamp" 2>/dev/null
+          echo "--- pixmaps"; ls -la "$root/usr/share/anaconda/pixmaps" 2>/dev/null
+          echo "--- anaconda css"; ls "$root/usr/share/anaconda/"*.css 2>/dev/null; head -60 "$root/usr/share/anaconda/anaconda-gtk.css" 2>/dev/null
+          echo "--- web ui?"; ls "$root/usr/share/cockpit" 2>/dev/null | head; ls "$root/usr/share/anaconda/" | head -40
+          echo "--- product config"; ls "$root/etc/anaconda/profile.d" 2>/dev/null || true
+          echo "--- artwork sizes"; file "$root"/usr/share/anaconda/pixmaps/*.png; cat "$root/usr/share/anaconda/pixmaps/fedora.css"
+          mkdir -p look && cp -r "$root/usr/share/anaconda/pixmaps" look/ 2>/dev/null || true
+          cp "$root/usr/share/anaconda/"*.css look/ 2>/dev/null || true
+          cp "$root/.buildstamp" look/buildstamp.txt 2>/dev/null || true
+
+      - name: Boot it and take screenshots
+        run: |
+          [ -e /dev/kvm ] && sudo chmod 666 /dev/kvm && accel="-enable-kvm -cpu host" || accel=""
+          echo "acceleration: ${accel:-none}"
+          qemu-system-x86_64 $accel -m 4096 -smp 2 -machine q35 -bios /usr/share/ovmf/OVMF.fd \
+            -cdrom installer.iso -display none -vga std -monitor unix:/tmp/mon,server,nowait -daemonize
+          shot() { sleep "$1"; echo "screendump $PWD/look/$2.ppm" | socat - UNIX-CONNECT:/tmp/mon >/dev/null 2>&1 || python3 - "$2" <<'EOF'
+          import socket, sys
+          s = socket.socket(socket.AF_UNIX); s.connect("/tmp/mon"); s.send(f"screendump look/{sys.argv[1]}.ppm\n".encode()); s.close()
+          EOF
+          }
+          mkdir -p look
+          xorriso -indev installer.iso -find /images -name product.img 2>/dev/null || true
+          shot 15 01-boot-menu
+          shot 240 02-installer
+          shot 180 03-installer-later
+          python3 -c "
+          import glob
+          from PIL import Image
+          for p in glob.glob('look/*.ppm'):
+              Image.open(p).save(p[:-4] + '.png'); print('saved', p[:-4] + '.png')
+          " 2>/dev/null || (pip install -q pillow && python3 -c "
+          import glob
+          from PIL import Image
+          for p in glob.glob('look/*.ppm'):
+              Image.open(p).save(p[:-4] + '.png'); print('saved', p[:-4] + '.png')
+          ")
+          rm -f look/*.ppm
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: installer-look
+          path: look/

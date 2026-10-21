@@ -1,0 +1,66 @@
+#!/usr/bin/bash
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+# Keeps the NanoBorealis agent account off the local network. It can still reach DNS and
+# the internet (OpenRouter, package mirrors), but no private, link-local, or CGNAT address.
+# It may answer connections that LAN devices open to it (`nanoborealis remote on`), since
+# those packets travel in conntrack's reply direction; it can never start one itself.
+# Root loads this at boot, so the agent, which has no root on the host, can't undo it.
+# If this computer is in a pool, the agent may also use the pool relay (`nanoborealis pool`),
+# which offers chat only; the pool node's own API (no password) stays out of its reach.
+# If it has a council (`nanoborealis council`), its seats may reach the Hall, which needs a token.
+set -euo pipefail
+
+if ! uid="$(id -u nanobot-agent 2>/dev/null)"; then
+    echo "nanobot-agent does not exist yet; nothing to guard"
+    exit 0
+fi
+
+pool_rules=""
+if [ -f /etc/nanoborealis/pool.env ]; then
+    pool_rules="        meta skuid $uid fib daddr type local tcp dport 11436 accept"
+    echo "pool: the agent may use this computer's pool relay (port 11436)"
+fi
+council_rules=""
+if [ -f /etc/nanoborealis/council.env ]; then
+    council_rules="        meta skuid $uid fib daddr type local tcp dport 11437 accept"
+    echo "council: the agent's seats may use this computer's Hall (port 11437)"
+fi
+
+nft -f - <<EOF
+add table inet nanoaurora
+delete table inet nanoaurora
+add table inet nanoborealis
+delete table inet nanoborealis
+table inet nanoborealis {
+    set lan4 {
+        type ipv4_addr
+        flags interval
+        elements = { 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16 }
+    }
+    set lan6 {
+        type ipv6_addr
+        flags interval
+        elements = { fc00::/7, fe80::/10 }
+    }
+    chain output {
+        type filter hook output priority filter; policy accept;
+        meta skuid $uid ct direction reply accept
+        meta skuid $uid fib daddr type local tcp dport 52415 counter drop
+$pool_rules
+$council_rules
+        meta skuid $uid ip daddr @lan4 meta l4proto { tcp, udp } th dport 53 accept
+        meta skuid $uid ip6 daddr @lan6 meta l4proto { tcp, udp } th dport 53 accept
+        meta skuid $uid ip daddr @lan4 counter drop
+        meta skuid $uid ip6 daddr @lan6 counter drop
+    }
+    chain input {
+        type filter hook input priority filter; policy accept;
+        # The pool relay is for this computer's agent only.
+        iifname != "lo" tcp dport 11436 counter drop
+        # So is the Hall: only this computer's seats and services.
+        iifname != "lo" tcp dport 11437 counter drop
+    }
+}
+EOF
+echo "local network blocked for nanobot-agent (uid $uid)"

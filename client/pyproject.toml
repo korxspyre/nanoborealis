@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+[project]
+name = "nanoborealis-client"
+version = "0.1.0"
+description = "Chat with your NanoBorealis agent from any device"
+readme = "README.md"
+license = "PolyForm-Noncommercial-1.0.0"
+authors = [{ name = "korxspyre" }]
+requires-python = ">=3.10"
+dependencies = [
+  "flet==1.0.1",
+  "websockets>=14",
+  "zeroconf>=0.130",
+]
+
+[project.optional-dependencies]
+# The desktop runtime; `flet build` bundles its own, so packaged apps don't need it.
+desktop = ["flet-desktop==1.0.1"]
+
+[tool.flet]
+# Android's application id is built from this, and Java names can't have hyphens. It must never
+# change once APKs are out: Android treats a different id as a different app.
+org = "io.github.more_than_just_kyrion"
+product = "NanoBorealis"
+company = "NanoBorealis"
+copyright = "Copyright (C) 2026 korxspyre. PolyForm Noncommercial 1.0.0."
+
+[tool.flet.app]
+path = "src"
+
+# Android: pyjnius reaches Android's own APIs, to hand a downloaded update to its installer.
+[tool.flet.android]
+dependencies = ["pyjnius"]
+
+# Android: finding NanoBorealis computers on the Wi-Fi (mDNS needs multicast), besides the internet
+# access every Flet app has, and installing the app's own updates.
+[tool.flet.android.permission]
+"android.permission.ACCESS_NETWORK_STATE" = true
+"android.permission.ACCESS_WIFI_STATE" = true
+"android.permission.CHANGE_WIFI_MULTICAST_STATE" = true
+"android.permission.REQUEST_INSTALL_PACKAGES" = true
+
+# jni_flutter 1.0.4+1 needs jni 1.1, but Flet 1.0.1's template still resolves jni 1.0, which fails
+# the Android build ("The generated bindings expect package:jni ^1.1.0").
+[tool.flet.flutter.pubspec.dependency_overrides]
+jni = "1.1.0"

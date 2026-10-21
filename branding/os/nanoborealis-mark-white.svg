@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>NanoBorealis</title>
+  <defs>
+    <radialGradient id="core" cx="256" cy="256" r="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.16" stop-color="#effff9"/>
+      <stop offset="0.42" stop-color="#7ff5cf"/>
+      <stop offset="0.74" stop-color="#2dd4bf"/>
+      <stop offset="1" stop-color="#8b5cf6"/>
+    </radialGradient>
+  </defs>
+  <!-- A four-pointed north star: long vertical points, shorter horizontal ones, concave sides. -->
+  <path fill="#ffffff" d="M256 36 C 268 176, 316 232, 452 256 C 316 280, 268 336, 256 476 C 244 336, 196 280, 60 256 C 196 232, 244 176, 256 36 Z"/>
+</svg>

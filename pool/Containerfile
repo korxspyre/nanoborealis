@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+# NanoBorealis pool node: an exo node, pinned to a combination tested in CI. Machines that run
+# it on the same network pool their memory to serve models too big for any one of them.
+#
+#   EXO_REPO / EXO_REF  exo's source, and the exact commit it's pinned to.
+#   VARIANT             cpu (standard PyPI MLX, any x86-64 Linux) or cuda13 (NVIDIA GPUs from Turing on,
+#                       RTX 20 series and newer; the host's driver 580+ comes in through CDI at run time)
+
+ARG EXO_REPO=https://github.com/exo-explore/exo
+ARG EXO_REF=21a54c5
+ARG VARIANT=cpu
+
+FROM docker.io/library/node:22-bookworm-slim AS dashboard
+ARG EXO_REPO
+ARG EXO_REF
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN git clone --filter=blob:none "$EXO_REPO" /src && git -C /src checkout "$EXO_REF"
+RUN cd /src/dashboard && npm install --no-audit --no-fund --loglevel=error && npm run build
+
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim AS build
+ARG EXO_REPO
+ARG EXO_REF
+ARG VARIANT
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl build-essential pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain nightly
+ENV PATH=/root/.cargo/bin:$PATH UV_PYTHON_PREFERENCE=only-system UV_LINK_MODE=copy
+RUN git clone --filter=blob:none "$EXO_REPO" /opt/exo && git -C /opt/exo checkout "$EXO_REF"
+COPY --from=dashboard /src/dashboard/build /opt/exo/dashboard/build
+# exo's own pins pair its custom (CUDA-only) mlx build with an older mlx-cpu; on CPU hosts the
+# runner can't import it. The matching PyPI pair works, and CI proves it before publishing.
+# There's no GPU at build time, so a cuda13 build can't start MLX here: its check is that the CUDA
+# build of MLX and NVML (exo's GPU detection) are installed.
+RUN cd /opt/exo \
+    && if [ "$VARIANT" = cuda13 ]; then uv sync --python /usr/local/bin/python3.13 --extra mlx-cuda13; \
+       else uv sync --python /usr/local/bin/python3.13 --extra mlx-cpu \
+            && uv pip install --python .venv/bin/python mlx==0.32.2 mlx-cpu==0.32.2; fi \
+    && if [ "$VARIANT" = cuda13 ]; then \
+         .venv/bin/python -c 'import importlib.metadata as m, pynvml; print("mlx-cuda-13", m.version("mlx-cuda-13"))'; \
+       else .venv/bin/python -c 'import mlx.core as mx; print("mlx", mx.__version__)'; fi \
+    && git -C /opt/exo log -1 --format='%H' > /opt/exo/ENGINE_COMMIT \
+    && echo "$EXO_REPO" > /opt/exo/ENGINE_REPO
+
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+ARG VARIANT
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libgomp1 && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 1000 --shell /usr/sbin/nologin exo
+COPY --from=build --chown=exo:exo /opt/exo /opt/exo
+# NanoBorealis's own files are PolyForm-Noncommercial-1.0.0; exo, in /opt/exo, keeps its own license (Apache-2.0).
+COPY LICENSE NOTICE /usr/share/licenses/nanoborealis-pool/
+USER exo
+WORKDIR /opt/exo
+# Nodes on the same network with the same --namespace form one pool. exo's default namespace is
+# its version, so any node running this engine version joins (a Mac running exo too).
+# exo refuses to start while the retired EXO_LIBP2P_NAMESPACE variable is set.
+ENV PYTHONUNBUFFERED=1 HOME=/home/exo
+LABEL org.opencontainers.image.title="nanoborealis-pool" \
+      org.opencontainers.image.licenses="PolyForm-Noncommercial-1.0.0 AND Apache-2.0" \
+      org.opencontainers.image.description="NanoBorealis pool node: exo, pinned and tested (${VARIANT})" \
+      org.nanoborealis.pool.variant="${VARIANT}"
+# API (peers also probe it to map the network), zenoh links between nodes, peer discovery.
+EXPOSE 52415/tcp 52414/tcp 52413/udp
+ENTRYPOINT ["/opt/exo/.venv/bin/exo"]

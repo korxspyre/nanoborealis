@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+# Setup and admin prompts show just the password prompt, not sudo's first-use lecture.
+Defaults lecture = never

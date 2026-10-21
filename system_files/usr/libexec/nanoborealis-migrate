@@ -1,0 +1,113 @@
+#!/usr/bin/bash
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+# Moves a system set up under an earlier name (nanobot OS, NanoAurora) onto NanoBorealis's
+# names, so an update never strands a working agent. Runs at every boot; each step only acts
+# when it finds the old layout, so it's a no-op on fresh installs and after the first run.
+set -uo pipefail
+
+AGENT_USER=nanobot-agent
+did=0
+log() { echo "nanoborealis-migrate: $*"; did=1; }
+
+# The shared projects folder. mv keeps its ACLs and SELinux labels.
+if [ -d /srv/nanoaurora ] && [ ! -e /srv/nanoborealis ]; then
+    mv /srv/nanoaurora /srv/nanoborealis && log "moved /srv/nanoaurora to /srv/nanoborealis"
+fi
+
+# Each user's shortcut to it, and the desktop update icon.
+for home in /var/home/*; do
+    [ -d "$home" ] || continue
+    owner="$(stat -c %U "$home")"
+    if [ -L "$home/nanoaurora-projects" ]; then
+        rm -f "$home/nanoaurora-projects"
+        ln -sfn /srv/nanoborealis/projects "$home/nanoborealis-projects"
+        chown -h "$owner:" "$home/nanoborealis-projects"
+        log "relinked projects for $owner"
+    fi
+    for desktop in "$home/Desktop" "$home/Schreibtisch" "$home/Bureau"; do
+        if [ -f "$desktop/nanoaurora-update.desktop" ]; then
+            install -o "$owner" -g "$(stat -c %G "$home")" -m 0755 \
+                /usr/share/applications/nanoborealis-update.desktop "$desktop/nanoborealis-update.desktop"
+            rm -f "$desktop/nanoaurora-update.desktop"
+            log "replaced the update icon on $owner's desktop"
+        fi
+    done
+done
+
+# The clock. Installs from installers before September 25, 2026 read the hardware clock as local
+# time and have network time off, so the clock runs hours off (and this computer's TLS
+# certificate looked "not yet valid" to others). Fix that once: read the hardware clock as UTC,
+# set the system clock from it, and turn on network time. The marker leaves any later choice alone.
+clock_marker=/var/lib/nanoborealis/clock-fixed
+if [ ! -e "$clock_marker" ]; then
+    if grep -qx LOCAL /etc/adjtime 2>/dev/null; then
+        timedatectl set-local-rtc 0 --adjust-system-clock && log "the hardware clock is read as UTC now"
+    fi
+    if ! systemctl is-enabled --quiet chronyd.service 2>/dev/null; then
+        systemctl enable --now chronyd.service && log "turned network time on (chronyd)"
+    fi
+    mkdir -p /var/lib/nanoborealis && touch "$clock_marker"
+fi
+
+# Devices approved for compute sharing.
+if [ -d /etc/nanoaurora ] && [ ! -e /etc/nanoborealis ]; then
+    mv /etc/nanoaurora /etc/nanoborealis && log "moved /etc/nanoaurora to /etc/nanoborealis"
+fi
+
+# The agent: its build context, its Quadlet unit, and its local image name.
+if agent_home="$(getent passwd "$AGENT_USER" | cut -d: -f6)" && [ -n "$agent_home" ]; then
+    if [ -d "$agent_home/nanobot-os" ] && [ ! -e "$agent_home/nanoborealis" ]; then
+        mv "$agent_home/nanobot-os" "$agent_home/nanoborealis" && log "moved the agent's build folder"
+    fi
+    quadlet="$agent_home/.config/containers/systemd/nanobot.container"
+    if [ -f "$quadlet" ] && grep -q -e '/srv/nanoaurora/' -e 'localhost/nanobot-os:' "$quadlet"; then
+        uid="$(id -u "$AGENT_USER")"
+        # Rootless Podman needs the agent's runtime directory; logind makes it for lingering users.
+        for _ in $(seq 1 60); do [ -S "/run/user/$uid/bus" ] && break; sleep 1; done
+        as_agent() {
+            runuser -u "$AGENT_USER" -- env HOME="$agent_home" XDG_RUNTIME_DIR="/run/user/$uid" \
+                DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" "$@"
+        }
+        if as_agent podman image exists localhost/nanobot-os:latest; then
+            as_agent podman tag localhost/nanobot-os:latest localhost/nanoborealis-agent:latest
+        fi
+        sed -i -e 's|/srv/nanoaurora/|/srv/nanoborealis/|g' \
+               -e 's|localhost/nanobot-os:latest|localhost/nanoborealis-agent:latest|' \
+               -e 's|^Description=.*|Description=NanoBorealis agent (nanobot gateway + WebUI)|' "$quadlet"
+        log "updated the agent's Quadlet unit"
+        if [ -S "/run/user/$uid/bus" ]; then
+            as_agent systemctl --user daemon-reload
+            as_agent systemctl --user restart nanobot.service || true
+        fi
+    fi
+fi
+
+# The pool's image. A pool joined before the project moved to its current GitHub account names its
+# image under the first account (ghcr.io/more-than-just-kyrion/...), whose packages are gone: the
+# pool node could never be pulled again, and the app's Pool page said "Connection refused".
+old_owner="ghcr.io/more-than-just-kyrion/"
+new_owner="ghcr.io/korxspyre/"
+for pool_file in /etc/nanoborealis/pool.json /etc/nanoborealis/pool.env; do
+    if [ -f "$pool_file" ] && grep -q "$old_owner" "$pool_file"; then
+        sed -i "s|$old_owner|$new_owner|g" "$pool_file" && log "pointed $pool_file at the current image account"
+    fi
+done
+if pool_home="$(getent passwd nanoborealis-pool | cut -d: -f6)" && [ -n "$pool_home" ]; then
+    exo_unit="$pool_home/.config/containers/systemd/exo.container"
+    if [ -f "$exo_unit" ] && grep -q "$old_owner" "$exo_unit"; then
+        sed -i "s|$old_owner|$new_owner|g" "$exo_unit" && log "pointed the pool node's unit at the current image account"
+        pool_uid="$(id -u nanoborealis-pool)"
+        for _ in $(seq 1 60); do [ -S "/run/user/$pool_uid/bus" ] && break; sleep 1; done
+        if [ -S "/run/user/$pool_uid/bus" ]; then
+            runuser -u nanoborealis-pool -- env HOME="$pool_home" XDG_RUNTIME_DIR="/run/user/$pool_uid" \
+                DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$pool_uid/bus" systemctl --user daemon-reload
+            # It was set up to run: start it from the right image (the pull can take a while).
+            runuser -u nanoborealis-pool -- env HOME="$pool_home" XDG_RUNTIME_DIR="/run/user/$pool_uid" \
+                DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$pool_uid/bus" systemctl --user start --no-block exo.service || true
+        fi
+    fi
+fi
+
+[ "$did" -eq 1 ] || echo "nanoborealis-migrate: nothing to migrate"
+exit 0

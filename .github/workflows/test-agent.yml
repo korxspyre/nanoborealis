@@ -1,0 +1,263 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+---
+name: Test agent container
+
+# Builds the agent image from the kit, runs it the way the Quadlet unit does on a laptop,
+# and checks the network guard, so a broken agent fails here instead of on a laptop.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'system_files/**'
+      - '.github/workflows/test-agent.yml'
+      # What the "managed" job runs from the app: its calls to the remote-access service.
+      - 'client/src/admin.py'
+      - 'client/src/agent_link.py'
+      - 'client/src/pairing.py'
+      - 'client/dev/managed_check.py'
+      - 'client/dev/checks.py'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'system_files/**'
+      - 'client/src/admin.py'
+      - 'client/src/agent_link.py'
+      - 'client/src/pairing.py'
+      - 'client/dev/managed_check.py'
+  workflow_dispatch:
+
+jobs:
+  agent:
+    name: Build and run the agent container
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Build the agent image
+        run: podman build -t nanobot-agent-test system_files/usr/share/nanoborealis/image
+
+      - name: Write a launcher that mirrors the Quadlet unit
+        run: |
+          mkdir -p "$RUNNER_TEMP/projects"
+          printf '%s' 'sk-or-v1-placeholder-not-a-real-key' | podman secret create openrouter_api_key -
+          printf '%s' 'ci-test-password' | podman secret create nanobot_webui_secret -
+          cat > "$RUNNER_TEMP/start-agent.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          podman run -d --name nanobot \
+            --userns=keep-id:uid=1000,gid=1000 \
+            -v nanobot-home:/home/nanobot \
+            -v "$RUNNER_TEMP/projects:/home/nanobot/projects" \
+            -p 127.0.0.1:8765:8765 \
+            --secret openrouter_api_key,type=env,target=OPENROUTER_API_KEY \
+            --secret nanobot_webui_secret,type=env,target=NANOBOT_WEBUI_SECRET \
+            nanobot-agent-test gateway --foreground
+          code=000
+          for i in $(seq 1 90); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/ || true)"
+            [ "$code" != "000" ] && break
+            if [ "$(podman inspect -f '{{.State.Running}}' nanobot)" != "true" ]; then
+              echo "container exited early"
+              break
+            fi
+            sleep 2
+          done
+          echo "--- container log ---"
+          podman logs nanobot 2>&1 | tail -40
+          echo "--- WebUI answered with HTTP $code ---"
+          [ "$code" != "000" ]
+          EOF
+          chmod +x "$RUNNER_TEMP/start-agent.sh"
+
+      - name: First start
+        run: '"$RUNNER_TEMP/start-agent.sh"'
+
+      - name: Seeded config, profile, and skills are in the persistent home
+        run: |
+          podman exec nanobot sh -c 'test -f ~/.nanobot/config.json && test -f ~/.nanobot/workspace/USER.md && ls ~/.nanobot/workspace/skills'
+          podman exec nanobot sh -c 'command -v nanobot && nanobot --version'
+
+      - name: The agent has sudo inside its container
+        run: podman exec nanobot sudo -n sh -c 'id -u && apt-get --version | head -1'
+
+      - name: Files the agent writes in projects land on the host, owned by the host user
+        run: |
+          podman exec nanobot sh -c 'echo made-by-agent > ~/projects/from-agent.txt'
+          test "$(cat "$RUNNER_TEMP/projects/from-agent.txt")" = made-by-agent
+          test "$(stat -c %u "$RUNNER_TEMP/projects/from-agent.txt")" = "$(id -u)"
+
+      - name: Home and listed apt packages survive a fresh container
+        run: |
+          podman exec nanobot sh -c 'mkdir -p ~/.config/nanoborealis && echo hello > ~/.config/nanoborealis/apt-packages && touch ~/persist-marker'
+          podman rm -f nanobot
+          "$RUNNER_TEMP/start-agent.sh"
+          podman exec nanobot sh -c 'test -f ~/persist-marker && command -v hello && hello'
+
+      - name: nanoborealis compute registers and removes a device in the agent's config
+        run: |
+          s=system_files/usr/share/nanoborealis/compute-config.py
+          read_config='import json, os; c = json.load(open(os.path.expanduser("~/.nanobot/config.json"))); d = c["agents"]["defaults"]'
+          podman exec -i nanobot python3 - add laptop2 http://192.168.1.50:11435/v1 abcdefghijklmnopqrst nanoborealis-qwen3-8b-32k < "$s"
+          podman exec -i nanobot python3 - use laptop2 < "$s"
+          podman exec nanobot python3 -c "$read_config"'
+          assert d["modelPreset"] == "device-laptop2", d
+          assert d["fallbackModels"] == ["ultra", "super", "lightning"], d
+          assert c["providers"]["device-laptop2"]["apiBase"] == "http://192.168.1.50:11435/v1"
+          assert c["providers"]["openrouter"]["apiKey"] == "${OPENROUTER_API_KEY}", "placeholders must survive"
+          print("ok: device registered and selected")'
+          podman exec -i nanobot python3 - remove laptop2 < "$s"
+          podman exec nanobot python3 -c "$read_config"'
+          assert d["modelPreset"] == "ultra" and "device-laptop2" not in c["modelPresets"], d
+          print("ok: device removed, cloud models back")'
+          sleep 3
+          code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/)"
+          echo "WebUI after the config edits: HTTP $code"
+          [ "$code" != "000" ]
+
+  firewall:
+    name: Network guard keeps the agent off the LAN
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Load the rules for a stand-in agent account
+        run: |
+          command -v nft >/dev/null || sudo apt-get install -y nftables
+          sudo useradd --system --no-create-home nanobot-agent
+          sudo bash system_files/usr/libexec/nanoborealis-firewall
+          sudo nft list table inet nanoborealis
+
+      - name: The agent reaches the internet but not the local network
+        run: |
+          lan_ip="$(ip -4 route get 1.1.1.1 | awk '{for (i = 1; i <= NF; i++) if ($i == "src") print $(i + 1)}')"
+          echo "runner address: $lan_ip"
+          case "$lan_ip" in
+            10.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|192.168.*) ;;
+            *) echo "runner address is not private; cannot test LAN blocking here"; exit 1 ;;
+          esac
+          python3 -m http.server 8080 --bind 0.0.0.0 >/dev/null 2>&1 &
+          sleep 1
+          curl -s -o /dev/null --max-time 5 "http://$lan_ip:8080/"
+          echo "control: the runner's own user reaches $lan_ip:8080"
+          if sudo -u nanobot-agent curl -s -o /dev/null --max-time 5 "http://$lan_ip:8080/"; then
+            echo "FAIL: the agent reached the local network"
+            exit 1
+          fi
+          echo "ok: the agent is blocked from $lan_ip"
+          sudo -u nanobot-agent curl -s -o /dev/null --max-time 20 -w 'ok: the agent reaches the internet (HTTP %{http_code})\n' https://openrouter.ai/api/v1/models
+
+      - name: LAN devices can still reach a port the agent serves (nanoborealis remote on)
+        run: |
+          lan_ip="$(ip -4 route get 1.1.1.1 | awk '{for (i = 1; i <= NF; i++) if ($i == "src") print $(i + 1)}')"
+          sudo -u nanobot-agent sh -c 'cd /tmp && exec python3 -m http.server 8081 --bind 0.0.0.0' >/dev/null 2>&1 &
+          sleep 1
+          if ! curl -s -o /dev/null --max-time 5 "http://$lan_ip:8081/"; then
+            echo "FAIL: the guard dropped the agent's replies to a LAN client"
+            sudo nft list table inet nanoborealis
+            exit 1
+          fi
+          echo "ok: a LAN client reaches the agent's port on $lan_ip:8081"
+
+
+  # The remote-access service as a laptop runs it (its own systemd sandbox) next to a real agent
+  # account running the agent's Quadlet unit. The app can ask for things that need the agent's
+  # podman before the agent has started (right after boot); on 2026-09-25 that left the agent
+  # unable to start ("mkdir /sys/fs/cgroup/...: read-only file system"), and this catches it.
+  managed:
+    name: The remote-access service manages a real agent
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      AGENT: nanobot-agent
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: An agent account with the agent's image, secrets and Quadlet unit, as on a laptop
+        run: |
+          sudo useradd --create-home "$AGENT"
+          grep -q "^$AGENT:" /etc/subuid || sudo usermod --add-subuids 200000-265535 --add-subgids 200000-265535 "$AGENT"
+          # The runner's /etc/environment points XDG_CONFIG_HOME, XDG_RUNTIME_DIR and the like at the
+          # runner's own folders, and PAM hands them to every account's user manager.
+          grep '^XDG_' /etc/environment || true
+          sudo sed -i -E '/^XDG_[A-Z_]+=/d' /etc/environment
+          sudo loginctl enable-linger "$AGENT"
+          uid="$(id -u "$AGENT")"
+          for i in $(seq 1 30); do sudo test -S "/run/user/$uid/bus" && break; sleep 1; done
+          sudo test -S "/run/user/$uid/bus"
+          # A clean environment: the runner's own (XDG_CONFIG_HOME and the rest) would leak in otherwise.
+          as_agent() { (cd / && sudo -u "$AGENT" env -i HOME="/home/$AGENT" PATH=/usr/local/bin:/usr/bin:/usr/sbin \
+                        XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" "$@"); }
+          cp -r system_files/usr/share/nanoborealis/image /tmp/agent-image && chmod -R a+rX /tmp/agent-image
+          as_agent podman build -q -t localhost/nanoborealis-agent:latest /tmp/agent-image
+          printf '%s' 'sk-or-v1-placeholder-not-a-real-key' | as_agent podman secret create openrouter_api_key -
+          printf '%s' 'ci-test-password' | as_agent podman secret create nanobot_webui_secret -
+          sudo install -d -o "$AGENT" /srv/nanoborealis/projects
+          sudo install -d -o "$AGENT" "/home/$AGENT/.config" "/home/$AGENT/.config/containers" \
+            "/home/$AGENT/.config/containers/systemd"
+          sudo install -o "$AGENT" -m 644 system_files/usr/share/nanoborealis/nanobot.container \
+            "/home/$AGENT/.config/containers/systemd/"
+          as_agent systemctl --user daemon-reload
+          if ! as_agent systemctl --user cat nanobot.service | grep -m1 -F 'ExecStart='; then
+            as_agent /usr/libexec/podman/quadlet -dryrun -user 2>&1 | tail -20
+            exit 1
+          fi
+          # As after a boot: nothing has set up the agent's rootless podman yet.
+          as_agent systemctl --user stop 'podman-pause-*.scope' || true
+          sudo pkill -u "$AGENT" -x catatonit || true
+          sleep 1
+          ! pgrep -u "$AGENT" -x catatonit
+
+      - name: The remote-access service, in its real sandbox
+        run: |
+          # The owner's commands run in their own session, as when someone is signed in at the computer.
+          sudo loginctl enable-linger "$USER"
+          sudo install -m 755 system_files/usr/libexec/nanoborealis-remote /usr/libexec/nanoborealis-remote
+          sudo install -m 644 system_files/usr/lib/systemd/system/nanoborealis-remote.service /etc/systemd/system/
+          # Test mode for pairing only: PINs go to a file, and this account stands for the person at the screen.
+          sudo install -d /etc/systemd/system/nanoborealis-remote.service.d
+          printf '[Service]\nEnvironment=NANOBOREALIS_REMOTE_TEST_PIN_FILE=/run/nanoborealis/test-pin NANOBOREALIS_REMOTE_TEST_OWNER=%s\n' \
+            "$USER" | sudo tee /etc/systemd/system/nanoborealis-remote.service.d/test.conf
+          sudo systemctl daemon-reload
+          sudo systemctl start nanoborealis-remote
+          for i in $(seq 1 30); do sudo journalctl -u nanoborealis-remote -o cat | grep -q 'paired devices on port' && break; sleep 1; done
+          sudo journalctl -u nanoborealis-remote -o cat --no-pager
+
+      - name: Before the agent runs, the app asks for what needs its podman (as right after boot)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet "websockets>=14"
+          sudo "$RUNNER_TEMP/venv/bin/python" client/dev/managed_check.py before 127.0.0.1:8766 \
+            /run/nanoborealis/test-pin "$RUNNER_TEMP/paired.json"
+
+      - name: The agent still starts
+        run: |
+          uid="$(id -u "$AGENT")"
+          as_agent() { (cd / && sudo -u "$AGENT" env -i HOME="/home/$AGENT" PATH=/usr/local/bin:/usr/bin:/usr/sbin \
+                        XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" "$@"); }
+          as_agent systemctl --user start nanobot.service
+          for i in $(seq 1 90); do curl -s -o /dev/null http://127.0.0.1:8765/ && break; sleep 2; done
+          curl -s -o /dev/null -w 'ok   the agent started; its WebUI answers HTTP %{http_code}\n' http://127.0.0.1:8765/
+
+      - name: Its files, WebUI, key and restarts, through the service
+        run: |
+          sudo "$RUNNER_TEMP/venv/bin/python" client/dev/managed_check.py after "$RUNNER_TEMP/paired.json"
+          test -f /tmp/nanoborealis-terminal-check
+          echo "ok   a file the owner's command made is in the computer's own /tmp"
+          for i in $(seq 1 90); do sudo test -f /var/lib/nanoborealis/remote/free-only-applied && break; sleep 1; done
+          sudo test -f /var/lib/nanoborealis/remote/free-only-applied
+          echo "ok   the free-models step ran once the agent answered"
+
+      - name: Service and agent logs
+        if: always()
+        run: |
+          sudo journalctl -u nanoborealis-remote --no-pager -o short-iso | tail -60
+          sudo journalctl _UID="$(id -u "$AGENT")" --no-pager -o short-iso | tail -80

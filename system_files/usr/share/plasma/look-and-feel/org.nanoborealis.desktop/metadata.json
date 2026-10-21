@@ -1,0 +1,17 @@
+{
+    "KPackageStructure": "Plasma/LookAndFeel",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "NanoBorealis"
+            }
+        ],
+        "Description": "Aurora teal on a night sky, with a floating dock: the NanoBorealis desktop",
+        "Id": "org.nanoborealis.desktop",
+        "License": "GPL-2.0-or-later",
+        "Name": "NanoBorealis",
+        "Version": "1.0",
+        "Website": "https://github.com/korxspyre/nanoborealis"
+    },
+    "X-Plasma-APIVersion": "2"
+}

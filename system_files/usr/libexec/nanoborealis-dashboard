@@ -1,0 +1,648 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+"""NanoBorealis dashboard: what the lock screen shows while nobody is at this computer.
+
+Every few seconds it gathers, into one file (OUT, readable by root and administrators only):
+
+- the agent: running or not, its model, what it's doing right now (from its own log: the message it
+  is answering and where from, each tool it calls, its reply, errors), its chats with their latest
+  messages, today's usage, and its scheduled tasks with their last and next runs;
+- the paired devices, which are connected right now and for what (the remote-access service's
+  live.json), and when the others were last seen;
+- this computer: battery and power, load, memory, disk, network, uptime, and whether an update is
+  waiting for a restart;
+- a calendar: the owners' own calendars (iCalendar files or links listed in
+  ~/.config/nanoborealis/calendars, one per line, e.g. Google Calendar's "secret address in iCal
+  format") merged with the agent's schedules, for the next two weeks;
+- problems worth a glance: the agent down, its OpenRouter key refused, models failing, running on
+  battery, the disk filling up.
+
+The lock screen (the NanoBorealis dashboard in Plasma's lock screen) reads the file and never
+talks to anything itself.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import grp
+import json
+import os
+import pwd
+import re
+import shutil
+import socket
+import subprocess
+import threading
+import time
+import urllib.parse
+import urllib.request
+from collections import deque
+from pathlib import Path
+
+OUT = Path(os.environ.get("NANOBOREALIS_DASHBOARD_OUT", "/run/nanoborealis-dashboard/dashboard.json"))
+LIVE = Path(os.environ.get("NANOBOREALIS_DASHBOARD_LIVE", "/run/nanoborealis/live.json"))
+REMOTE_STATE = Path(os.environ.get("NANOBOREALIS_DASHBOARD_REMOTE_STATE", "/var/lib/nanoborealis/remote"))
+WEBUI = os.environ.get("NANOBOREALIS_DASHBOARD_WEBUI", "http://127.0.0.1:8765")
+AGENT_USER = "nanobot-agent"
+EVERY = 3  # seconds between updates of the file
+SLOW_EVERY = 60  # seconds between the slower lookups (agent API, calendars, updates)
+CALENDAR_DAYS = 14
+
+
+def log(message: str) -> None:
+    print(f"nanoborealis-dashboard: {message}", flush=True)
+
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+# -- What the agent is doing: its log ----------------------------------------------------------
+
+LINE = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? \| (\w+) +\| [^|]* \| (.*)$")
+
+
+class Activity:
+    """Follows the agent's log (journalctl -f) and keeps what it did lately, and what it's doing."""
+
+    def __init__(self) -> None:
+        self.events: deque[dict] = deque(maxlen=40)
+        self.current: dict | None = None  # the message being answered right now
+        self.errors: deque[dict] = deque(maxlen=20)
+        self.lock = threading.Lock()
+
+    def follow(self) -> None:
+        while True:
+            try:
+                uid = pwd.getpwnam(AGENT_USER).pw_uid
+                process = subprocess.Popen(
+                    ["journalctl", "-f", "-n", "300", "-o", "json", f"_UID={uid}", "--output-fields=MESSAGE,__REALTIME_TIMESTAMP"],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                for raw in process.stdout:
+                    try:
+                        entry = json.loads(raw)
+                    except ValueError:
+                        continue
+                    message = entry.get("MESSAGE")
+                    if isinstance(message, list):  # journald hands over binary-ish messages as bytes
+                        message = bytes(message).decode(errors="replace")
+                    stamp = int(entry.get("__REALTIME_TIMESTAMP", "0")) // 1000
+                    if isinstance(message, str):
+                        self.take(message, stamp)
+            except (KeyError, OSError) as e:
+                log(f"can't follow the agent's log: {e}")
+            time.sleep(10)
+
+    def add(self, kind: str, text: str, stamp: int, **extra) -> None:
+        self.events.append({"kind": kind, "text": text[:400], "at": stamp, **extra})
+
+    def take(self, message: str, stamp: int) -> None:
+        match = LINE.match(message.strip())
+        if not match:
+            return
+        level, text = match.groups()
+        with self.lock:
+            if text.startswith("Processing message from "):
+                source, _, body = text[len("Processing message from "):].partition(": ")
+                self.current = {"from": channel_name(source), "text": body[:400], "since": stamp, "tools": 0,
+                                "step": "Thinking"}
+                self.add("message", body, stamp, source=channel_name(source))
+            elif text.startswith("Tool call: "):
+                call = text[len("Tool call: "):]
+                name, _, args = call.partition("(")
+                summary = describe_tool(name, args.rstrip(")"))
+                self.add("tool", summary, stamp, tool=name)
+                if self.current:
+                    self.current["tools"] += 1
+                    self.current["step"] = summary
+            elif text.startswith("Response to "):
+                target, _, body = text[len("Response to "):].partition(": ")
+                failed = body.startswith("Error:")
+                self.add("reply", body, stamp, target=channel_name(target), failed=failed)
+                self.current = None
+                if not failed:
+                    self.errors.clear()  # it answered: earlier trouble is over
+            elif text.startswith("Cron: executing job "):
+                job = text.split("'")[1] if "'" in text else text
+                if job not in ("heartbeat", "dream"):  # the routine ones show under schedules
+                    self.add("schedule", f"Running its scheduled task “{job}”", stamp)
+            elif text.startswith("Fallback ") and "succeeded" in text:
+                self.add("model", text, stamp)
+            elif level in ("WARNING", "ERROR") and ("failed" in text or "error" in text.lower()):
+                problem = model_problem(text)
+                if problem:
+                    self.errors.append({"text": problem, "at": stamp, "lasting": "key" in problem or "credit" in problem})
+
+    def snapshot(self) -> dict:
+        with self.lock:
+            current = dict(self.current) if self.current else None
+            if current and now_ms() - current["since"] > 30 * 60 * 1000:
+                current = None  # no reply logged for half an hour: it isn't still on it
+            return {"current": current, "events": list(self.events)[::-1][:25],
+                    "errors": list(self.errors)[::-1][:5]}
+
+
+def channel_name(source: str) -> str:
+    kind = source.split(":", 1)[0]
+    return {"websocket": "the NanoBorealis app", "telegram": "Telegram", "discord": "Discord", "slack": "Slack",
+            "whatsapp": "WhatsApp", "email": "email", "signal": "Signal", "matrix": "Matrix",
+            "msteams": "Microsoft Teams", "mattermost": "Mattermost", "cli": "the terminal",
+            "cron": "a scheduled task", "heartbeat": "its half-hourly check"}.get(kind, kind)
+
+
+def describe_tool(name: str, args: str) -> str:
+    try:
+        values = json.loads(args) if args.startswith("{") else {}
+    except ValueError:
+        values = {}
+    first = next((str(v) for v in values.values() if isinstance(v, (str, int, float))), "")
+    first = first.replace("\n", " ")[:120]
+    labels = {"exec": "Running", "exec_session": "Running", "read_file": "Reading", "write_file": "Writing",
+              "edit_file": "Editing", "apply_patch": "Editing", "list_dir": "Looking in", "find_files": "Finding",
+              "grep": "Searching for", "web_search": "Searching the web for", "web_fetch": "Reading",
+              "cron": "Scheduling", "my": "Checking itself", "create_goal": "Setting a goal:",
+              "run_cli_app": "Using", "message": "Messaging", "spawn": "Starting a helper for"}
+    label = labels.get(name, f"Using {name}")
+    return f"{label} {first}".strip()
+
+
+def model_problem(text: str) -> str | None:
+    lower = text.lower()
+    if "api key expired" in lower or "invalid_token" in lower or "user not found" in lower or "'code': 401" in lower:
+        return "OpenRouter refuses the agent's key: replace it in the app (Control center → Settings)."
+    if "'code': 402" in lower or "insufficient credits" in lower:
+        return "OpenRouter says the key is out of credit."
+    if "'code': 429" in lower or "rate limit" in lower:
+        model = re.search(r"'([\w./:-]+:free)'", text)
+        return f"{model.group(1) if model else 'A model'} is busy at the moment (rate-limited); it falls back to another."
+    if "all" in lower and "fallback model(s) failed" in lower:
+        return "None of the agent's models answered its last request."
+    return None
+
+
+# -- The agent's own API ---------------------------------------------------------------------------
+
+
+class Agent:
+    def __init__(self) -> None:
+        self.token = ""
+        self.token_until = 0.0
+
+    def secret(self) -> str:
+        return (REMOTE_STATE / "webui-secret").read_text().strip()
+
+    def get(self, path: str, timeout: float = 10) -> object:
+        if not self.token or time.time() > self.token_until:
+            request = urllib.request.Request(f"{WEBUI}/webui/bootstrap",
+                                             headers={"Authorization": f"Bearer {self.secret()}"})
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                boot = json.loads(response.read())
+            self.token = boot.get("api_token") or ""
+            self.token_until = time.time() + float(boot.get("expires_in") or 300) - 30
+        request = urllib.request.Request(f"{WEBUI}{path}", headers={"Authorization": f"Bearer {self.token}"})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read())
+
+    def thread_tail(self, key: str) -> list[dict]:
+        quoted = urllib.parse.quote(key, safe="")
+        data = self.get(f"/api/sessions/{quoted}/webui-thread?limit=6")
+        messages = data.get("messages") if isinstance(data, dict) else None
+        found = []
+        for m in messages or []:
+            if not isinstance(m, dict):
+                continue
+            role, content = m.get("role"), m.get("content")
+            if isinstance(content, list):
+                content = " ".join(part.get("text", "") for part in content if isinstance(part, dict))
+            if role in ("user", "assistant") and isinstance(content, str) and content.strip():
+                found.append({"role": role, "text": content.strip()[:300]})
+        return found[-2:]
+
+    def overview(self) -> dict:
+        result: dict = {}
+        try:
+            settings = self.get("/api/settings")
+            agent = settings.get("agent", {}) if isinstance(settings, dict) else {}
+            result["model"] = agent.get("model")
+            result["preset"] = agent.get("model_preset")
+            usage = settings.get("usage", {}) if isinstance(settings, dict) else {}
+            days = usage.get("days") or []
+            today = dt.date.today().isoformat()
+            result["tokens_today"] = next((d.get("total_tokens") for d in days if str(d.get("date", "")).startswith(today)), 0)
+            result["tokens_30d"] = usage.get("total_tokens_30d")
+            result["requests_30d"] = usage.get("requests_30d")
+        except Exception as e:
+            result["error"] = str(e)[:200]
+        try:
+            sessions = self.get("/api/sessions").get("sessions", [])
+            chats = []
+            for s in sorted(sessions, key=lambda s: s.get("updated_at") or "", reverse=True)[:6]:
+                chat = {"title": s.get("title") or s.get("preview") or "Untitled", "updated": s.get("updated_at"),
+                        "from": channel_name(str(s.get("key", "")))}
+                try:
+                    chat["last"] = self.thread_tail(str(s.get("key")))
+                except Exception:
+                    chat["last"] = [{"role": "user", "text": s.get("preview") or ""}]
+                chats.append(chat)
+            result["chats"] = chats
+        except Exception as e:
+            result.setdefault("error", str(e)[:200])
+        try:
+            jobs = self.get("/api/webui/automations").get("jobs", [])
+            result["schedules"] = [{
+                "name": describe_job(j), "enabled": j.get("enabled", True), "system": bool(j.get("protected")),
+                "schedule": describe_schedule(j.get("schedule") or {}),
+                "every_ms": (j.get("schedule") or {}).get("every_ms"),
+                "next": (j.get("state") or {}).get("next_run_at_ms"),
+                "last": (j.get("state") or {}).get("last_run_at_ms"),
+                "last_status": (j.get("state") or {}).get("last_status"),
+                "last_error": (j.get("state") or {}).get("last_error"),
+            } for j in jobs]
+        except Exception as e:
+            result.setdefault("error", str(e)[:200])
+        return result
+
+
+def describe_job(job: dict) -> str:
+    names = {"heartbeat": "Half-hourly check (HEARTBEAT.md)", "dream": "Tidying its memory"}
+    if job.get("id") in names:
+        return names[job["id"]]
+    message = ((job.get("payload") or {}).get("message") or "").strip()
+    return (job.get("name") or message or "A scheduled task")[:80]
+
+
+def describe_schedule(schedule: dict) -> str:
+    kind = schedule.get("kind")
+    if kind == "every" and schedule.get("every_ms"):
+        minutes = schedule["every_ms"] / 60000
+        return f"every {minutes:.0f} min" if minutes < 60 else f"every {minutes / 60:g} h"
+    if kind == "cron":
+        return f"cron {schedule.get('expr')}"
+    if kind == "at":
+        return "once"
+    return str(kind or "")
+
+
+# -- The agent's service, devices, this computer ----------------------------------------------------
+
+
+def agent_unit() -> dict:
+    try:
+        uid = pwd.getpwnam(AGENT_USER).pw_uid
+    except KeyError:
+        return {"installed": False, "running": False}
+    result = subprocess.run(
+        ["runuser", "-u", AGENT_USER, "--", "env", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+         f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus", "systemctl", "--user", "show", "nanobot.service",
+         "-p", "ActiveState", "-p", "SubState", "-p", "ActiveEnterTimestamp", "-p", "NRestarts"],
+        capture_output=True, text=True, timeout=15, cwd="/")
+    props = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    try:
+        with socket.create_connection(("127.0.0.1", 8765), timeout=2):
+            answering = True
+    except OSError:
+        answering = False
+    return {"installed": True, "running": answering or props.get("ActiveState") == "active",
+            "state": props.get("SubState") or props.get("ActiveState") or "unknown",
+            "since": props.get("ActiveEnterTimestamp") or None, "restarts": int(props.get("NRestarts") or 0)}
+
+
+def devices() -> list[dict]:
+    try:
+        paired = json.loads((REMOTE_STATE / "devices.json").read_text() or "{}")
+    except (OSError, ValueError):
+        paired = {}
+    try:
+        live = json.loads(LIVE.read_text() or "[]")
+    except (OSError, ValueError):
+        live = []
+    listed = []
+    for device_id, entry in paired.items():
+        connections = [c for c in live if c.get("id") == device_id]
+        listed.append({"name": entry.get("name", device_id), "owner": entry.get("owner"),
+                       "here": bool(entry.get("here")), "address": entry.get("address"),
+                       "seen": entry.get("seen"), "online": bool(connections),
+                       "doing": sorted({"chatting with the agent" if c.get("kind") == "app" else "using a terminal"
+                                        for c in connections}),
+                       "since": min((c.get("since") for c in connections), default=None)})
+    return sorted(listed, key=lambda d: (not d["online"], d["here"], -(d["seen"] or 0)))
+
+
+def read(path: str) -> str:
+    try:
+        return Path(path).read_text().strip()
+    except OSError:
+        return ""
+
+
+def machine() -> dict:
+    info: dict = {"name": socket.gethostname()}
+    try:
+        info["load"] = [float(x) for x in read("/proc/loadavg").split()[:3]]
+        info["cpus"] = os.cpu_count()
+        meminfo = dict(line.split(":", 1) for line in read("/proc/meminfo").splitlines() if ":" in line)
+        total = int(meminfo["MemTotal"].split()[0]) * 1024
+        available = int(meminfo["MemAvailable"].split()[0]) * 1024
+        info["memory"] = {"used": total - available, "total": total}
+        info["uptime_s"] = int(float(read("/proc/uptime").split()[0]))
+    except (KeyError, ValueError, IndexError):
+        pass
+    try:
+        usage = shutil.disk_usage("/var")
+        info["disk"] = {"used": usage.used, "total": usage.total}
+    except OSError:
+        pass
+    power = {}
+    for supply in Path("/sys/class/power_supply").glob("*"):
+        kind = read(str(supply / "type"))
+        if kind == "Mains":
+            power["plugged_in"] = read(str(supply / "online")) == "1"
+        elif kind == "Battery":
+            capacity = read(str(supply / "capacity"))
+            power["battery"] = int(capacity) if capacity.isdigit() else None
+            power["status"] = read(str(supply / "status"))
+    info["power"] = power
+    return info
+
+
+def network() -> dict:
+    """Slower: the Wi-Fi, this computer's addresses, and whether the internet answers."""
+    info: dict = {}
+    try:
+        wifi = subprocess.run(["nmcli", "-t", "-f", "ACTIVE,SSID,SIGNAL", "dev", "wifi"], capture_output=True,
+                              text=True, timeout=10).stdout
+        active = next((line.split(":") for line in wifi.splitlines() if line.startswith("yes:")), None)
+        if active and len(active) >= 3:
+            info["wifi"] = {"ssid": active[1], "signal": int(active[2]) if active[2].isdigit() else None}
+        addresses = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=5).stdout.split()
+        info["addresses"] = [a for a in addresses if "." in a][:3]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        with socket.create_connection(("openrouter.ai", 443), timeout=3):
+            info["online"] = True
+    except OSError:
+        info["online"] = False
+    return info
+
+
+def os_state() -> dict:
+    release = dict(line.split("=", 1) for line in read("/usr/lib/os-release").splitlines() if "=" in line)
+    state = {"version": release.get("IMAGE_VERSION", "").strip('"') or release.get("VERSION", "").strip('"')}
+    try:
+        status = json.loads(subprocess.run(["rpm-ostree", "status", "--json"], capture_output=True, text=True,
+                                           timeout=30).stdout or "{}")
+        deployments = status.get("deployments") or []
+        booted = next((d for d in deployments if d.get("booted")), {})
+        staged = next((d for d in deployments if d.get("staged")), None)
+        state["booted"] = booted.get("version")
+        state["staged"] = staged.get("version") if staged else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return state
+
+
+# -- The calendar -------------------------------------------------------------------------------------
+
+
+def unfold(text: str) -> list[str]:
+    lines: list[str] = []
+    for line in text.replace("\r\n", "\n").split("\n"):
+        if line[:1] in (" ", "\t") and lines:
+            lines[-1] += line[1:]
+        else:
+            lines.append(line)
+    return lines
+
+
+def ics_time(value: str, params: str) -> tuple[dt.datetime, bool]:
+    """An iCalendar date or date-time, as a local time, and whether it's a whole day."""
+    if "VALUE=DATE" in params or re.fullmatch(r"\d{8}", value):
+        return dt.datetime.strptime(value[:8], "%Y%m%d"), True
+    if value.endswith("Z"):
+        return dt.datetime.strptime(value, "%Y%m%dT%H%M%SZ").replace(tzinfo=dt.timezone.utc).astimezone().replace(tzinfo=None), False
+    zone = re.search(r"TZID=([^;:]+)", params)
+    moment = dt.datetime.strptime(value[:15], "%Y%m%dT%H%M%S")
+    if zone:
+        try:
+            from zoneinfo import ZoneInfo
+            return moment.replace(tzinfo=ZoneInfo(zone.group(1))).astimezone().replace(tzinfo=None), False
+        except Exception:
+            pass
+    return moment, False
+
+
+def parse_ics(text: str, source: str, start: dt.datetime, end: dt.datetime) -> list[dict]:
+    from dateutil.rrule import rrulestr
+    events, current = [], None
+    for line in unfold(text):
+        if line == "BEGIN:VEVENT":
+            current = {}
+        elif line == "END:VEVENT" and current is not None:
+            events.append(current)
+            current = None
+        elif current is not None and ":" in line:
+            head, _, value = line.partition(":")
+            name, _, params = head.partition(";")
+            if name == "EXDATE":
+                current.setdefault("EXDATE", []).append((params, value))
+            else:
+                current[name] = (params, value)
+    found = []
+    for event in events:
+        if "DTSTART" not in event or event.get("STATUS", ("", ""))[1].upper() == "CANCELLED":
+            continue
+        try:
+            begin, all_day = ics_time(event["DTSTART"][1], event["DTSTART"][0])
+            finish = ics_time(event["DTEND"][1], event["DTEND"][0])[0] if "DTEND" in event else begin
+            length = finish - begin
+            title = event.get("SUMMARY", ("", "(no title)"))[1].replace("\\,", ",").replace("\\n", " ")
+            place = event.get("LOCATION", ("", ""))[1].replace("\\,", ",")
+            if "RRULE" in event:
+                rule = rrulestr(event["RRULE"][1], dtstart=begin, ignoretz=True)
+                skipped = set()
+                for params, value in event.get("EXDATE", []):
+                    for part in value.split(","):
+                        skipped.add(ics_time(part, params)[0])
+                starts = [s for s in rule.between(start - length, end, inc=True) if s not in skipped]
+            else:
+                starts = [begin] if begin + length >= start and begin <= end else []
+            for s in starts:
+                found.append({"title": title[:120], "where": place[:80], "start": s.isoformat(timespec="minutes"),
+                              "end": (s + length).isoformat(timespec="minutes"), "all_day": all_day,
+                              "source": source})
+        except (ValueError, KeyError, TypeError):
+            continue
+    return found
+
+
+def calendars(start: dt.datetime, end: dt.datetime) -> tuple[list[dict], list[str]]:
+    """The administrators' own calendars (~/.config/nanoborealis/calendars)."""
+    events, problems = [], []
+    try:
+        admins = set(grp.getgrnam("wheel").gr_mem)
+    except KeyError:
+        admins = set()
+    for name in sorted(admins):
+        try:
+            listing = Path(pwd.getpwnam(name).pw_dir) / ".config/nanoborealis/calendars"
+            entries = [l.strip() for l in listing.read_text().splitlines() if l.strip() and not l.startswith("#")]
+        except (KeyError, OSError):
+            continue
+        for entry in entries:
+            label = urllib.parse.urlsplit(entry).netloc or Path(entry).name
+            try:
+                if entry.startswith(("http://", "https://", "webcal://")):
+                    url = "https://" + entry[len("webcal://"):] if entry.startswith("webcal://") else entry
+                    request = urllib.request.Request(url, headers={"User-Agent": "NanoBorealis"})
+                    with urllib.request.urlopen(request, timeout=20) as response:
+                        text = response.read(8 * 1024 * 1024).decode("utf-8", errors="replace")
+                else:
+                    path = Path(os.path.expanduser(entry.replace("~", pwd.getpwnam(name).pw_dir, 1)))
+                    text = path.read_text(errors="replace")
+                events += parse_ics(text, label, start, end)
+            except Exception as e:
+                problems.append(f"Couldn't read the calendar {label}: {str(e)[:80]}")
+    return events, problems
+
+
+def schedule_events(schedules: list[dict], start: dt.datetime, end: dt.datetime) -> list[dict]:
+    """The agent's scheduled tasks as calendar entries: user tasks at each run, the frequent system
+    ones only at their next run."""
+    found = []
+    for job in schedules:
+        if not job.get("enabled") or not job.get("next"):
+            continue
+        first = dt.datetime.fromtimestamp(job["next"] / 1000)
+        runs = [first]
+        every = job.get("every_ms")
+        if every and not job.get("system") and every >= 3600 * 1000:
+            while runs[-1] < end and len(runs) < 60:
+                runs.append(runs[-1] + dt.timedelta(milliseconds=every))
+        for run in runs:
+            if start <= run <= end:
+                found.append({"title": job["name"], "where": "", "start": run.isoformat(timespec="minutes"),
+                              "end": run.isoformat(timespec="minutes"), "all_day": False, "source": "agent",
+                              "agent": True})
+    return found
+
+
+# -- Putting it together ---------------------------------------------------------------------------------
+
+
+def problems(state: dict, activity: dict) -> list[dict]:
+    found = []
+    agent = state.get("agent", {})
+    if agent.get("installed") and not agent.get("running"):
+        found.append({"level": "bad", "text": f"The agent isn't running ({agent.get('state')}). Restart it from the app."})
+    elif agent.get("restarts", 0) > 3:
+        found.append({"level": "warn", "text": f"The agent restarted {agent['restarts']} times since the computer started."})
+    seen = set()
+    for error in activity.get("errors", []):
+        window = 6 * 3600 * 1000 if error.get("lasting") else 30 * 60 * 1000
+        if time.time() * 1000 - error["at"] < window and error["text"] not in seen:
+            seen.add(error["text"])
+            found.append({"level": "bad" if "key" in error["text"] or "None of" in error["text"] else "warn",
+                          "text": error["text"]})
+    for job in state.get("api", {}).get("schedules", []):
+        if job.get("last_status") not in (None, "ok"):
+            found.append({"level": "warn", "text": f"“{job['name']}” failed last time: {job.get('last_error') or job['last_status']}"})
+    this = {**state.get("machine", {}), **state.get("network", {})}
+    power = this.get("power", {})
+    if power and power.get("plugged_in") is False:
+        found.append({"level": "warn", "text": f"On battery ({power.get('battery')}%): it will sleep when idle, and the agent with it."})
+    disk = this.get("disk")
+    if disk and disk["total"] and disk["used"] / disk["total"] > 0.9:
+        found.append({"level": "warn", "text": "The disk is over 90% full."})
+    if this.get("online") is False:
+        found.append({"level": "bad", "text": "No internet: the agent can't reach its models."})
+    if state.get("os", {}).get("staged"):
+        found.append({"level": "info", "text": f"Update {state['os']['staged']} is ready: it applies at the next restart."})
+    for text in state.get("calendar_problems", []):
+        found.append({"level": "warn", "text": text})
+    return found
+
+
+def write(state: dict) -> None:
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    temporary = OUT.with_suffix(".tmp")
+    temporary.write_text(json.dumps(state, ensure_ascii=False))
+    try:
+        os.chown(temporary, 0, grp.getgrnam("wheel").gr_gid)  # administrators, whose lock screen reads it
+        os.chmod(temporary, 0o640)
+    except (KeyError, PermissionError):
+        pass
+    os.replace(temporary, OUT)
+
+
+HALL_STATE = "/var/lib/nanoborealis/hall"
+HALL_URL = "http://127.0.0.1:11437"
+
+
+def council() -> dict | None:
+    """The council at a glance: its seats with their trust, the task board's counts, open votes,
+    and the latest thing said in the Hall. None when this computer has no council."""
+    import urllib.request
+
+    try:
+        token = open(os.path.join(HALL_STATE, "admin.token"), encoding="utf-8").read().strip()
+    except OSError:
+        return None
+
+    def get(path: str) -> dict:
+        request = urllib.request.Request(HALL_URL + path, headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(request, timeout=3) as response:
+            return json.loads(response.read())
+
+    try:
+        seats, tasks, votes, rooms = get("/seats")["seats"], get("/tasks")["tasks"], get("/votes?open=1")["votes"], \
+            get("/rooms")["rooms"]
+        latest = None
+        hall_rooms = [r for r in rooms if r["kind"] == "hall"]
+        if hall_rooms:
+            said = [m for m in get(f"/rooms/{hall_rooms[0]['id']}/messages")["messages"] if m["kind"] != "pass"]
+            if said:
+                names = {s["id"]: s["name"] for s in seats} | {"you": "You", "advisor": "Advisor", "hall": "The Hall"}
+                latest = {"room": hall_rooms[0]["title"], "author": names.get(said[-1]["author"], said[-1]["author"]),
+                          "text": " ".join(said[-1]["text"].split())[:160]}
+    except (OSError, ValueError, KeyError) as e:
+        return {"error": str(e)[:200]}
+    count = lambda state: sum(1 for t in tasks if t["state"] == state)  # noqa: E731
+    return {"seats": [{"name": s["name"], "trust": s["trust"], "weight": s["weight"], "chair": s["chair"]}
+                      for s in seats],
+            "open": count("open"), "working": count("claimed"), "review": count("review"), "failed": count("failed"),
+            "votes": len(votes), "latest": latest}
+
+
+def main() -> None:
+    activity = Activity()
+    threading.Thread(target=activity.follow, daemon=True).start()
+    api, slow, slow_at, api_client = {}, {}, 0.0, Agent()
+    log(f"writing {OUT} every {EVERY} s")
+    while True:
+        started = time.time()
+        if started - slow_at > SLOW_EVERY:
+            slow_at = started
+            try:
+                api = api_client.overview()
+            except Exception as e:
+                api = {"error": str(e)[:200]}
+            today = dt.datetime.combine(dt.date.today(), dt.time())
+            until = today + dt.timedelta(days=CALENDAR_DAYS)
+            events, calendar_problems = calendars(today, until)
+            events += schedule_events(api.get("schedules", []), dt.datetime.now(), until)
+            slow = {"os": os_state(), "network": network(), "calendar": sorted(events, key=lambda e: e["start"])[:200],
+                    "calendar_problems": calendar_problems}
+        state = {"updated": now_ms(), "agent": agent_unit(), "api": api, "activity": activity.snapshot(),
+                 "devices": devices(), "machine": machine(), "council": council(), **slow}
+        state["problems"] = problems(state, state["activity"])
+        try:
+            write(state)
+        except OSError as e:
+            log(f"can't write {OUT}: {e}")
+        time.sleep(max(0.5, EVERY - (time.time() - started)))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,14 @@
+#!/usr/bin/sh
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+# The NanoBorealis app on this computer: the agent's own window, the same app as on phones and
+# PCs. It pairs with this computer by itself. Its Python environment and Flet's window program
+# come with the OS (build_files/build.sh), so nothing downloads on first start.
+export FLET_VIEW_PATH=/usr/lib/nanoborealis-app/client/flet
+export FLET_APP_ID=nanoborealis
+# Makes Flet's window a KDE window like any other (build_files/nanoborealis-window.c). The app
+# drops it again once its window is up, so programs it opens later don't get it.
+export LD_PRELOAD="/usr/lib/nanoborealis-app/libnanoborealis-window.so${LD_PRELOAD:+:$LD_PRELOAD}"
+# From here, Flet can't mistake a build/linux folder where it was started for its window program.
+cd /usr/lib/nanoborealis-app || exit 1
+exec /usr/lib/nanoborealis-app/venv/bin/python3 /usr/lib/nanoborealis-app/src/main.py "$@"

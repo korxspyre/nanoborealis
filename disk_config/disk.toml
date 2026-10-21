@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# From the Universal Blue image template (https://github.com/ublue-os/image-template), changed for
+# NanoBorealis by korxspyre. Like the template, this file is under the Apache License 2.0.
+[[customizations.filesystem]]
+mountpoint = "/"
+minsize = "20 GiB"

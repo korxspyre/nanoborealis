@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+[Desktop Entry]
+Type=Application
+Name=NanoBorealis setup
+Comment=Finishes setting up the NanoBorealis agent on first login
+Exec=/usr/libexec/nanoborealis-firstrun
+Icon=nanoborealis
+Terminal=false
+NoDisplay=true
+X-KDE-autostart-phase=2

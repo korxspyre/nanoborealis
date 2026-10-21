@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+# Settings for actionlint, which the Lint workflow runs on these workflows.
+self-hosted-runner:
+  # GitHub's Ubuntu 26.04 runners, which the image builds use; newer than actionlint's own list.
+  labels:
+    - ubuntu-26.04

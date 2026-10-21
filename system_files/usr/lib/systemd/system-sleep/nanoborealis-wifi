@@ -1,0 +1,37 @@
+#!/usr/bin/sh
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+# Realtek Wi-Fi on the rtw89 driver often doesn't survive sleep: it wakes with its crystal not
+# ready ("xtal si not ready", "mac preinit fail, ret: -110") and only a restart brings it back.
+# So on computers with such a chip, the chip never sleeps: its driver is unloaded just before the
+# computer sleeps and loaded again as it wakes, which sets it up from scratch, as at startup
+# (NetworkManager has let go of it by then, and reconnects by itself). And the computer sleeps in
+# S3 when its firmware offers it, where the chip is powered off, rather than in "modern standby"
+# (s2idle), where it stays half on. Computers without such a chip sleep as usual.
+# systemd-sleep runs this with "pre" before sleeping and "post" after waking.
+state=/run/nanoborealis/wifi-asleep
+case "$1" in
+    pre)
+        drivers=""
+        for driver in /sys/bus/pci/drivers/rtw89_*; do
+            ls "$driver" 2>/dev/null | grep -q '^0000:' && drivers="$drivers ${driver##*/}"
+        done
+        [ -n "$drivers" ] || exit 0
+        mkdir -p /run/nanoborealis
+        echo "$drivers" > "$state"
+        for module in $drivers; do
+            modprobe -r "$module" && echo "nanoborealis-wifi: unloaded $module for sleep"
+        done
+        if [ "$2" = suspend ] && grep -qw deep /sys/power/mem_sleep 2>/dev/null; then
+            echo deep > /sys/power/mem_sleep && echo "nanoborealis-wifi: sleeping in S3"
+        fi
+        ;;
+    post)
+        [ -f "$state" ] || exit 0
+        for module in $(cat "$state"); do
+            modprobe "$module" && echo "nanoborealis-wifi: loaded $module again"
+        done
+        rm -f "$state"
+        ;;
+esac
+exit 0

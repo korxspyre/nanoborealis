@@ -1,0 +1,15 @@
+cosign.key
+_build_*
+output
+_build-*/**
+*_chunkah_*
+*_rpm-ostree_*
+
+# Fonts the branding scripts download
+branding/.cache/
+__pycache__/
+
+# pool.yml copies these in from the repository root to build the pool image
+/pool/LICENSE
+/pool/NOTICE
+/client/src/assets/licenses/

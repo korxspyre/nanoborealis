@@ -1,0 +1,281 @@
+# SPDX-License-Identifier: Apache-2.0
+# From the Universal Blue image template (https://github.com/ublue-os/image-template), changed for
+# NanoBorealis by korxspyre. Like the template, this file is under the Apache License 2.0.
+---
+name: Build disk images
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload-to-s3:
+        description: "Upload to S3"
+        required: false
+        default: false
+        type: boolean
+      platform:
+        required: true
+        type: choice
+        options:
+          - amd64
+          - arm64
+      channel:
+        description: "Build the installer carries (and the new computer follows)"
+        required: false
+        type: choice
+        options:
+          - stable
+          - dev
+        default: stable
+  # The Release workflow, for a release tag: the installer goes on that tag's release.
+  workflow_call:
+    inputs:
+      upload-to-s3:
+        type: boolean
+        default: false
+      platform:
+        type: string
+        default: amd64
+      channel:
+        type: string
+        default: stable
+      release-tag:
+        description: "The release tag (vX.Y.Z) whose release gets the installer"
+        type: string
+        default: ""
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'disk_config/disk.toml'
+      - 'disk_config/iso.toml'
+      - '.github/workflows/build-disk.yml'
+
+env:
+  IMAGE_NAME: nanoborealis  # the image build.yml publishes (its matrix), whatever the repository is called
+  IMAGE_REGISTRY: "ghcr.io/${{ github.repository_owner }}"  # do not edit
+  DEFAULT_TAG: ${{ inputs.channel || 'stable' }}  # the build the installer carries
+  BIB_IMAGE: "quay.io/centos-bootc/bootc-image-builder:latest"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}-${{ inputs.channel || 'stable' }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build disk images
+    runs-on: ${{ inputs.platform == 'amd64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        disk-type: ["anaconda-iso"]
+    permissions:
+      contents: write
+      packages: read
+      id-token: write
+
+    steps:
+      - name: Prepare environment
+        run: |
+          USER_UID=$(id -u)
+          USER_GID=$(id -g)
+          # Concatenate the types with a hyphen
+          DISK_TYPE=$(echo "${{ matrix.disk-type }}" | tr ' ' '-')
+          # Lowercase the image uri
+          echo "IMAGE_REGISTRY=${IMAGE_REGISTRY,,}" >> ${GITHUB_ENV}
+          echo "IMAGE_NAME=${IMAGE_NAME,,}" >> ${GITHUB_ENV}
+          echo "DISK_TYPE=${DISK_TYPE}" >> ${GITHUB_ENV}
+          echo "USER_UID=${USER_UID}" >> ${GITHUB_ENV}
+          echo "USER_GID=${USER_GID}" >> ${GITHUB_ENV}
+
+      - name: Install dependencies
+        if: inputs.platform == 'arm64'
+        run: |
+          set -x
+          sudo apt update -y
+          sudo apt install -y \
+            podman
+
+      - name: Maximize build space
+        if: inputs.platform != 'arm64'
+        uses: ublue-os/remove-unwanted-software@695eb75bc387dbcd9685a8e72d23439d8686cba6
+        with:
+          remove-codeql: true
+
+      # osbuild sandboxes each stage in its own namespaces; Ubuntu's AppArmor userns
+      # restriction makes the mounts inside those sandboxes fail with "permission denied".
+      - name: Allow osbuild sandboxes to mount
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # The installed computer follows the same build the installer carries.
+      - name: Point the installer at its build
+        run: |
+          sed -i "s|/nanoborealis:stable$|/nanoborealis:${DEFAULT_TAG}|" disk_config/iso.toml
+          grep -n 'bootc switch' disk_config/iso.toml
+
+      - name: Build disk images
+        id: build
+        uses: osbuild/bootc-image-builder-action@486ce86198c7d7e123a19dd239525562c4f520d0 # main
+        with:
+          builder-image: ${{ env.BIB_IMAGE }}
+          config-file: ${{ matrix.disk-type == 'anaconda-iso' && './disk_config/iso.toml' || './disk_config/disk.toml' }}
+          image: ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.DEFAULT_TAG }}
+          chown: ${{ env.USER_UID }}:${{ env.USER_GID }}
+          types: ${{ matrix.disk-type }}
+          additional-args: --use-librepo=True
+
+      - name: Upload disk images and Checksum to Job Artifacts
+        if: inputs.upload-to-s3 != true && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nanoborealis-${{ matrix.disk-type }}
+          path: ${{ steps.build.outputs.output-directory }}
+          if-no-files-found: error
+          retention-days: 0
+          compression-level: 0
+          overwrite: true
+      
+      # GitHub caps release files at 2 GiB, so the ISO is published in parts, with
+      # checksums and the commands to rejoin them in the release notes.
+      - name: Publish the ISO as a GitHub release
+        if: github.event_name != 'pull_request' && matrix.disk-type == 'anaconda-iso'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUT_DIR: ${{ steps.build.outputs.output-directory }}
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          set -euo pipefail
+          iso="$(find "$OUT_DIR" -name '*.iso' | head -n 1)"
+          [ -n "$iso" ] || { echo "no ISO found in $OUT_DIR"; exit 1; }
+
+          # The installer's own look: Anaconda loads images/product.img from the install media
+          # and lays it over its files, so our artwork and colors replace Fedora's. Boot records
+          # (El Torito, MBR, GPT, the EFI partition) are replayed unchanged.
+          sudo apt-get install -y -q xorriso cpio >/dev/null
+          stage="$(mktemp -d)"
+          mkdir -p "$stage/usr/share/anaconda"
+          cp -r "$GITHUB_WORKSPACE/branding/installer/pixmaps" "$stage/usr/share/anaconda/"
+          (cd "$stage" && find . | cpio --quiet -o -H newc | gzip -9 > "$RUNNER_TEMP/product.img")
+          xorriso -indev "$iso" -outdev "$iso.branded" -boot_image any replay \
+            -map "$RUNNER_TEMP/product.img" /images/product.img -commit
+          xorriso -indev "$iso.branded" -report_el_torito plain
+          mv "$iso.branded" "$iso"
+          day="$(date -u +%Y%m%d)"
+          channel="$DEFAULT_TAG"
+          if [ -n "$RELEASE_TAG" ]; then
+            # A release: the installer joins the tag's own release, which the app already made.
+            tag="$RELEASE_TAG"; name="NanoBorealis-${RELEASE_TAG#v}-x86_64.iso"
+          elif [ "$channel" = stable ]; then
+            tag="nanoborealis-${day}-$(date -u +%H%M)"; title="NanoBorealis ${day}"; name="NanoBorealis-${day}-x86_64.iso"
+            release_flags=()
+          else
+            # The dev installer is a pre-release: Latest stays stable, which sticks follow.
+            tag="nanoborealis-${channel}-${day}-$(date -u +%H%M)"; title="NanoBorealis ${channel} ${day}"
+            name="NanoBorealis-${channel}-${day}-x86_64.iso"
+            release_flags=(--prerelease --latest=false)
+          fi
+          mkdir -p release
+          echo "$(sha256sum "$iso" | cut -d' ' -f1)  $name" > "release/$name.sha256"
+          split -b 1900M -d -a 1 "$iso" "release/$name.part"
+          cd release
+          parts=( "$name".part* )
+          sha256sum "${parts[@]}" > SHA256SUMS-parts
+          join_windows="copy /b $(printf '%s + ' "${parts[@]}" | sed 's/ + $//') $name"
+          {
+            if [ "$channel" != stable ]; then
+              echo "**${channel^} installer**: it installs the ${channel} build, and the computer keeps following it. For trying what's next, not for everyday computers."
+              echo
+            fi
+            echo "NanoBorealis installer, built $(date -u +%Y-%m-%d) from \`ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}:${channel}\`."
+            echo
+            echo "## Download"
+            echo
+            echo "GitHub limits release files to 2 GB, so the ISO comes in ${#parts[@]} parts. Download every \`.part\` file and \`$name.sha256\` into one folder, then join them."
+            echo
+            echo "**Windows** (Command Prompt, in that folder):"
+            echo
+            echo '```'
+            echo "$join_windows"
+            echo "certutil -hashfile $name SHA256"
+            echo '```'
+            echo
+            echo "**Linux / macOS:**"
+            echo
+            echo '```'
+            echo "cat $name.part* > $name"
+            echo "sha256sum -c $name.sha256    # macOS: shasum -a 256 -c $name.sha256"
+            echo '```'
+            echo
+            echo "The hash must match \`$name.sha256\`. Then write the ISO to a USB stick with Fedora Media Writer, Rufus, or balenaEtcher."
+            echo
+            echo "## Install"
+            echo
+            echo "1. Boot the stick and run the installer. When you create your account, tick **Make this user administrator**."
+            echo "2. Log in. The NanoBorealis agent setup opens by itself; have a dedicated OpenRouter API key with a low credit limit ready."
+            echo "3. Open **NanoBorealis** from the app menu."
+            echo
+            echo "If the machine won't boot with Secure Boot on: disable it, boot, run \`ujust enroll-secure-boot-key\` (password \`universalblue\`), reboot, enroll the key, then turn Secure Boot back on."
+            echo
+            echo "Updates are opt-in: run \`nanoborealis update\` whenever you want the newest build."
+          } > notes.md
+          if [ -n "$RELEASE_TAG" ]; then
+            # The release the app made: add the installer and its part of the notes.
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json body --jq .body > app-notes.md
+            { cat notes.md; echo; cat app-notes.md; } > all-notes.md
+            gh release upload "$tag" --repo "$GITHUB_REPOSITORY" "${parts[@]}" "$name.sha256" SHA256SUMS-parts
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --title "NanoBorealis ${tag#v}" --notes-file all-notes.md --latest
+            exit 0
+          fi
+          # Otherwise (an installer made by hand) the newest stable app goes with it, so the release
+          # has everything. Only a stable app version ships with the installer, never a dev build.
+          app_tag="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-pre-releases --limit 100 --json tagName \
+            --jq '[.[].tagName | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))]
+                  | sort_by(ltrimstr("v") | split(".") | map(tonumber)) | last // ""')"
+          app_files=()
+          if [ -n "$app_tag" ]; then
+            gh release download "$app_tag" --repo "$GITHUB_REPOSITORY" --dir app --pattern NanoBorealis-Setup.exe \
+              --pattern NanoBorealis-macos.dmg --pattern NanoBorealis-linux-x86_64.tar.gz --pattern NanoBorealis-android.apk
+            app_version="${app_tag#v}"
+            app_files=( app/* )
+            {
+              echo
+              echo "## The NanoBorealis app ($app_version)"
+              echo
+              echo "Chat with your agent from any computer, lend it this computer's hardware, and make install sticks, which download this installer onto a USB stick for you, with your key."
+              echo
+              echo "- **Windows:** \`NanoBorealis-Setup.exe\`"
+              echo "- **macOS:** \`NanoBorealis-macos.dmg\` (right-click the app and choose Open the first time)"
+              echo "- **Linux:** \`NanoBorealis-linux-x86_64.tar.gz\`, then run \`./install.sh\`"
+              echo "- **Android:** \`NanoBorealis-android.apk\`"
+            } >> notes.md
+          fi
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "$title" --notes-file notes.md \
+            "${release_flags[@]}" "${parts[@]}" "$name.sha256" SHA256SUMS-parts "${app_files[@]}"
+
+          # Keep the two newest dev installers; each is about 5 GB.
+          if [ "$channel" != stable ]; then
+            old_tags="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName,createdAt \
+              --jq "[.[] | select(.tagName | startswith(\"nanoborealis-${channel}-\"))] | sort_by(.createdAt) | reverse | .[2:] | .[].tagName" \
+              || echo "::warning::couldn't list old ${channel} installers" >&2)"
+            for old in $old_tags; do
+              gh release delete "$old" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || echo "::warning::couldn't remove $old"
+            done
+          fi
+
+      - name: Upload to S3
+        if: inputs.upload-to-s3 == true && github.event_name != 'pull_request'
+        shell: bash
+        env:
+          RCLONE_CONFIG_S3_TYPE: s3
+          RCLONE_CONFIG_S3_PROVIDER: ${{ secrets.S3_PROVIDER }}
+          RCLONE_CONFIG_S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_S3_REGION: ${{ secrets.S3_REGION }}
+          RCLONE_CONFIG_S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+          SOURCE_DIR: ${{ steps.build.outputs.output-directory }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rclone
+          rclone copy $SOURCE_DIR S3:${{ secrets.S3_BUCKET_NAME }}

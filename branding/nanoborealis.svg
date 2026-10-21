@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>NanoBorealis</title>
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1c1850"/>
+      <stop offset="0.55" stop-color="#0d1436"/>
+      <stop offset="1" stop-color="#060a1d"/>
+    </linearGradient>
+    <radialGradient id="aurora-glow" cx="256" cy="300" r="260" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2dd4bf" stop-opacity="0.34"/>
+      <stop offset="0.55" stop-color="#2dd4bf" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#2dd4bf" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="halo" cx="256" cy="256" r="150" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#d9fff1" stop-opacity="0.55"/>
+      <stop offset="0.4" stop-color="#7ff5cf" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#7ff5cf" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="core" cx="256" cy="256" r="172" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.16" stop-color="#effff9"/>
+      <stop offset="0.42" stop-color="#7ff5cf"/>
+      <stop offset="0.74" stop-color="#2dd4bf"/>
+      <stop offset="1" stop-color="#9b7bff"/>
+    </radialGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#sky)"/>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#aurora-glow)"/>
+  <!-- two faint neighbours: one star of a constellation -->
+  <g fill="#ffffff">
+    <circle cx="116" cy="118" r="5" opacity="0.55"/>
+    <circle cx="400" cy="392" r="4" opacity="0.4"/>
+  </g>
+  <circle cx="256" cy="256" r="150" fill="url(#halo)"/>
+  <path fill="url(#core)" d="M256 84 C 265.4 193.7, 303 237.2, 409.5 256 C 303 274.8, 265.4 318.3, 256 428 C 246.6 318.3, 209 274.8, 102.5 256 C 209 237.2, 246.6 193.7, 256 84 Z"/>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#sheen)"/>
+</svg>

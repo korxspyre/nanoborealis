@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+[project]
+name = "nanoborealis-council"
+version = "0.1.0"
+description = "The council's tools for a nanobot seat: the Hall's floor, task board and votes"
+requires-python = ">=3.10"
+dependencies = []  # nanobot itself is what loads these; the tools use only the standard library
+
+[project.entry-points."nanobot.tools"]
+hall_read = "nanoborealis_council.tools:HallRead"
+hall_post = "nanoborealis_council.tools:HallPost"
+task_list = "nanoborealis_council.tools:TaskList"
+task_claim = "nanoborealis_council.tools:TaskClaim"
+task_update = "nanoborealis_council.tools:TaskUpdate"
+task_submit = "nanoborealis_council.tools:TaskSubmit"
+task_review = "nanoborealis_council.tools:TaskReview"
+vote = "nanoborealis_council.tools:Vote"
+escalate = "nanoborealis_council.tools:Escalate"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["nanoborealis_council"]

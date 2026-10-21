@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+[Desktop Entry]
+Type=Application
+Name=Update NanoBorealis
+Comment=Download the newest NanoBorealis build and update your apps
+Exec=konsole --hold -p "tabtitle=Update NanoBorealis" -e nanoborealis update
+Icon=system-software-update
+Terminal=false
+Categories=System;

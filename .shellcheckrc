@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+# Settings for shellcheck, which the Lint workflow runs on every shell script.
+# SC2010 (ls | grep): only used on system folders whose names are plain, for listings and checks.
+disable=SC2010

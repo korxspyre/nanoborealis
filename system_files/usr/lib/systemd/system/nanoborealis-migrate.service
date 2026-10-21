@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+[Unit]
+Description=Move an earlier NanoBorealis setup onto current names
+# After user sessions are allowed, so the agent's lingering user manager is up to restart it.
+After=systemd-user-sessions.service nanoborealis-firewall.service
+ConditionPathExists=/usr/libexec/nanoborealis-migrate
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/nanoborealis-migrate
+
+[Install]
+WantedBy=multi-user.target

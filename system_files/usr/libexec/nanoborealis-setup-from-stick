@@ -1,0 +1,144 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+"""Finds the setup data the NanoBorealis Installer wrote to a USB stick, and saves it.
+
+The installer writes the stock ISO, untouched, then one block just past the image, at the
+next 1 MiB boundary:
+
+    NANOBOREALIS-SETUP-V1\\n<payload length> <payload sha256>\\n<JSON payload>
+
+The image's GPT header says where the image ends (its backup header is the image's last
+sector), so this finds the block without any partition entry, and the ISO's checksum,
+signature and media check still hold.
+
+    nanoborealis-setup-from-stick [--root DIR] [DEVICE ...]
+
+Saves <root>/var/lib/nanoborealis/setup.json, readable by root only, and exits 0 when it
+finds valid data; exits 1 when there is none. The anaconda %post runs it against the
+installed system; first-login setup runs it again in case the stick is still plugged in.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import struct
+import sys
+
+MAGIC = b"NANOBOREALIS-SETUP-V1\n"
+ALIGN = 1 << 20
+MAX_PAYLOAD = 256 * 1024
+
+
+def candidates() -> list[str]:
+    skip = ("loop", "ram", "zram", "dm-", "md", "sr", "nbd")
+    try:
+        names = sorted(os.listdir("/sys/block"))
+    except OSError:
+        return []
+    return [f"/dev/{name}" for name in names if not name.startswith(skip)]
+
+
+SCAN = 64  # 1 MiB steps searched past the image's end
+
+
+def align_up(value: int) -> int:
+    return -(-value // ALIGN) * ALIGN
+
+
+def image_ends(disk) -> list[int]:
+    """Where the installer image may end. The ISO 9660 volume size is the reliable one; the
+    GPT backup header only counts if nothing moved it to the end of the stick (Windows and
+    partition tools "repair" GPTs that way)."""
+    ends = []
+    disk.seek(16 * 2048)  # the primary volume descriptor
+    pvd = disk.read(2048)
+    if pvd[1:6] == b"CD001":
+        blocks = int.from_bytes(pvd[80:84], "little")
+        size = int.from_bytes(pvd[128:130], "little") or 2048
+        ends.append(blocks * size)
+    disk.seek(0)
+    head = disk.read(4096)
+    if head[512:520] == b"EFI PART":
+        ends.append((struct.unpack_from("<Q", head, 512 + 32)[0] + 1) * 512)
+    return ends
+
+
+def read_setup(device: str) -> bytes | None:
+    """Return the verified JSON payload stored on `device`, or None."""
+    need = align_up(len(MAGIC) + 128 + MAX_PAYLOAD)
+    block = b""
+    try:
+        with open(device, "rb", buffering=0) as disk:
+            tried = set()
+            for end in image_ends(disk):
+                for step in range(SCAN):
+                    offset = align_up(end) + step * ALIGN
+                    if offset in tried:
+                        continue
+                    tried.add(offset)
+                    try:
+                        disk.seek(offset)
+                        first = disk.read(4096)
+                    except OSError:
+                        break  # past the end of the device
+                    if first.startswith(MAGIC):
+                        disk.seek(offset)
+                        block = disk.read(need)
+                        break
+                if block:
+                    break
+    except OSError:
+        return None
+    if not block.startswith(MAGIC):
+        return None
+    line_end = block.find(b"\n", len(MAGIC))
+    try:
+        length_text, digest = block[len(MAGIC):line_end].decode("ascii").split()
+        length = int(length_text)
+    except ValueError:
+        return None
+    if not 0 < length <= MAX_PAYLOAD:
+        return None
+    payload = block[line_end + 1:line_end + 1 + length]
+    if len(payload) != length or hashlib.sha256(payload).hexdigest() != digest:
+        return None
+    try:
+        if not isinstance(json.loads(payload), dict):
+            return None
+    except ValueError:
+        return None
+    return payload
+
+
+def main(argv: list[str]) -> int:
+    root = "/"
+    devices: list[str] = []
+    args = iter(argv)
+    for arg in args:
+        if arg == "--root":
+            root = next(args, "/")
+        else:
+            devices.append(arg)
+    for device in devices or candidates():
+        payload = read_setup(device)
+        if payload is None:
+            continue
+        target_dir = os.path.join(root, "var/lib/nanoborealis")
+        os.makedirs(target_dir, mode=0o700, exist_ok=True)
+        os.chmod(target_dir, 0o700)
+        target = os.path.join(target_dir, "setup.json")
+        fd = os.open(target + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as out:
+            out.write(payload)
+        os.replace(target + ".tmp", target)
+        print(f"setup data from {device} saved to {target}")
+        return 0
+    print("no NanoBorealis setup data found")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

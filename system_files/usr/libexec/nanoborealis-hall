@@ -1,0 +1,821 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+"""The Hall: where the council's seats meet (docs/council/README.md).
+
+One SQLite database holds the seats, the rooms (Hall chats) and their messages, the task board, the
+votes, the trust ledger and the council's settings. Everything is JSON over HTTP, and every request
+needs `Authorization: Bearer <token>`: the admin token (the computer's own services, like
+nanoborealis-remote for the app) or a seat's own token (the council tools in that seat's agent).
+Seats speak only as themselves; seats and people are managed with the admin token alone.
+
+    nanoborealis-hall      # NANOBOREALIS_HALL_STATE (default /var/lib/nanoborealis/hall),
+                           # NANOBOREALIS_HALL_LISTEN (default 127.0.0.1:11437)
+"""
+
+from __future__ import annotations
+
+import hmac
+import json
+import os
+import re
+import secrets
+import sqlite3
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+
+STATE = Path(os.environ.get("NANOBOREALIS_HALL_STATE", "/var/lib/nanoborealis/hall"))
+LISTEN = os.environ.get("NANOBOREALIS_HALL_LISTEN", "127.0.0.1:11437")
+MAX_BODY = 1024 * 1024
+TEXT_LIMIT = 64 * 1024
+
+DEFAULTS = {
+    "autonomy": "on-task",  # or "continuous": seats also pick up open tasks by themselves
+    "escalation": True,  # stuck or split: ask the escalation model (free models only)
+    "escalation_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "split_margin": 0.15,  # a vote won by less than this share of the weight is split
+    "review_rejects_to_fail": 2,
+}
+TRUST_MIN, TRUST_MAX = 0.2, 3.0
+TRUST_HALF_LIFE_DAYS = 30.0  # old praise and blame fade, and trust drifts back toward 1
+TRUST_EVENTS = {"accepted": 0.05, "rejected": -0.05, "thumbs_up": 0.1, "thumbs_down": -0.1}
+TASK_STATES = ("open", "claimed", "review", "done", "failed")
+SEAT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS seats (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, model TEXT NOT NULL, family TEXT NOT NULL DEFAULT '',
+    capability REAL NOT NULL DEFAULT 50, chair INTEGER NOT NULL DEFAULT 0, token_hash TEXT NOT NULL,
+    created REAL NOT NULL, seen REAL
+);
+CREATE TABLE IF NOT EXISTS rooms (
+    id INTEGER PRIMARY KEY, title TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'hall', created REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY, room INTEGER NOT NULL REFERENCES rooms(id), author TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'say', text TEXT NOT NULL, reply_to INTEGER, at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tasks (
+    id INTEGER PRIMARY KEY, title TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', author TEXT NOT NULL,
+    room INTEGER REFERENCES rooms(id), state TEXT NOT NULL DEFAULT 'open', claimed_by TEXT,
+    result TEXT, rejects INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL, updated REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS task_notes (
+    id INTEGER PRIMARY KEY, task INTEGER NOT NULL REFERENCES tasks(id), author TEXT NOT NULL,
+    kind TEXT NOT NULL, text TEXT NOT NULL, at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS votes (
+    id INTEGER PRIMARY KEY, question TEXT NOT NULL, options TEXT NOT NULL, room INTEGER, task INTEGER,
+    author TEXT NOT NULL, closed INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ballots (
+    vote INTEGER NOT NULL REFERENCES votes(id), seat TEXT NOT NULL, choice TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '', weight REAL NOT NULL, at REAL NOT NULL, PRIMARY KEY (vote, seat)
+);
+CREATE TABLE IF NOT EXISTS trust (
+    id INTEGER PRIMARY KEY, seat TEXT NOT NULL, delta REAL NOT NULL, reason TEXT NOT NULL, at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+"""
+MIGRATIONS = [
+    ("seats", "port", "INTEGER"),  # where its API is, on this computer (nanobot serve); none for the chair
+    ("seats", "api_key", "TEXT"),  # the Hall's key to that API
+    ("rooms", "seat", "TEXT"),  # a one-on-one room's seat
+]
+
+
+class Refused(Exception):
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+
+
+def digest(token: str) -> str:
+    import hashlib
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def text(value: object, what: str, limit: int = TEXT_LIMIT, required: bool = True) -> str:
+    if value is None and not required:
+        return ""
+    if not isinstance(value, str) or (required and not value.strip()):
+        raise Refused(400, f"{what} is missing.")
+    if len(value) > limit:
+        raise Refused(413, f"{what} is too long.")
+    return value.strip()
+
+
+class Hall:
+    def __init__(self, state: Path):
+        state.mkdir(parents=True, exist_ok=True)
+        self.path = state / "hall.sqlite"
+        self.lock = threading.Lock()  # one writer at a time; SQLite's own locking backs it up
+        self.db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
+        self.db.row_factory = sqlite3.Row
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.executescript(SCHEMA)
+        for table, column, kind in MIGRATIONS:  # columns added after a database was first made
+            if column not in {r["name"] for r in self.db.execute(f"PRAGMA table_info({table})")}:
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+        self.events: list[tuple] = []  # what the orchestrator should act on, once the change is saved
+        token_file = state / "admin.token"
+        if not token_file.exists():
+            old = os.umask(0o077)
+            try:
+                token_file.write_text(secrets.token_urlsafe(32) + "\n")
+            finally:
+                os.umask(old)
+        self.admin_hash = digest(token_file.read_text().strip())
+
+    # -- Who's asking --------------------------------------------------------------------------------
+
+    def who(self, token: str) -> str | None:
+        """"admin", a seat's id, or None."""
+        if not token:
+            return None
+        hashed = digest(token)
+        if hmac.compare_digest(hashed, self.admin_hash):
+            return "admin"
+        row = self.db.execute("SELECT id FROM seats WHERE token_hash = ?", (hashed,)).fetchone()
+        if row:
+            self.db.execute("UPDATE seats SET seen = ? WHERE id = ?", (time.time(), row["id"]))
+            return row["id"]
+        return None
+
+    # -- Settings and trust --------------------------------------------------------------------------
+
+    def settings(self) -> dict:
+        found = dict(DEFAULTS)
+        for row in self.db.execute("SELECT key, value FROM settings"):
+            found[row["key"]] = json.loads(row["value"])
+        return found
+
+    def set_settings(self, changes: dict) -> dict:
+        for key, value in changes.items():
+            if key not in DEFAULTS:
+                raise Refused(400, f"Unknown setting {key}.")
+            if key == "autonomy" and value not in ("on-task", "continuous"):
+                raise Refused(400, "autonomy is on-task or continuous.")
+            if key == "escalation" and not isinstance(value, bool):
+                raise Refused(400, "escalation is true or false.")
+            if key == "escalation_model" and not (isinstance(value, str) and value.endswith(":free")):
+                raise Refused(400, "The escalation model must be a free one (its id ends in :free).")
+            if key == "split_margin" and not (isinstance(value, (int, float)) and 0 <= value < 1):
+                raise Refused(400, "split_margin is between 0 and 1.")
+            if key == "review_rejects_to_fail" and not (isinstance(value, int) and 1 <= value <= 10):
+                raise Refused(400, "review_rejects_to_fail is 1 to 10.")
+            self.db.execute("INSERT OR REPLACE INTO settings VALUES (?, ?)", (key, json.dumps(value)))
+        return self.settings()
+
+    def trust(self, seat: str, now: float | None = None) -> float:
+        now = now or time.time()
+        total = 0.0
+        for row in self.db.execute("SELECT delta, at FROM trust WHERE seat = ?", (seat,)):
+            total += row["delta"] * 0.5 ** (max(0.0, now - row["at"]) / 86400 / TRUST_HALF_LIFE_DAYS)
+        return round(min(TRUST_MAX, max(TRUST_MIN, 1.0 + total)), 3)
+
+    def add_trust(self, seat: str, delta: float, reason: str) -> None:
+        self.db.execute("INSERT INTO trust (seat, delta, reason, at) VALUES (?, ?, ?, ?)",
+                        (seat, delta, reason, time.time()))
+
+    def weight(self, seat: dict) -> float:
+        """A seat's say in a vote: how capable its model is, times how far it has earned trust."""
+        return round(max(1.0, float(seat["capability"])) / 100 * self.trust(seat["id"]), 4)
+
+    # -- Seats ---------------------------------------------------------------------------------------
+
+    def seat(self, seat_id: str) -> dict:
+        row = self.db.execute("SELECT * FROM seats WHERE id = ?", (seat_id,)).fetchone()
+        if not row:
+            raise Refused(404, f"No seat {seat_id}.")
+        found = {k: row[k] for k in row.keys() if k not in ("token_hash", "api_key")}
+        found["chair"] = bool(found["chair"])
+        found["trust"] = self.trust(seat_id)
+        found["weight"] = self.weight(found)
+        return found
+
+    def seats(self) -> list[dict]:
+        return [self.seat(r["id"]) for r in self.db.execute("SELECT id FROM seats ORDER BY chair DESC, name")]
+
+    def put_seat(self, data: dict) -> dict:
+        seat_id = text(data.get("id"), "The seat's id", 40)
+        if not SEAT_ID.fullmatch(seat_id):
+            raise Refused(400, "A seat's id is lowercase letters, digits and dashes.")
+        name, model = text(data.get("name"), "The seat's name", 60), text(data.get("model"), "The seat's model", 200)
+        family = text(data.get("family"), "family", 40, required=False)
+        capability = data.get("capability", 50)
+        if isinstance(capability, bool) or not isinstance(capability, (int, float)) or not 0 <= capability <= 100:
+            raise Refused(400, "capability is 0 to 100.")
+        port = data.get("port")
+        if port is not None and (isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535):
+            raise Refused(400, "port is a port number.")
+        exists = self.db.execute("SELECT 1 FROM seats WHERE id = ?", (seat_id,)).fetchone()
+        token = None
+        if not exists or data.get("rotate"):
+            token = secrets.token_urlsafe(32)
+        if exists:
+            self.db.execute("UPDATE seats SET name = ?, model = ?, family = ?, capability = ?, chair = ? WHERE id = ?",
+                            (name, model, family, capability, int(bool(data.get("chair"))), seat_id))
+            if token:
+                self.db.execute("UPDATE seats SET token_hash = ? WHERE id = ?", (digest(token), seat_id))
+        else:
+            self.db.execute("INSERT INTO seats (id, name, model, family, capability, chair, token_hash, created) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (seat_id, name, model, family, capability,
+                                                                int(bool(data.get("chair"))), digest(token), time.time()))
+        if "port" in data:  # left out: unchanged
+            self.db.execute("UPDATE seats SET port = ? WHERE id = ?", (port, seat_id))
+        port = self.db.execute("SELECT port FROM seats WHERE id = ?", (seat_id,)).fetchone()["port"]
+        api_key = None
+        if token and port is not None:  # the Hall's key to the seat's API, new with every token
+            api_key = secrets.token_urlsafe(32)
+            self.db.execute("UPDATE seats SET api_key = ? WHERE id = ?", (api_key, seat_id))
+        found = self.seat(seat_id)
+        if token:
+            found["token"] = token  # shown once: whoever creates the seat hands it to the seat's agent
+        if api_key:
+            found["api_key"] = api_key
+        return found
+
+    def remove_seat(self, seat_id: str) -> dict:
+        self.seat(seat_id)
+        self.db.execute("DELETE FROM seats WHERE id = ?", (seat_id,))
+        return {"removed": seat_id}
+
+    # -- Rooms ---------------------------------------------------------------------------------------
+
+    def rooms(self) -> list[dict]:
+        return [dict(r) for r in self.db.execute("SELECT * FROM rooms ORDER BY id DESC")]
+
+    def new_room(self, data: dict) -> dict:
+        title = text(data.get("title"), "The room's title", 200)
+        kind = data.get("kind", "hall")
+        if kind not in ("hall", "task", "direct"):
+            raise Refused(400, "A room is a hall, a task or a direct (one-on-one) room.")
+        seat = None
+        if kind == "direct":  # you and one seat: only it answers
+            seat = self.seat(text(data.get("seat"), "The seat", 40))["id"]
+        cur = self.db.execute("INSERT INTO rooms (title, kind, seat, created) VALUES (?, ?, ?, ?)",
+                              (title, kind, seat, time.time()))
+        return dict(self.db.execute("SELECT * FROM rooms WHERE id = ?", (cur.lastrowid,)).fetchone())
+
+    def room(self, room_id: int) -> dict:
+        row = self.db.execute("SELECT * FROM rooms WHERE id = ?", (room_id,)).fetchone()
+        if not row:
+            raise Refused(404, f"No room {room_id}.")
+        return dict(row)
+
+    def messages(self, room_id: int, after: int = 0, limit: int = 200) -> list[dict]:
+        self.room(room_id)
+        return [dict(r) for r in self.db.execute(
+            "SELECT * FROM messages WHERE room = ? AND id > ? ORDER BY id LIMIT ?", (room_id, after, limit))]
+
+    def post(self, room_id: int, author: str, data: dict) -> dict:
+        self.room(room_id)
+        kind = data.get("kind", "say")
+        if kind not in ("say", "pass", "escalation", "system"):
+            raise Refused(400, "A message is say, pass, escalation or system.")
+        if kind == "system" and author != "you":
+            raise Refused(403, "Only the Hall itself posts system messages.")
+        body = text(data.get("text"), "The message", required=kind != "pass") or "(passes)"
+        reply_to = data.get("reply_to")
+        if reply_to is not None and not isinstance(reply_to, int):
+            raise Refused(400, "reply_to is a message id.")
+        cur = self.db.execute("INSERT INTO messages (room, author, kind, text, reply_to, at) VALUES (?, ?, ?, ?, ?, ?)",
+                              (room_id, author, kind, body, reply_to, time.time()))
+        if author == "you" and kind == "say":
+            self.events.append(("room", room_id))
+        elif kind == "escalation":
+            self.events.append(("escalation", room_id, cur.lastrowid))
+        return dict(self.db.execute("SELECT * FROM messages WHERE id = ?", (cur.lastrowid,)).fetchone())
+
+    # -- Tasks ---------------------------------------------------------------------------------------
+
+    def task(self, task_id: int) -> dict:
+        row = self.db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if not row:
+            raise Refused(404, f"No task {task_id}.")
+        found = dict(row)
+        found["notes"] = [dict(r) for r in self.db.execute(
+            "SELECT author, kind, text, at FROM task_notes WHERE task = ? ORDER BY id", (task_id,))]
+        return found
+
+    def tasks(self, state: str | None = None) -> list[dict]:
+        if state and state not in TASK_STATES:
+            raise Refused(400, f"A task's state is one of {', '.join(TASK_STATES)}.")
+        rows = self.db.execute("SELECT id FROM tasks" + (" WHERE state = ?" if state else "") + " ORDER BY id DESC",
+                               (state,) if state else ())
+        return [self.task(r["id"]) for r in rows]
+
+    def note(self, task_id: int, author: str, kind: str, body: str) -> None:
+        self.db.execute("INSERT INTO task_notes (task, author, kind, text, at) VALUES (?, ?, ?, ?, ?)",
+                        (task_id, author, kind, body, time.time()))
+        self.db.execute("UPDATE tasks SET updated = ? WHERE id = ?", (time.time(), task_id))
+
+    def new_task(self, author: str, data: dict) -> dict:
+        title = text(data.get("title"), "The task's title", 200)
+        detail = text(data.get("detail"), "detail", required=False)
+        room = data.get("room")
+        if room is not None:
+            self.room(room)
+        now = time.time()
+        cur = self.db.execute("INSERT INTO tasks (title, detail, author, room, created, updated) VALUES (?, ?, ?, ?, ?, ?)",
+                              (title, detail, author, room, now, now))
+        self.events.append(("task", cur.lastrowid))
+        return self.task(cur.lastrowid)
+
+    def claim(self, task_id: int, seat: str) -> dict:
+        found = self.task(task_id)
+        if found["state"] != "open":
+            raise Refused(409, f"Task {task_id} is {found['state']}, not open.")
+        self.db.execute("UPDATE tasks SET state = 'claimed', claimed_by = ? WHERE id = ?", (seat, task_id))
+        self.note(task_id, seat, "claim", "claimed it")
+        return self.task(task_id)
+
+    def update(self, task_id: int, seat: str, data: dict) -> dict:
+        found = self.task(task_id)
+        if found["claimed_by"] != seat or found["state"] != "claimed":
+            raise Refused(409, "Only the seat working on a task can add progress to it.")
+        self.note(task_id, seat, "progress", text(data.get("text"), "The progress note"))
+        return self.task(task_id)
+
+    def submit(self, task_id: int, seat: str, data: dict) -> dict:
+        found = self.task(task_id)
+        if found["claimed_by"] != seat or found["state"] != "claimed":
+            raise Refused(409, "Only the seat working on a task can hand it in.")
+        result = text(data.get("result"), "The result")
+        self.db.execute("UPDATE tasks SET state = 'review', result = ? WHERE id = ?", (result, task_id))
+        self.note(task_id, seat, "submit", "handed it in for review")
+        self.events.append(("review", task_id))
+        return self.task(task_id)
+
+    def review(self, task_id: int, reviewer: str, data: dict) -> dict:
+        """Another seat (or you) accepts the result, or sends it back. Enough rejections fail it."""
+        found = self.task(task_id)
+        if found["state"] != "review":
+            raise Refused(409, f"Task {task_id} isn't waiting for review.")
+        if reviewer == found["claimed_by"]:
+            raise Refused(403, "A seat can't review its own work.")
+        verdict = data.get("verdict")
+        if verdict not in ("accept", "reject"):
+            raise Refused(400, "The verdict is accept or reject.")
+        reason = text(data.get("text"), "reason", required=verdict == "reject")
+        worker = found["claimed_by"]
+        self.note(task_id, reviewer, verdict, reason or "accepted")
+        if verdict == "accept":
+            self.db.execute("UPDATE tasks SET state = 'done' WHERE id = ?", (task_id,))
+            self.add_trust(worker, TRUST_EVENTS["accepted"], f"task {task_id} accepted by {reviewer}")
+        else:
+            rejects = found["rejects"] + 1
+            failed = rejects >= self.settings()["review_rejects_to_fail"]
+            self.db.execute("UPDATE tasks SET rejects = ?, state = ?, claimed_by = ? WHERE id = ?",
+                            (rejects, "failed" if failed else "claimed", worker, task_id))
+            self.add_trust(worker, TRUST_EVENTS["rejected"], f"task {task_id} rejected by {reviewer}")
+            self.events.append(("failed" if failed else "revise", task_id))
+        return self.task(task_id)
+
+    def reopen(self, task_id: int) -> dict:
+        self.task(task_id)
+        self.db.execute("UPDATE tasks SET state = 'open', claimed_by = NULL, result = NULL, rejects = 0 WHERE id = ?",
+                        (task_id,))
+        self.note(task_id, "you", "reopen", "opened it again")
+        return self.task(task_id)
+
+    # -- Votes ---------------------------------------------------------------------------------------
+
+    def vote(self, vote_id: int) -> dict:
+        row = self.db.execute("SELECT * FROM votes WHERE id = ?", (vote_id,)).fetchone()
+        if not row:
+            raise Refused(404, f"No vote {vote_id}.")
+        found = dict(row)
+        found["options"] = json.loads(found["options"])
+        found["closed"] = bool(found["closed"])
+        ballots = [dict(r) for r in self.db.execute("SELECT * FROM ballots WHERE vote = ? ORDER BY at", (vote_id,))]
+        found["ballots"] = ballots
+        totals = {option: 0.0 for option in found["options"]}
+        for ballot in ballots:
+            totals[ballot["choice"]] += ballot["weight"]
+        weight = sum(totals.values())
+        ranked = sorted(totals.items(), key=lambda kv: -kv[1])
+        margin = (ranked[0][1] - (ranked[1][1] if len(ranked) > 1 else 0)) / weight if weight else 0.0
+        found["tally"] = {k: round(v, 4) for k, v in ranked}
+        found["leading"] = ranked[0][0] if weight else None
+        found["margin"] = round(margin, 4)
+        found["split"] = bool(weight) and margin < self.settings()["split_margin"]
+        # The chair may vote, but a vote doesn't wait for it: it's your agent, which the Hall can't ask.
+        waiting = {s["id"] for s in self.seats() if not s["chair"]} - {b["seat"] for b in ballots}
+        found["waiting_for"] = sorted(waiting)
+        return found
+
+    def votes(self, open_only: bool = False) -> list[dict]:
+        rows = self.db.execute("SELECT id FROM votes" + (" WHERE closed = 0" if open_only else "") + " ORDER BY id DESC")
+        return [self.vote(r["id"]) for r in rows]
+
+    def new_vote(self, author: str, data: dict) -> dict:
+        question = text(data.get("question"), "The question", 2000)
+        options = data.get("options")
+        if (not isinstance(options, list) or not 2 <= len(options) <= 8
+                or not all(isinstance(o, str) and 0 < len(o) <= 200 for o in options) or len(set(options)) != len(options)):
+            raise Refused(400, "A vote has 2 to 8 different options.")
+        room, task = data.get("room"), data.get("task")
+        if room is not None:
+            self.room(room)
+        if task is not None:
+            self.task(task)
+        cur = self.db.execute("INSERT INTO votes (question, options, room, task, author, created) VALUES (?, ?, ?, ?, ?, ?)",
+                              (question, json.dumps(options), room, task, author, time.time()))
+        if room is not None:
+            self.db.execute("INSERT INTO messages (room, author, kind, text, at) VALUES (?, ?, 'say', ?, ?)",
+                            (room, author, f"Vote {cur.lastrowid}: {question} ({' / '.join(options)})", time.time()))
+        self.events.append(("vote", cur.lastrowid))
+        return self.vote(cur.lastrowid)
+
+    def ballot(self, vote_id: int, seat: str, data: dict) -> dict:
+        found = self.vote(vote_id)
+        if found["closed"]:
+            raise Refused(409, f"Vote {vote_id} is closed.")
+        choice = data.get("choice")
+        if choice not in found["options"]:
+            raise Refused(400, f"Choose one of: {', '.join(found['options'])}.")
+        reason = text(data.get("reason"), "reason", 2000, required=False)
+        self.db.execute("INSERT OR REPLACE INTO ballots (vote, seat, choice, reason, weight, at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (vote_id, seat, choice, reason, self.weight(self.seat(seat)), time.time()))
+        found = self.vote(vote_id)
+        if not found["waiting_for"]:
+            return self.close(vote_id)
+        return found
+
+    def close(self, vote_id: int) -> dict:
+        self.db.execute("UPDATE votes SET closed = 1 WHERE id = ?", (vote_id,))
+        found = self.vote(vote_id)
+        if found["room"] is not None and found["leading"] is not None:
+            outcome = (f"split ({found['margin']:.0%} margin): the council should ask for advice" if found["split"]
+                       else f"{found['leading']} ({found['margin']:.0%} margin)")
+            self.post(found["room"], "you", {"kind": "system", "text": f"Vote {vote_id} closed: {outcome}"})
+        if found["split"]:
+            self.events.append(("split", vote_id))
+        return found
+
+    def feedback(self, data: dict) -> dict:
+        seat = text(data.get("seat"), "The seat", 40)
+        self.seat(seat)
+        kind = data.get("kind")
+        if kind not in ("thumbs_up", "thumbs_down"):
+            raise Refused(400, "Feedback is thumbs_up or thumbs_down.")
+        self.add_trust(seat, TRUST_EVENTS[kind], text(data.get("reason"), "reason", 500, required=False) or kind)
+        return self.seat(seat)
+
+
+# -- The orchestrator -------------------------------------------------------------------------------
+# One worker, one job at a time: the pool runs every seat, so seats asked at once would only slow
+# each other down. It talks to seats through their API (nanobot serve, one session per room) and to
+# the escalation model through OpenRouter, with the database lock held only for database work.
+
+SEAT_HOST = os.environ.get("NANOBOREALIS_HALL_SEAT_HOST", "127.0.0.1")
+OPENROUTER_URL = os.environ.get("NANOBOREALIS_HALL_OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
+SEAT_TIMEOUT = float(os.environ.get("NANOBOREALIS_HALL_SEAT_TIMEOUT", "1800"))  # a CPU pool is slow to read
+CONTINUOUS_EVERY = float(os.environ.get("NANOBOREALIS_HALL_CONTINUOUS_EVERY", "300"))
+CONTEXT_MESSAGES = 20  # the room's newest messages a seat is shown when it's asked to speak
+FREE_ONLY = {"provider": {"max_price": {"prompt": 0, "completion": 0, "request": 0, "image": 0}}}
+PASS = re.compile(r"^\W*pass\W*$", re.IGNORECASE)
+
+
+def post_json(url: str, body: dict, key: str, timeout: float) -> dict:
+    import urllib.request
+    request = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
+                                     headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read())
+
+
+def reply_text(answer: dict) -> str:
+    try:
+        return str(answer["choices"][0]["message"]["content"] or "").strip()
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
+class Orchestrator:
+    def __init__(self, hall: Hall):
+        import queue
+        self.hall = hall
+        self.jobs: queue.Queue = queue.Queue()
+        self.busy = False
+
+    def start(self) -> None:
+        threading.Thread(target=self.work, daemon=True).start()
+        threading.Thread(target=self.continuous, daemon=True).start()
+
+    def kick(self, events: list[tuple]) -> None:
+        for event in events:
+            self.jobs.put(event)
+
+    def idle(self) -> bool:
+        return not self.busy and self.jobs.empty()
+
+    def db(self, fn):
+        """fn(hall) in one transaction, under the lock."""
+        with self.hall.lock:
+            self.hall.db.execute("BEGIN IMMEDIATE")
+            try:
+                result = fn(self.hall)
+                self.hall.db.execute("COMMIT")
+            except BaseException:
+                self.hall.db.execute("ROLLBACK")
+                self.hall.events = []  # nothing happened, so there's nothing to act on
+                raise
+            events, self.hall.events = self.hall.events, []
+        self.kick(events)
+        return result
+
+    def work(self) -> None:
+        while True:
+            job = self.jobs.get()
+            self.busy = True
+            try:
+                getattr(self, f"on_{job[0]}")(*job[1:])
+            except Exception as e:  # one failed job never stops the Hall
+                print(f"nanoborealis-hall: {job[0]} {job[1:]} failed: {e}", file=sys.stderr, flush=True)
+            finally:
+                self.busy = False
+
+    def continuous(self) -> None:
+        """In continuous mode, open tasks are offered again every few minutes while the Hall is idle."""
+        while True:
+            time.sleep(CONTINUOUS_EVERY)
+            try:
+                if self.idle() and self.db(lambda h: h.settings()["autonomy"]) == "continuous":
+                    for task in self.db(lambda h: h.tasks("open")):
+                        self.jobs.put(("task", task["id"]))
+            except Exception as e:
+                print(f"nanoborealis-hall: the continuous round failed: {e}", file=sys.stderr, flush=True)
+
+    # -- Talking to seats and the advisor ----------------------------------------------------------------
+
+    def seats(self, exclude: tuple = ()) -> list[dict]:
+        """The seats the Hall can ask (they have an API: every seat but the chair), weightiest first."""
+        def find(h: Hall) -> list[dict]:
+            rows = {r["id"]: r for r in h.db.execute("SELECT id, port, api_key FROM seats WHERE port IS NOT NULL")}
+            found = [{**h.seat(i), "port": r["port"], "api_key": r["api_key"]} for i, r in rows.items() if i not in exclude]
+            return sorted(found, key=lambda s: -s["weight"])
+        return self.db(find)
+
+    def ask(self, seat: dict, session: str, prompt: str) -> str:
+        """One turn of the seat's agent, in its session for this room or task; "" if it didn't answer."""
+        try:
+            answer = post_json(f"http://{SEAT_HOST}:{seat['port']}/v1/chat/completions",
+                               {"model": seat["model"], "session_id": session,
+                                "messages": [{"role": "user", "content": prompt}]}, seat["api_key"], SEAT_TIMEOUT)
+        except Exception as e:
+            print(f"nanoborealis-hall: {seat['id']} didn't answer: {e}", file=sys.stderr, flush=True)
+            return ""
+        return reply_text(answer)
+
+    def advise(self, question: str) -> str:
+        """The escalation model's advice, free models only; "" when escalation can't run."""
+        settings = self.db(lambda h: h.settings())
+        key_file = STATE / "openrouter.key"
+        if not settings["escalation"] or not str(settings["escalation_model"]).endswith(":free") or not key_file.exists():
+            return ""
+        body = {"model": settings["escalation_model"], **FREE_ONLY, "messages": [
+            {"role": "system", "content": "You advise a council of smaller AI models that is stuck or split. Answer "
+                                          "the question directly and briefly, with your reasoning."},
+            {"role": "user", "content": question}]}
+        try:
+            return reply_text(post_json(OPENROUTER_URL, body, key_file.read_text().strip(), 300))
+        except Exception as e:
+            print(f"nanoborealis-hall: escalation failed: {e}", file=sys.stderr, flush=True)
+            return ""
+
+    def say(self, room: int, author: str, text: str) -> None:
+        if PASS.match(text):
+            self.db(lambda h: h.post(room, author, {"kind": "pass"}))
+        elif text:
+            self.db(lambda h: h.post(room, author, {"text": text[:TEXT_LIMIT]}))
+
+    # -- Jobs ----------------------------------------------------------------------------------------
+
+    def on_room(self, room_id: int) -> None:
+        """You spoke in a room: in a one-on-one room its seat answers; in the Hall, every seat in turn,
+        each seeing what the others said before it."""
+        room = self.db(lambda h: h.room(room_id))
+        if room["kind"] == "direct":
+            seat = next((s for s in self.seats() if s["id"] == room["seat"]), None)
+            last = self.db(lambda h: h.messages(room_id))[-1]
+            if seat and last["author"] == "you":
+                self.say(room_id, seat["id"], self.ask(seat, f"direct-{room_id}", last["text"]) or "(no answer)")
+            return
+        for seat in self.seats():
+            recent = self.db(lambda h: h.messages(room_id))[-CONTEXT_MESSAGES:]
+            lines = "\n".join(f"[{m['author']}] {m['text']}" for m in recent if m["kind"] != "pass")
+            prompt = (f"The Hall, room {room_id}: {room['title']}\n\n{lines}\n\nYou are {seat['id']}. Reply to the "
+                      "room in a few sentences if you add something new, or answer exactly PASS.")
+            self.say(room_id, seat["id"], self.ask(seat, f"hall-{room_id}", prompt))
+
+    def on_task(self, task_id: int) -> None:
+        """Offer an open task to the seats, weightiest first, until one takes it on."""
+        for seat in self.seats():
+            task = self.db(lambda h: h.task(task_id))
+            if task["state"] != "open":
+                return
+            self.ask(seat, f"task-{task_id}",
+                     f"Task {task_id} is open on the council's board: {task['title']}\n\n{task['detail']}\n\n"
+                     "If you can do it well, claim it with task_claim, do it, and hand it in with task_submit. "
+                     "If it isn't for you, answer exactly PASS.")
+
+    def on_review(self, task_id: int) -> None:
+        task = self.db(lambda h: h.task(task_id))
+        reviewer = next(iter(self.seats(exclude=(task["claimed_by"],))), None)
+        if task["state"] != "review" or reviewer is None:
+            return  # a council of one: the person reviews it
+        self.ask(reviewer, f"task-{task_id}",
+                 f"{task['claimed_by']} handed in task {task_id} ({task['title']}):\n\n{task['result']}\n\n"
+                 "Review it honestly with task_review: accept it, or reject it and say what's wrong.")
+
+    def on_revise(self, task_id: int) -> None:
+        task = self.db(lambda h: h.task(task_id))
+        worker = next((s for s in self.seats() if s["id"] == task["claimed_by"]), None)
+        if worker is None or task["state"] != "claimed":
+            return
+        why = next((n["text"] for n in reversed(task["notes"]) if n["kind"] == "reject"), "")
+        self.ask(worker, f"task-{task_id}", f"Your work on task {task_id} was sent back: {why}\n\n"
+                                            "Fix it and hand it in again with task_submit.")
+
+    def on_failed(self, task_id: int) -> None:
+        task = self.db(lambda h: h.task(task_id))
+        advice = self.advise(f"Task: {task['title']}\n{task['detail']}\n\nThe council's attempt:\n{task['result']}\n\n"
+                             "Reviews: " + "; ".join(n["text"] for n in task["notes"] if n["kind"] == "reject"))
+        if advice:
+            self.db(lambda h: h.note(task_id, "advisor", "advice", advice))
+
+    def on_vote(self, vote_id: int) -> None:
+        for seat in self.seats():
+            vote = self.db(lambda h: h.vote(vote_id))
+            if vote["closed"]:
+                return
+            if seat["id"] in vote["waiting_for"]:
+                self.ask(seat, f"vote-{vote_id}", f"The council is voting (vote {vote_id}): {vote['question']}\n"
+                                                  f"Options: {' / '.join(vote['options'])}\n\n"
+                                                  "Cast your ballot with the vote tool, with a short reason.")
+
+    def on_split(self, vote_id: int) -> None:
+        vote = self.db(lambda h: h.vote(vote_id))
+        if vote["room"] is None:
+            return
+        reasons = "\n".join(f"- {b['seat']} chose {b['choice']}: {b['reason']}" for b in vote["ballots"])
+        self.db(lambda h: h.post(vote["room"], "hall", {"kind": "escalation", "text":
+                                 f"The council split on: {vote['question']}\n{reasons}\nWhich is right, and why?"}))
+
+    def on_escalation(self, room_id: int, message_id: int) -> None:
+        asked = next(m for m in self.db(lambda h: h.messages(room_id, message_id - 1, 1)))
+        advice = self.advise(asked["text"])
+        self.db(lambda h: h.post(room_id, "advisor", {"text": advice or "No advice: escalation is off, or there's no OpenRouter key yet.",
+                                                     "reply_to": message_id}))
+
+
+# -- HTTP -------------------------------------------------------------------------------------------
+
+def number(value: str, what: str) -> int:
+    if not value.isdigit():
+        raise Refused(404, f"No such {what}.")
+    return int(value)
+
+
+def route(hall: Hall, who: str, method: str, parts: list[str], query: dict, data: dict):
+    admin = who == "admin"
+    me = "you" if admin else who  # people speak through the admin token, as "you"
+
+    def admin_only() -> None:
+        if not admin:
+            raise Refused(403, "Only the computer's own services can do that.")
+
+    match method, parts:
+        case "GET", ["me"]:
+            return {"admin": True} if admin else hall.seat(who)
+        case "GET", ["settings"]:
+            return hall.settings()
+        case "POST", ["settings"]:
+            admin_only()
+            return hall.set_settings(data)
+        case "POST", ["escalation-key"]:
+            # The OpenRouter key escalation uses: the chair's own, copied here by `council apply` and
+            # whenever the app sets a new one. Used for free models only.
+            admin_only()
+            key = text(data.get("key"), "The key", 300)
+            if not re.fullmatch(r"sk-or-[\w\-]{16,200}", key):
+                raise Refused(400, "That isn't an OpenRouter key.")
+            path = STATE / "openrouter.key"
+            path.touch(mode=0o600)
+            path.write_text(key + "\n")
+            return {"saved": True}
+        case "GET", ["seats"]:
+            return {"seats": hall.seats()}
+        case "POST", ["seats"]:
+            admin_only()
+            return hall.put_seat(data)
+        case "DELETE", ["seats", seat_id]:
+            admin_only()
+            return hall.remove_seat(seat_id)
+        case "POST", ["feedback"]:
+            admin_only()
+            return hall.feedback(data)
+        case "GET", ["rooms"]:
+            return {"rooms": hall.rooms()}
+        case "POST", ["rooms"]:
+            admin_only()
+            return hall.new_room(data)
+        case "GET", ["rooms", room, "messages"]:
+            return {"messages": hall.messages(number(room, "room"), int(query.get("after", "0") or 0))}
+        case "POST", ["rooms", room, "messages"]:
+            return hall.post(number(room, "room"), me, data)
+        case "GET", ["tasks"]:
+            return {"tasks": hall.tasks(query.get("state"))}
+        case "POST", ["tasks"]:
+            return hall.new_task(me, data)
+        case "GET", ["tasks", task]:
+            return hall.task(number(task, "task"))
+        case "POST", ["tasks", task, "reopen"]:
+            admin_only()
+            return hall.reopen(number(task, "task"))
+        case "POST", ["tasks", task, "review"]:
+            return hall.review(number(task, "task"), me, data)
+        case "POST", ["tasks", task, action] if action in ("claim", "update", "submit"):
+            if admin:
+                raise Refused(403, "Seats claim and work on tasks; people post and review them.")
+            task_id = number(task, "task")
+            return {"claim": lambda: hall.claim(task_id, who), "update": lambda: hall.update(task_id, who, data),
+                    "submit": lambda: hall.submit(task_id, who, data)}[action]()
+        case "GET", ["votes"]:
+            return {"votes": hall.votes(open_only=query.get("open") == "1")}
+        case "POST", ["votes"]:
+            return hall.new_vote(me, data)
+        case "GET", ["votes", vote]:
+            return hall.vote(number(vote, "vote"))
+        case "POST", ["votes", vote, "ballot"]:
+            if admin:
+                raise Refused(403, "Only seats vote.")
+            return hall.ballot(number(vote, "vote"), who, data)
+        case "POST", ["votes", vote, "close"]:
+            admin_only()
+            return hall.close(number(vote, "vote"))
+    raise Refused(404, "No such endpoint.")
+
+
+def handler(hall: Hall, orchestrator: Orchestrator) -> type[BaseHTTPRequestHandler]:
+    class Handler(BaseHTTPRequestHandler):
+        server_version = "nanoborealis-hall"
+
+        def log_message(self, fmt: str, *args) -> None:  # requests aren't logged; changes are in the database
+            pass
+
+        def answer(self, status: int, payload: object) -> None:
+            body = json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def handle_any(self) -> None:
+            try:
+                auth = self.headers.get("Authorization", "")
+                with hall.lock:
+                    who = hall.who(auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else "")
+                if who is None:
+                    raise Refused(401, "Unknown token.")
+                length = int(self.headers.get("Content-Length") or 0)
+                if not 0 <= length <= MAX_BODY:
+                    raise Refused(413, "Too large.")
+                data = json.loads(self.rfile.read(length) or b"{}") if length else {}
+                if not isinstance(data, dict):
+                    raise Refused(400, "The body is a JSON object.")
+                url = urlsplit(self.path)
+                parts = [p for p in url.path.split("/") if p]
+                query = {k: v[-1] for k, v in parse_qs(url.query).items()}
+                result = orchestrator.db(lambda h: route(h, who, self.command, parts, query, data))
+                self.answer(200, result)
+            except Refused as e:
+                self.answer(e.status, {"error": str(e)})
+            except (ValueError, json.JSONDecodeError):
+                self.answer(400, {"error": "Bad request."})
+
+        do_GET = do_POST = do_DELETE = handle_any
+
+    return Handler
+
+
+def main() -> None:
+    host, _, port = LISTEN.rpartition(":")
+    hall = Hall(STATE)
+    orchestrator = Orchestrator(hall)
+    orchestrator.start()
+    server = ThreadingHTTPServer((host or "127.0.0.1", int(port)), handler(hall, orchestrator))
+    print(f"nanoborealis-hall: the council's Hall on {LISTEN}", file=sys.stderr, flush=True)
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+build/
+# Test gateways keep their runtime data next to their config file.
+dev/*/
+!dev/
+dev/*.sqlite3*
+# Gathered by the release workflow
+src/assets/licenses/

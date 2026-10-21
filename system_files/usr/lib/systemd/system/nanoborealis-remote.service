@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+[Unit]
+Description=NanoBorealis remote access: pair the NanoBorealis app, and let paired devices reach the agent
+Documentation=file:///usr/share/nanoborealis/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/libexec/nanoborealis-remote
+Restart=on-failure
+RestartSec=5
+StateDirectory=nanoborealis/remote
+StateDirectoryMode=0700
+# /run/nanoborealis/local.sock: where the NanoBorealis app on this computer pairs without a PIN.
+RuntimeDirectory=nanoborealis
+RuntimeDirectoryMode=0755
+UMask=0077
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+[Desktop Entry]
+Type=Application
+Name=NanoBorealis
+GenericName=AI agent
+Comment=Chat with your agent, and use this computer from your other devices
+Exec=nanoborealis-app
+Icon=nanoborealis
+Terminal=false
+Categories=Utility;Development;
+Keywords=agent;AI;chat;nanobot;
+StartupNotify=true
+StartupWMClass=nanoborealis

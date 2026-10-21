@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+[Unit]
+Description=NanoBorealis pool relay (lets the agent chat with this computer's pool node)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/nanoborealis/pool.env
+
+[Service]
+# NANOBOREALIS_RELAY_TOKEN, written by `nanoborealis pool` and readable by root only.
+EnvironmentFile=/etc/nanoborealis/pool.env
+Environment=NANOBOREALIS_RELAY_LISTEN=0.0.0.0:11436 NANOBOREALIS_RELAY_UPSTREAM=127.0.0.1:52415
+ExecStart=/usr/libexec/nanoborealis-relay
+DynamicUser=yes
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
