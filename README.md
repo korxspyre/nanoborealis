@@ -122,6 +122,7 @@ NanoBorealis is a [bootc](https://containers.github.io/bootc/) image: the whole 
 - **Council on real hardware.** `council apply`, seats in real containers and the Hall behind the real firewall are tested against stand-ins; the first runs on a real pool are next, as are the NVIDIA, Windows (WSL2) and Android paths.
 - **GPU pools in CI.** CI has no GPU, so the NVIDIA node is built and started there but proven only on real machines.
 - **Login screen and welcome app.** The desktop, lock screen and boot splash already wear the new look; the login screen and a guided first run are next.
+- **A reversible tokenization proxy, to protect your privacy.** Everything the agent sends to a cloud model passes through a proxy on your computer first. It swaps personal details (names, email addresses, phone numbers, street addresses, account numbers, keys) for stable placeholder tokens, so the provider never sees the real values, and swaps them back in the reply. The mapping never leaves your computer. Local models and your own pool see the real text.
 - **Signed macOS app, and install sticks from a Mac.**
 
 ## Credits
