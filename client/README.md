@@ -17,6 +17,16 @@ Your chats live on the NanoBorealis computer, so they carry over everywhere: a c
 - Reconnects by itself; on phones the sidebar moves into a drawer
 - Keys: Ctrl+N new chat, Ctrl+B sidebar, Ctrl+J terminal, Ctrl+E projects, Ctrl+K search, Esc stop
 
+**Coding-agent features** (the ones a coding agent's workspace has, built on `src/codefeatures.py` and drawn by `src/codeui.py`)
+
+- **Checkpoints and `/rewind`.** Before each message, the chat's project folder is copied into a shadow git repository of its own on the computer (never into your project's repository; it works for a folder that isn't a repo and follows your `.gitignore`). `/rewind` lists them; **Restore files** puts the folder back as it was before that message and takes away files made since, after saving the present, so a rewind can be undone. It is code only: it doesn't rewind the conversation, and can't see what a command changed outside the folder. A folder over about 1.5 GB isn't copied. `/checkpoint name` saves one by hand.
+- **Plan first** (the **Plan** chip, or `/plan`): the next message asks the agent to write a plan and change nothing. A card then offers **Approve**, which turns plan mode off and asks it to go ahead, or **Revise**. This is a request to the model, not a lock: the agent has no approval protocol, so nothing enforces it.
+- **A status bar** under the composer: plan mode, the model, **where it runs and whether it's tokenized** (`local`, `cloud · tokenized`, `cloud · not tokenized`; it only says tokenized when the agent reports its OpenRouter calls going through the relay, `nanoborealis privacy on`), context, lines changed, git branch, and the council.
+- **The crew** (`/crew`): the council's seats above the composer, the head agent first with a star, who is here, and each seat's benchmark; `/head` says who leads.
+- **App commands** in the `/` palette: `/plan`, `/rewind`, `/checkpoint`, `/context`, `/crew`, `/head`, `/cost`, `/diff`, `/privacy`, `/memory`, `/agents`.
+
+Not built (needs the agent, not the app): permission prompts and modes that really block a tool call, conversation rewind, hooks, a browser pane, worktrees, subagent definitions. The design for them is in [`docs/claude-code-parity.md`](../docs/claude-code-parity.md).
+
 **Agent, Hall and Task modes.** With a [council](../docs/council/README.md) running, every new chat picks a mode: **Agent** (one agent, the chair or any seat), **Hall** (you and every seat in one room, with nametapes, vote cards and escalations marked) or **Task** (work posted to the board, followed through claims, reviews and the result). Without a council, chats are Agent chats.
 
 **The control center**

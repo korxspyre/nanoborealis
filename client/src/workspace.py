@@ -16,12 +16,16 @@ import json
 import mimetypes
 import os
 import re
+import shlex
+import time
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 import flet as ft
 
 import agent_settings
+import codefeatures
+import codeui
 import host
 import models_catalog
 import panels
@@ -182,6 +186,14 @@ class Workspace:
         # Hall (the whole council) and Task (the council's board). See council_view.py.
         self.mode = "agent"
         self.council: Any = None
+        # The coding-agent features (codefeatures.py): plan mode, the status bar, the crew strip, checkpoints.
+        self.plan_mode = False
+        self.plan_turn = False  # the turn running now was sent as a plan request
+        self.context_used: int | None = None
+        self.lines_added = self.lines_removed = 0
+        self.branch_cache: dict[str, tuple[float, str]] = {}
+        self.crew_on = False
+        self.head_id: str | None = None
 
     # -- Layout -----------------------------------------------------------------------------------
 
@@ -625,6 +637,10 @@ class Workspace:
         self.stop_button = ft.IconButton(ft.Icons.STOP_ROUNDED, tooltip="Stop (Esc)", icon_size=18, visible=False,
                                          bgcolor=t.TEXT, icon_color=t.BG, on_click=self.on_stop,
                                          style=ft.ButtonStyle(shape=ft.CircleBorder(), padding=8))
+        self.plan_chip = ft.Container()
+        self.paint_plan_chip()
+        self.crew_holder = ft.Container(visible=False, padding=ft.Padding.only(bottom=2))
+        self.status_bar_holder = ft.Container()
         box = ft.Container(
             bgcolor=t.RAISED, border_radius=t.RADIUS_LG + 2, border=ft.Border.all(1, t.LINE_HI),
             padding=ft.Padding.only(left=12, right=8, top=8, bottom=8),
@@ -635,14 +651,14 @@ class Workspace:
                     t.icon_button(ft.Icons.ADD_ROUNDED, "Attach files or images", on_click=self.attach, size=18),
                     t.icon_button(ft.Icons.ALTERNATE_EMAIL_ROUNDED, "Mention a file from your projects",
                                   on_click=lambda _e: self.page.run_task(self.open_panel, "files"), size=17),
-                    self.project_chip,
+                    self.project_chip, self.plan_chip,
                     self.context_meter, self.model_chip, self.send_button, self.stop_button,
                 ], spacing=2, run_spacing=2, wrap=True, alignment=ft.MainAxisAlignment.END,
                    vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ]),
         )
         self.composer_box = ft.Container(content=ft.Column([
-            self.commands, box,
+            self.crew_holder, self.commands, box, self.status_bar_holder,
             ft.Text("Enter to send · Shift+Enter for a new line · / for commands. The agent can make mistakes; "
                     "check its work.", size=11, color=t.FAINT, text_align=ft.TextAlign.CENTER),
         ], spacing=6, tight=True, horizontal_alignment=ft.CrossAxisAlignment.STRETCH))
@@ -650,7 +666,7 @@ class Workspace:
 
     def all_commands(self) -> list[tuple[str, str]]:
         seen, merged = set(), []
-        for command, description in [*APP_COMMANDS, *self.agent_commands]:
+        for command, description in [*APP_COMMANDS, *codefeatures.CLIENT_COMMANDS, *self.agent_commands]:
             if command not in seen:
                 seen.add(command)
                 merged.append((command, description))
@@ -675,7 +691,8 @@ class Workspace:
 
     async def pick_command(self, command: str) -> None:
         self.commands.visible = False
-        if command in ("/model", "/new", "/stop", "/status", "/compact", "/help", "/skill", "/dream"):
+        if command in ("/model", "/new", "/stop", "/status", "/compact", "/help", "/skill", "/dream") \
+                or command in codefeatures.CLIENT_COMMAND_NAMES:
             self.composer.value = command
             await self.on_send()
         else:  # one that takes an argument: let it be typed
@@ -858,6 +875,7 @@ class Workspace:
             self.model_chip.update()
         except Exception:
             pass
+        self.schedule_status()
 
     def set_preset(self, name: Any) -> None:
         """A chat's model, as nanobot names it (a preset); None means the agent's default."""
@@ -942,6 +960,10 @@ class Workspace:
         self.welcome.visible = chat_id is None
         self.title_text.value = "New chat"
         self.context_meter.value = ""
+        self.context_used = None
+        self.lines_added = self.lines_removed = 0
+        self.plan_turn = False
+        self.schedule_status()
         self.pending_preset = None
         row = next((c for c in self.chats if c.get("chat_id") == chat_id), None) if chat_id else None
         self.show_scope((row or {}).get("workspace_scope") if chat_id else self.scope)
@@ -1093,6 +1115,8 @@ class Workspace:
     def show_context(self, used: Any, window: Any) -> None:
         if isinstance(window, int) and window > 0:
             self.context_window = window
+        if isinstance(used, int):
+            self.context_used = used
         if isinstance(used, int) and self.context_window:
             share = used / self.context_window
             self.context_meter.value = f"{share:.0%} context"
@@ -1250,8 +1274,15 @@ class Workspace:
                               event.get("context_window_tokens"))
             if not self.focused:
                 host.notify("NanoBorealis finished", (self.last_answer or "Your agent is done.").strip())
+            added, removed = codefeatures.count_changes([(c.name, c.args) for c in self.tools.values()])
+            self.lines_added, self.lines_removed = self.lines_added + added, self.lines_removed + removed
+            if self.plan_turn and event.get("outcome") != "failed":
+                self.plan_turn = False  # the plan is written: approve it, or revise
+                self.add(codeui.plan_card(lambda _e: self.page.run_task(self.approve_plan),
+                                          lambda _e: self.page.run_task(self.revise_plan)))
             self.reset_turn()
             self.page.update()
+            self.schedule_status()
         elif name == "error":
             detail = str(event.get("detail") or "error")
             if event.get("reason"):
@@ -1321,6 +1352,7 @@ class Workspace:
             await self.open_chat(self.chat_id)  # catch up on anything missed while offline
         elif self.chat_id is None:
             self.set_preset(None)
+        self.schedule_status()
         if not reconnect and app.link is not None:
             self.page.run_task(self.keep_chats_fresh, app.link)
             self.page.run_task(self.load_catalog)
@@ -1387,6 +1419,10 @@ class Workspace:
             self.composer.value = ""
             await self.on_stop()
             return
+        own = codefeatures.parse_command(text)
+        if own is not None:  # the app's own commands (/plan, /rewind, /crew...) never go to the agent
+            await self.client_command(*own)
+            return
         link = self.app.link
         if link is None or not link.connected:
             self.add(transcript.error("Not connected to the agent yet."))
@@ -1416,8 +1452,12 @@ class Workspace:
         if not text.startswith("/"):
             self.set_busy(True)  # while busy, a new message joins the running turn
         self.page.update()
+        outgoing = codefeatures.plan_message(text) if self.plan_mode and text and not text.startswith("/") else text
+        self.plan_turn = outgoing is not text
+        if not text.startswith("/"):
+            await self.take_checkpoint(text or names[0])  # the project's files, as they are before the agent touches them
         try:
-            await link.send_message(self.chat_id, text, media=media or None,
+            await link.send_message(self.chat_id, outgoing, media=media or None,
                                     **({"intent": intent} if intent else {}))
         except LinkError as e:
             self.add(transcript.error(str(e)))
@@ -1437,6 +1477,184 @@ class Workspace:
         self.close_thinking()
         self.reset_turn()
         self.set_busy(False)  # the agent says what it stopped, in a message of its own
+        self.page.update()
+
+    # -- Coding-agent features: plan first, checkpoints, the status bar, the crew (codefeatures.py) --------
+
+    def paint_plan_chip(self) -> None:
+        on = self.plan_mode
+        self.plan_chip.content = t.chip(
+            "Plan first" if on else "Plan", color=t.ACCENT_HI if on else t.MUTED, bgcolor=t.ACCENT_SOFT if on else ft.Colors.TRANSPARENT,
+            icon=ft.Icons.CHECKLIST_RTL_ROUNDED, on_click=self.toggle_plan, size=12.5,
+            tooltip="On: the next message gets a plan written out, with no changes made, for you to approve (/plan)"
+            if on else "Plan first: have the agent write a plan, and change nothing, before it does the work (/plan)")
+
+    def toggle_plan(self, _event=None) -> None:
+        self.plan_mode = not self.plan_mode
+        self.paint_plan_chip()
+        try:
+            self.page.update()
+        except Exception:
+            pass
+        self.schedule_status()
+
+    async def approve_plan(self) -> None:
+        self.plan_mode = False
+        self.paint_plan_chip()
+        await self.send_text(codefeatures.APPROVE)
+
+    async def revise_plan(self) -> None:
+        self.composer.value = ""
+        self.composer.hint_text = "What should change in the plan?"
+        self.page.update()
+        await self.composer.focus()
+
+    def schedule_status(self) -> None:
+        try:
+            self.page.run_task(self.refresh_status)
+        except Exception:
+            pass  # the screen isn't up yet
+
+    def host_folder(self) -> str | None:
+        """The chat's project folder as the computer sees it; None for 'all projects', which is too broad to copy."""
+        path = str((self.scope or {}).get("project_path") or "")
+        if path.startswith(AGENT_PROJECTS + "/") and len(path) > len(AGENT_PROJECTS) + 1:
+            return HOST_PROJECTS + path[len(AGENT_PROJECTS):]
+        return None
+
+    def checkpoints_for(self) -> "codefeatures.Checkpoints | None":
+        folder, machine = self.host_folder(), self.app.machine
+        if not folder or machine is None:
+            return None
+        from terminal import run_command
+        return codefeatures.Checkpoints(lambda command: run_command(machine, command, 90), folder)
+
+    async def take_checkpoint(self, label: str) -> None:
+        points = self.checkpoints_for()
+        if points is None or self.chat_id is None:
+            return
+        try:
+            await asyncio.wait_for(asyncio.to_thread(points.take, self.chat_id, label), 30)
+        except Exception:
+            pass  # a checkpoint that can't be made never holds a message back
+
+    async def show_rewind(self) -> None:
+        points = self.checkpoints_for()
+        if points is None or self.chat_id is None:
+            self.toast("Rewind works on a chat that has a project folder: pick one with the folder chip, and send a message.")
+            return
+        try:
+            items = await asyncio.to_thread(points.list, self.chat_id)
+        except Exception as e:
+            self.toast(f"Couldn't read this chat's checkpoints: {e}")
+            return
+
+        async def restore(item: dict) -> None:
+            self.page.pop_dialog()
+            try:
+                done = await asyncio.to_thread(points.restore, item["sha"])
+            except Exception as e:
+                self.toast(f"Couldn't rewind: {e}")
+                return
+            self.toast(f"The project's files are back as they were before \"{(item['label'] or 'that message')[:40]}\" "
+                       f"({done['files']} files, {done['removed']} removed). /rewind again to undo it." if done.get("ok")
+                       else f"Couldn't rewind: {done.get('error')}")
+
+        self.page.show_dialog(codeui.rewind_dialog(items, lambda item: self.page.run_task(restore, item),
+                                                    lambda _e: self.page.pop_dialog()))
+
+    async def git_branch(self) -> str:
+        folder, machine = self.host_folder(), self.app.machine
+        if not folder or machine is None:
+            return ""
+        cached = self.branch_cache.get(folder)
+        if cached and time.time() - cached[0] < 30:
+            return cached[1]
+        from terminal import run_command
+        try:
+            _status, out = await asyncio.wait_for(asyncio.to_thread(
+                run_command, machine, f"git -C {shlex.quote(folder)} rev-parse --abbrev-ref HEAD 2>/dev/null", 10), 15)
+        except Exception:
+            out = ""
+        lines = out.strip().splitlines()
+        branch = lines[-1] if lines and "fatal" not in out and len(lines[-1]) < 80 else ""
+        self.branch_cache[folder] = (time.time(), branch)
+        return branch
+
+    async def refresh_status(self) -> None:
+        """The bar under the composer: where this chat's model runs and whether it is tokenized, the context, the changes."""
+        try:
+            council = self.council
+            segments = codefeatures.status_segments(
+                model=self.model_id or "", provider=codefeatures.provider_of(self.settings, self.model_id),
+                used=self.context_used, window=self.context_window, added=self.lines_added, removed=self.lines_removed,
+                branch=await self.git_branch(), plan=self.plan_mode,
+                privacy_on=codefeatures.privacy_from_settings(self.settings) if self.settings else None,
+                crew=codefeatures.crew_summary(council.seats, self.head_id) if council is not None and council.seats else "")
+            self.status_bar_holder.content = codeui.status_bar(segments)
+            self.status_bar_holder.update()
+        except Exception:
+            pass  # a status bar that can't draw is not worth a crash
+
+    async def refresh_crew(self) -> None:
+        council = self.council_view()
+        await council.load()
+        if council.problem:
+            self.crew_holder.visible = False
+            self.toast(f"No council to show: {council.problem}")
+            return
+        try:
+            head = await council.call("GET", "/head")
+        except Exception:
+            head = {"head": None, "line": []}
+        self.head_id = head.get("head")
+        here = {e["seat"]: e["state"] == "ready" for e in head.get("line") or []}
+        seats = [{**s, "here": here.get(s["id"], True)} for s in council.seats]
+        chips = codefeatures.crew_chips(seats, self.head_id)
+        self.crew_holder.content = codeui.crew_strip(chips, lambda chip: self.toast(
+            f"{chip['name']}: {chip['state']}{' · head agent' if chip['head'] else ''} · trust {chip['trust']} · benchmark {chip['benchmark']}"))
+        self.crew_holder.visible = self.crew_on and bool(chips)
+        self.schedule_status()
+
+    async def client_command(self, name: str, rest: str) -> None:
+        """The app's own slash commands."""
+        self.composer.value = ""
+        self.commands.visible = False
+        if name == "/plan":
+            self.toggle_plan()
+        elif name == "/rewind":
+            await self.show_rewind()
+        elif name == "/checkpoint":
+            points = self.checkpoints_for()
+            made = await asyncio.to_thread(points.take, self.chat_id, rest or "saved by hand") if points and self.chat_id else None
+            self.toast("Saved the project's files. /rewind brings them back." if made else
+                       "Couldn't save: this needs a chat with a project folder, on a computer with git.")
+        elif name == "/context":
+            self.toast(self.context_meter.tooltip or "Nothing in this chat's context yet.")
+        elif name in ("/crew", "/head"):
+            self.crew_on = name == "/crew" and not self.crew_on or name == "/head"
+            await self.refresh_crew()
+            if name == "/head" and self.head_id:
+                self.toast(f"Head agent: {self.head_id}")
+        elif name == "/cost":
+            import admin
+            try:
+                info = await asyncio.to_thread(admin.usage, self.app.machine)
+                money = lambda v: "n/a" if v is None else f"${float(v):.2f}"  # noqa: E731
+                self.toast(f"OpenRouter: today {money(info.get('usage_daily'))}, all time {money(info.get('usage'))}"
+                           + (f", {money(info.get('limit_remaining'))} left" if info.get("limit_remaining") is not None else ""))
+            except Exception as e:
+                self.toast(f"Couldn't read the spend: {e}")
+        elif name == "/diff":
+            await self.open_panel("changes")
+        elif name == "/privacy":
+            words, _tone = codefeatures.privacy_label(codefeatures.provider_of(self.settings, self.model_id),
+                                                      codefeatures.privacy_from_settings(self.settings) if self.settings else None)
+            self.toast(f"This chat's model: {words}. Turn tokenizing on for the cloud with: nanoborealis privacy on")
+        elif name == "/memory":
+            await self.show_section("memory")
+        elif name == "/agents":
+            await self.show_section("council")
         self.page.update()
 
     # -- Keys and focus ------------------------------------------------------------------------------

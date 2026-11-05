@@ -152,6 +152,14 @@ jobs:
       - name: A reasoning model's thinking isn't shown as a chat title
         run: '"$RUNNER_TEMP/venv/bin/python" client/dev/chat_title_check.py'
 
+      # Checkpoints and rewind against a real git and shell, plan mode, the status bar, the crew, the app's commands.
+      - name: Coding-agent features
+        run: '"$RUNNER_TEMP/venv/bin/python" client/dev/codefeatures_check.py'
+
+      # The screens for them, and the workspace around them, built without a window.
+      - name: Coding-agent screens build
+        run: '"$RUNNER_TEMP/venv/bin/python" client/dev/codeui_check.py'
+
       - name: The UI module loads
         working-directory: client/src
         run: '"$RUNNER_TEMP/venv/bin/python" -c "import main; print(\"ok\")"'
