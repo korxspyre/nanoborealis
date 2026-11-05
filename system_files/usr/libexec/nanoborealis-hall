@@ -35,6 +35,10 @@ try:
     import tokenizer  # what keeps personal details off the internet when the Hall asks a cloud model
 except ImportError:  # without them nothing goes to the cloud: advise() sends only through the tokenizer
     mixer = sources = tokenizer = None
+try:
+    import rigs  # teams of seats as a file, the head agent, the watchdog's decisions, restore
+except ImportError:
+    rigs = None
 # The owner's switch (also the relay's): with it set, no question leaves for a cloud model at all.
 CLOUD_OFF = os.environ.get("NANOBOREALIS_MIX_SENSITIVITY") == "local-only"
 
@@ -100,6 +104,17 @@ CREATE TABLE IF NOT EXISTS benchmarks (
     passed INTEGER NOT NULL, n INTEGER NOT NULL, at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS benchmarks_model ON benchmarks (model, at);
+CREATE TABLE IF NOT EXISTS rigs (name TEXT PRIMARY KEY, culture TEXT NOT NULL DEFAULT '', spec TEXT NOT NULL, created REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS pods (rig TEXT NOT NULL, id TEXT NOT NULL, guidance TEXT NOT NULL DEFAULT '', PRIMARY KEY (rig, id));
+CREATE TABLE IF NOT EXISTS edges (rig TEXT NOT NULL, src TEXT NOT NULL, dst TEXT NOT NULL, kind TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS inbox (
+    id INTEGER PRIMARY KEY, rig TEXT, sender TEXT NOT NULL, recipient TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'message',
+    text TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'new', tries INTEGER NOT NULL DEFAULT 0, reply_to INTEGER,
+    created REAL NOT NULL, delivered REAL, done REAL
+);
+CREATE INDEX IF NOT EXISTS inbox_recipient ON inbox (recipient, state);
+CREATE TABLE IF NOT EXISTS snapshots (id INTEGER PRIMARY KEY, rig TEXT NOT NULL, label TEXT NOT NULL DEFAULT '', data TEXT NOT NULL, at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS presence (seat TEXT PRIMARY KEY, at REAL NOT NULL, status TEXT NOT NULL, note TEXT NOT NULL DEFAULT '');
 """
 MIGRATIONS = [
     ("seats", "port", "INTEGER"),  # where its API is, on this computer (nanobot serve); none for the chair
@@ -108,6 +123,9 @@ MIGRATIONS = [
     # An outside seat: an agent that joins over the API (Claude Code, say) and isn't run by the pool. The Hall
     # can't ask it, so a vote doesn't wait for it; and it sees the Hall tokenized (see handler()).
     ("seats", "external", "INTEGER NOT NULL DEFAULT 0"),
+    # Where a seat sits in a rig (rigs.py), and its place in line to be the head agent.
+    ("seats", "rig", "TEXT"), ("seats", "pod", "TEXT"), ("seats", "role", "TEXT"), ("seats", "policy", "TEXT"),
+    ("seats", "address", "TEXT"), ("seats", "guidance", "TEXT"), ("seats", "head_rank", "INTEGER"),
 ]
 
 
@@ -339,6 +357,15 @@ class Hall:
             if data["external"] and (port is not None or data.get("chair")):
                 raise Refused(400, "An outside seat has no API of its own and isn't the chair.")
             self.db.execute("UPDATE seats SET external = ? WHERE id = ?", (int(bool(data["external"])), seat_id))
+        for column in ("rig", "pod", "role", "policy", "address", "guidance"):  # where it sits in a rig; left out: unchanged
+            if column in data:
+                self.db.execute(f"UPDATE seats SET {column} = ? WHERE id = ?",
+                                (text(data.get(column), column, 2000, required=False) or None, seat_id))
+        if "head_rank" in data:
+            rank = data["head_rank"]
+            if rank is not None and (isinstance(rank, bool) or not isinstance(rank, int) or rank < 1):
+                raise Refused(400, "head_rank is 1 for first in line.")
+            self.db.execute("UPDATE seats SET head_rank = ? WHERE id = ?", (rank, seat_id))
         if "port" in data:  # left out: unchanged
             self.db.execute("UPDATE seats SET port = ? WHERE id = ?", (port, seat_id))
         port = self.db.execute("SELECT port FROM seats WHERE id = ?", (seat_id,)).fetchone()["port"]
@@ -357,6 +384,263 @@ class Hall:
         self.seat(seat_id)
         self.db.execute("DELETE FROM seats WHERE id = ?", (seat_id,))
         return {"removed": seat_id}
+
+    # -- Rigs: teams of seats as a file --------------------------------------------------------------
+
+    def need_rigs(self) -> None:
+        if rigs is None:
+            raise Refused(503, "Rigs need rigs.py, which isn't installed.")
+
+    def rig_list(self) -> list[dict]:
+        return [{"name": r["name"], "seats": self.db.execute("SELECT COUNT(*) FROM seats WHERE rig = ?", (r["name"],)).fetchone()[0],
+                 "created": r["created"]} for r in self.db.execute("SELECT * FROM rigs ORDER BY name")]
+
+    def rig(self, name: str) -> dict:
+        row = self.db.execute("SELECT * FROM rigs WHERE name = ?", (name,)).fetchone()
+        if not row:
+            raise Refused(404, f"No rig {name}.")
+        beats = {r["seat"]: dict(r) for r in self.db.execute("SELECT * FROM presence")}
+        now = time.time()
+        seats = []
+        for r in self.db.execute("SELECT id FROM seats WHERE rig = ? ORDER BY head_rank IS NULL, head_rank, id", (name,)):
+            seat = self.seat(r["id"])
+            beat = beats.get(seat["id"])
+            seat["mail_waiting"] = self.db.execute("SELECT COUNT(*) FROM inbox WHERE recipient = ? AND state != 'done'", (seat["id"],)).fetchone()[0]
+            seat["here"] = (seat["port"] is not None or bool(beat and now - beat["at"] <= (rigs.FRESH if rigs else 120)))
+            seat["status"] = beat["status"] if beat else None
+            seats.append(seat)
+        return {"name": name, "culture": row["culture"], "created": row["created"], "seats": seats,
+                "pods": [dict(p) for p in self.db.execute("SELECT id, guidance FROM pods WHERE rig = ? ORDER BY id", (name,))],
+                "edges": [dict(e) for e in self.db.execute("SELECT src, dst, kind FROM edges WHERE rig = ?", (name,))],
+                "snapshots": [dict(s) for s in self.db.execute("SELECT id, label, at FROM snapshots WHERE rig = ? ORDER BY id DESC LIMIT 10", (name,))]}
+
+    def rig_apply(self, data: dict) -> dict:
+        """`rig up`: the spec in `data["spec"]` (TOML text) becomes pods, seats, edges and a culture. With
+        dry_run it only says what it would do. Seats that left the spec are removed; new outside seats get a token."""
+        self.need_rigs()
+        try:
+            spec = rigs.parse(data["spec"]) if isinstance(data.get("spec"), str) else rigs.validate(data.get("spec") or {})
+        except rigs.SpecError as error:
+            raise Refused(400, "; ".join(error.errors)) from None
+        existing = {s["id"]: s for s in self.seats()}
+        plan = rigs.plan(spec, existing)
+        if plan["taken"]:
+            raise Refused(409, f"These seat ids already belong to another rig or the council: {', '.join(plan['taken'])}.")
+        if data.get("dry_run"):
+            return {"rig": spec["name"], "plan": plan, "dry_run": True}
+        name = spec["name"]
+        self.db.execute("INSERT OR REPLACE INTO rigs (name, culture, spec, created) VALUES (?, ?, ?, COALESCE((SELECT created FROM rigs "
+                        "WHERE name = ?), ?))", (name, spec["culture"], json.dumps(spec), name, time.time()))
+        self.db.execute("DELETE FROM pods WHERE rig = ?", (name,))
+        self.db.execute("DELETE FROM edges WHERE rig = ?", (name,))
+        for pod in spec["pods"]:
+            self.db.execute("INSERT INTO pods (rig, id, guidance) VALUES (?, ?, ?)", (name, pod["id"], pod["guidance"]))
+        for edge in spec["edges"]:
+            self.db.execute("INSERT INTO edges (rig, src, dst, kind) VALUES (?, ?, ?, ?)", (name, edge["src"], edge["dst"], edge["kind"]))
+        tokens = self.rig_seats(spec)
+        wanted = {s["id"] for s in spec["seats"]}
+        for old in [r["id"] for r in self.db.execute("SELECT id FROM seats WHERE rig = ?", (name,)) if r["id"] not in wanted]:
+            self.remove_seat(old)
+        return {"rig": name, "plan": plan, "tokens": tokens}
+
+    def rig_seats(self, spec: dict) -> dict:
+        """Make or update the spec's seats. Returns the tokens of the outside seats made new: shown once."""
+        tokens = {}
+        for s in spec["seats"]:
+            made = self.put_seat({"id": s["id"], "name": s["address"], "model": s["model"], "capability": s["capability"],
+                                  "family": "outside" if s["kind"] == "outside" else "", "external": s["kind"] == "outside",
+                                  "rig": spec["name"], "pod": s["pod"], "role": s["role"], "policy": s["policy"],
+                                  "address": s["address"], "guidance": s["guidance"], "head_rank": s["head_rank"]})
+            if "token" in made:
+                tokens[s["address"]] = made["token"]
+        return tokens
+
+    def rig_down(self, name: str, snapshot: bool = True) -> dict:
+        """`rig down`: its seats, pods and edges go, after a snapshot by default. Mail and tasks stay, for `rig restore`."""
+        self.rig(name)
+        snap = self.rig_snapshot(name, "taken down") if snapshot else None
+        for r in list(self.db.execute("SELECT id FROM seats WHERE rig = ?", (name,))):
+            self.remove_seat(r["id"])
+        for table in ("pods", "edges"):
+            self.db.execute(f"DELETE FROM {table} WHERE rig = ?", (name,))
+        self.db.execute("DELETE FROM rigs WHERE name = ?", (name,))
+        return {"down": name, "snapshot": snap["id"] if snap else None}
+
+    def rig_snapshot(self, name: str, label: str = "") -> dict:
+        """Everything that makes the rig what it is, and the work in flight, to bring it back from."""
+        rig = self.rig(name)
+        keep = ("id", "address", "name", "model", "family", "capability", "external", "rig", "pod", "role", "policy", "guidance",
+                "head_rank", "port")
+        mine = {s["id"] for s in rig["seats"]}
+        data = {"rig": {"name": name, "culture": rig["culture"]}, "pods": rig["pods"], "edges": rig["edges"],
+                "seats": [{**{k: s.get(k) for k in keep}, "kind": "outside" if s["external"] else "pool"} for s in rig["seats"]],
+                "tasks": [t for t in self.tasks() if t["state"] in ("open", "claimed", "review") and (t["claimed_by"] in mine or not t["claimed_by"])],
+                "mail": [dict(r) for r in self.db.execute("SELECT * FROM inbox WHERE rig = ? AND state != 'done'", (name,))]}
+        cur = self.db.execute("INSERT INTO snapshots (rig, label, data, at) VALUES (?, ?, ?, ?)",
+                              (name, text(label, "label", 200, required=False), json.dumps(data), time.time()))
+        return {"id": cur.lastrowid, "rig": name, "seats": len(data["seats"]), "tasks": len(data["tasks"]), "mail": len(data["mail"])}
+
+    def rig_restore(self, name: str, data: dict) -> dict:
+        """`rig restore`: the latest snapshot (or the one in data["snapshot"]), seat by seat, saying honestly what came
+        back. A seat whose model isn't available is not guessed at: it waits for you to decide."""
+        self.need_rigs()
+        wanted = data.get("snapshot")
+        row = (self.db.execute("SELECT * FROM snapshots WHERE id = ? AND rig = ?", (wanted, name)).fetchone() if wanted
+               else self.db.execute("SELECT * FROM snapshots WHERE rig = ? ORDER BY id DESC LIMIT 1", (name,)).fetchone())
+        if not row:
+            raise Refused(404, f"No snapshot of {name}.")
+        snap = json.loads(row["data"])
+        models = set(data["models"]) if isinstance(data.get("models"), list) else None
+        current = {s["id"]: s for s in self.seats()}
+        outcomes = rigs.restore_outcomes(snap, current, models)
+        waiting = {o["seat"] for o in outcomes if o["outcome"] == "awaiting-decision"}
+        self.db.execute("INSERT OR REPLACE INTO rigs (name, culture, spec, created) VALUES (?, ?, ?, COALESCE((SELECT created FROM rigs "
+                        "WHERE name = ?), ?))", (name, snap["rig"]["culture"], json.dumps(snap["rig"]), name, time.time()))
+        for pod in snap["pods"]:
+            self.db.execute("INSERT OR REPLACE INTO pods (rig, id, guidance) VALUES (?, ?, ?)", (name, pod["id"], pod["guidance"]))
+        self.db.execute("DELETE FROM edges WHERE rig = ?", (name,))
+        tokens = {}
+        for seat in snap["seats"]:
+            if (seat["address"] or seat["id"]) in waiting or seat["id"] in current:
+                continue  # waiting for a decision, or never left
+            made = self.put_seat({k: seat[k] for k in ("id", "name", "model", "family", "capability", "rig", "pod", "role", "policy",
+                                                       "address", "guidance", "head_rank")} | {"external": seat["kind"] == "outside"})
+            if "token" in made:
+                tokens[seat["address"] or seat["id"]] = made["token"]
+        for edge in snap["edges"]:
+            self.db.execute("INSERT INTO edges (rig, src, dst, kind) VALUES (?, ?, ?, ?)", (name, edge["src"], edge["dst"], edge["kind"]))
+        # The work in flight: mail not already there comes back, and work held by a seat that waits goes back on the board.
+        for m in snap["mail"]:
+            if not self.db.execute("SELECT 1 FROM inbox WHERE created = ? AND sender = ? AND recipient = ? AND text = ?",
+                                   (m["created"], m["sender"], m["recipient"], m["text"])).fetchone():
+                self.db.execute("INSERT INTO inbox (rig, sender, recipient, kind, text, state, tries, created) VALUES (?, ?, ?, ?, ?, 'new', 0, ?)",
+                                (name, m["sender"], m["recipient"], m["kind"], m["text"], m["created"]))
+        freed = []
+        for task in snap["tasks"]:
+            if any((s["address"] or s["id"]) in waiting and s["id"] == task.get("claimed_by") for s in snap["seats"]):
+                self.reopen(task["id"])
+                freed.append(task["id"])
+        return {"snapshot": row["id"], "outcomes": outcomes, "tokens": tokens, "tasks_reopened": freed}
+
+    # -- Mail: a durable inbox for every seat ---------------------------------------------------------
+
+    def resolve(self, who: str) -> dict:
+        """The delivery guard: a name must be exactly one seat. An id or an address is; a bare name is only if one rig
+        has it. Anything unclear is refused with the candidates, never guessed."""
+        who = text(who, "The recipient", 100)
+        rows = [dict(r) for r in self.db.execute("SELECT id, address FROM seats WHERE id = ? OR address = ?", (who, who))]
+        if not rows and "@" not in who:
+            rows = [dict(r) for r in self.db.execute("SELECT id, address FROM seats WHERE address LIKE ?", (who + "@%",))]
+        if not rows:
+            raise Refused(404, f"No seat called {who}.")
+        if len(rows) > 1:
+            raise Refused(409, f"{who} could be any of {', '.join(r['address'] or r['id'] for r in rows)}: name one.")
+        return rows[0]
+
+    def send(self, sender: str, data: dict) -> dict:
+        """Mail to one seat, to a pod ("pod:rig/pod"), to a rig ("rig:name"), to "head", or to "you". Each recipient gets
+        its own item, which stays until it is done."""
+        kind = data.get("kind", "message")
+        if kind not in ("message", "task", "nudge", "reply"):
+            raise Refused(400, "Mail is a message, a task, a nudge or a reply.")
+        body, to = text(data.get("text"), "The mail", 8000), text(data.get("to"), "Who it is for", 100)
+        reply_to = data.get("reply_to") if isinstance(data.get("reply_to"), int) else None
+        if to == "you":
+            targets = [("you", None)]
+        elif to == "head":
+            head = self.head()["head"]
+            if not head:
+                raise Refused(404, "There is no head agent: no seats.")
+            targets = [(head, self.db.execute("SELECT rig FROM seats WHERE id = ?", (head,)).fetchone()["rig"])]
+        elif to.startswith(("rig:", "pod:")):
+            if to.startswith("rig:"):
+                rows = self.db.execute("SELECT id, rig FROM seats WHERE rig = ? AND id != ?", (to[4:], sender)).fetchall()
+            else:
+                rig_name, _, pod = to[4:].partition("/")
+                rows = self.db.execute("SELECT id, rig FROM seats WHERE rig = ? AND pod = ? AND id != ?", (rig_name, pod, sender)).fetchall()
+            if not rows:
+                raise Refused(404, f"No seats at {to}.")
+            targets = [(r["id"], r["rig"]) for r in rows]
+        else:
+            seat = self.resolve(to)
+            targets = [(seat["id"], self.db.execute("SELECT rig FROM seats WHERE id = ?", (seat["id"],)).fetchone()["rig"])]
+        ids = []
+        for recipient, rig_name in targets:
+            cur = self.db.execute("INSERT INTO inbox (rig, sender, recipient, kind, text, reply_to, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                  (rig_name, sender, recipient, kind, body, reply_to, time.time()))
+            ids.append(cur.lastrowid)
+            self.events.append(("inbox", cur.lastrowid))
+        return {"sent": ids, "to": [t[0] for t in targets]}
+
+    def mail(self, seat: str, state: str | None = None) -> list[dict]:
+        if state and state not in ("new", "delivered", "done", "dead"):
+            raise Refused(400, "Mail is new, delivered, done or dead.")
+        rows = self.db.execute("SELECT * FROM inbox WHERE recipient = ?" + (" AND state = ?" if state else " AND state != 'done'")
+                               + " ORDER BY id LIMIT 200", (seat, state) if state else (seat,))
+        return [dict(r) for r in rows]
+
+    def ack(self, item_id: int, who: str, state: str) -> dict:
+        row = self.db.execute("SELECT * FROM inbox WHERE id = ?", (item_id,)).fetchone()
+        if not row:
+            raise Refused(404, f"No mail {item_id}.")
+        if who != "admin" and row["recipient"] != who:
+            raise Refused(403, "That isn't your mail.")
+        if state not in ("delivered", "done"):
+            raise Refused(400, "Mail is acknowledged as delivered or done.")
+        column = "done" if state == "done" else "delivered"
+        self.db.execute(f"UPDATE inbox SET state = ?, {column} = ? WHERE id = ?", (state, time.time(), item_id))
+        return dict(self.db.execute("SELECT * FROM inbox WHERE id = ?", (item_id,)).fetchone())
+
+    # -- Presence and the head agent -----------------------------------------------------------------
+
+    def beat(self, seat: str, data: dict) -> dict:
+        """A seat that isn't run by the pool says it is here, and whether its usage is spent."""
+        status = data.get("status", "ok")
+        if status not in ("ok", "limited", "busy"):
+            raise Refused(400, "status is ok, limited or busy.")
+        note = text(data.get("note"), "note", 200, required=False)
+        self.db.execute("INSERT OR REPLACE INTO presence (seat, at, status, note) VALUES (?, ?, ?, ?)", (seat, time.time(), status, note))
+        return self.head()
+
+    def head(self) -> dict:
+        """Who leads now: the first seat in line that is here, else the strongest the Hall can ask, else the chair."""
+        self.need_rigs()
+        presence = {r["seat"]: dict(r) for r in self.db.execute("SELECT * FROM presence")}
+        found = rigs.pick_head(self.seats(), presence, time.time())
+        return found
+
+    # -- The watchdog --------------------------------------------------------------------------------
+
+    def watchdog_scan(self, now: float, mail_after: float, task_after: float) -> dict:
+        """Look for mail nobody has taken and work nobody has touched. Returns what to deliver again, and what it did."""
+        self.need_rigs()
+        # Only mail for seats the Hall can ask: an outside seat's mail waits for it, however long that takes.
+        items = [dict(r) for r in self.db.execute("SELECT inbox.* FROM inbox JOIN seats ON seats.id = inbox.recipient "
+                                                  "WHERE inbox.state = 'new' AND seats.port IS NOT NULL")]
+        again, give_up = rigs.overdue_mail(items, now, mail_after)
+        for item in again:
+            self.db.execute("UPDATE inbox SET tries = tries + 1 WHERE id = ?", (item["id"],))
+        for item in give_up:
+            self.db.execute("UPDATE inbox SET state = 'dead' WHERE id = ?", (item["id"],))
+            if item["recipient"] != "you":
+                self.send("hall", {"to": "head", "text": f"Mail {item['id']} from {item['sender']} to {item['recipient']} was never taken: "
+                                                         f"{item['text'][:200]}"}) if self.seats() else None
+        held = []
+        for t in self.db.execute("SELECT * FROM tasks WHERE state = 'claimed'"):
+            word = self.db.execute("SELECT MAX(at) FROM task_notes WHERE task = ? AND kind != 'nudge'", (t["id"],)).fetchone()[0]
+            nudges = self.db.execute("SELECT COUNT(*) FROM task_notes WHERE task = ? AND kind = 'nudge'", (t["id"],)).fetchone()[0]
+            held.append({"id": t["id"], "state": t["state"], "claimed_by": t["claimed_by"], "title": t["title"],
+                         "last_word": max(t["updated"], word or 0), "nudges": nudges})
+        nudge, reopen = rigs.stale_tasks(held, now, task_after)
+        for task in nudge:
+            self.note(task["id"], "hall", "nudge", "Still on this? Say where it stands, or hand it in.")
+            self.db.execute("UPDATE tasks SET updated = ? WHERE id = ?", (now, task["id"]))
+            self.send("hall", {"to": task["claimed_by"], "kind": "nudge", "text": f"Task {task['id']} ({task['title']}) has been quiet. Say where it stands."})
+        for task in reopen:
+            self.reopen(task["id"])
+            self.events.append(("task", task["id"]))  # offered to the seats again
+        return {"again": [i["id"] for i in again], "given_up": [i["id"] for i in give_up],
+                "nudged": [t["id"] for t in nudge], "reopened": [t["id"] for t in reopen]}
 
     # -- Rooms ---------------------------------------------------------------------------------------
 
@@ -599,6 +883,9 @@ SEAT_HOST = os.environ.get("NANOBOREALIS_HALL_SEAT_HOST", "127.0.0.1")
 OPENROUTER_URL = os.environ.get("NANOBOREALIS_HALL_OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
 SEAT_TIMEOUT = float(os.environ.get("NANOBOREALIS_HALL_SEAT_TIMEOUT", "1800"))  # a CPU pool is slow to read
 CONTINUOUS_EVERY = float(os.environ.get("NANOBOREALIS_HALL_CONTINUOUS_EVERY", "300"))
+WATCHDOG_EVERY = float(os.environ.get("NANOBOREALIS_HALL_WATCHDOG_EVERY", "60"))
+MAIL_AFTER = float(os.environ.get("NANOBOREALIS_HALL_MAIL_AFTER", "120"))  # mail a seat hasn't taken for this long is tried again
+TASK_AFTER = float(os.environ.get("NANOBOREALIS_HALL_TASK_AFTER", "1800"))  # a task held and quiet for this long is nudged
 CONTEXT_MESSAGES = 20  # the room's newest messages a seat is shown when it's asked to speak
 FREE_ONLY = {"provider": {"max_price": {"prompt": 0, "completion": 0, "request": 0, "image": 0}}}
 PASS = re.compile(r"^\W*pass\W*$", re.IGNORECASE)
@@ -642,6 +929,19 @@ class Orchestrator:
     def start(self) -> None:
         threading.Thread(target=self.work, daemon=True).start()
         threading.Thread(target=self.continuous, daemon=True).start()
+        threading.Thread(target=self.watchdog, daemon=True).start()
+
+    def watchdog(self) -> None:
+        """Every minute: mail a seat hasn't taken is delivered again (and given up on, telling the head), and a task held
+        and quiet is nudged, then put back on the board."""
+        while True:
+            time.sleep(WATCHDOG_EVERY)
+            try:
+                if rigs is not None:
+                    for item_id in self.db(lambda h: h.watchdog_scan(time.time(), MAIL_AFTER, TASK_AFTER))["again"]:
+                        self.jobs.put(("inbox", item_id))
+            except Exception as e:
+                print(f"nanoborealis-hall: the watchdog failed: {type(e).__name__}", file=sys.stderr, flush=True)
 
     def kick(self, events: list[tuple]) -> None:
         for event in events:
@@ -697,8 +997,31 @@ class Orchestrator:
             return sorted(found, key=lambda s: -s["weight"])
         return self.db(find)
 
+    def briefing(self, seat: dict) -> str:
+        """What a seat in a rig is told first: the team's norms, its pod's guidance, its own role."""
+        if rigs is None or not seat.get("rig"):
+            return ""
+
+        def find(h: Hall):
+            rig = h.db.execute("SELECT name, culture FROM rigs WHERE name = ?", (seat["rig"],)).fetchone()
+            pod = h.db.execute("SELECT id, guidance FROM pods WHERE rig = ? AND id = ?", (seat["rig"], seat.get("pod"))).fetchone()
+            return (dict(rig) if rig else None, dict(pod) if pod else None)
+        rig, pod = self.db(find)
+        return rigs.briefing(rig, pod, seat)
+
+    def notify_head(self, words: str) -> None:
+        """Tell the head agent, if the rig has put anyone in line to be one."""
+        try:
+            if rigs is not None and self.db(lambda h: h.head())["line"]:
+                self.db(lambda h: h.send("hall", {"to": "head", "text": words}))
+        except Refused:
+            pass
+
     def ask(self, seat: dict, session: str, prompt: str) -> str:
         """One turn of the seat's agent, in its session for this room or task; "" if it didn't answer."""
+        brief = self.briefing(seat)
+        if brief:
+            prompt = f"{brief}\n\n{prompt}"
         try:
             answer = post_json(f"http://{SEAT_HOST}:{seat['port']}/v1/chat/completions",
                                {"model": seat["model"], "session_id": session,
@@ -793,8 +1116,21 @@ class Orchestrator:
 
     def on_review(self, task_id: int) -> None:
         task = self.db(lambda h: h.task(task_id))
-        reviewer = next(iter(self.seats(exclude=(task["claimed_by"],))), None)
-        if task["state"] != "review" or reviewer is None:
+        if task["state"] != "review":
+            return
+        # A rig can name who reviews whom (an edge of kind "reviews"). A named reviewer the Hall can ask is asked;
+        # one it can't (an outside seat, Claude's) gets the review as mail and takes it from its inbox.
+        edge = self.db(lambda h: h.db.execute("SELECT src FROM edges WHERE dst = ? AND kind = 'reviews' LIMIT 1",
+                                              (task["claimed_by"],)).fetchone())
+        named = edge["src"] if edge else None
+        askable = self.seats(exclude=(task["claimed_by"],))
+        reviewer = next((s for s in askable if s["id"] == named), None) or (None if named else next(iter(askable), None))
+        if named and reviewer is None:
+            self.db(lambda h: h.send("hall", {"to": named, "kind": "task", "text":
+                    f"Please review task {task_id} ({task['title']}), handed in by {task['claimed_by']}:\n\n{task['result']}\n\n"
+                    "Accept it or reject it with your reasons, on the task."}))
+            return
+        if reviewer is None:
             return  # a council of one: the person reviews it
         try:
             author = card_text(self.db(lambda h: h.seat(task["claimed_by"]))["scorecard"])
@@ -820,6 +1156,31 @@ class Orchestrator:
                              "Reviews: " + "; ".join(n["text"] for n in task["notes"] if n["kind"] == "reject"))
         if advice:
             self.db(lambda h: h.note(task_id, "advisor", "advice", advice))
+        self.notify_head(f"Task {task_id} ({task['title']}) failed review twice" + (", and outside advice is on the task." if advice else "."))
+
+    def on_inbox(self, item_id: int) -> None:
+        """Mail for a seat the Hall can ask: it is asked to act on it, and its answer goes back to the sender. A seat the
+        Hall can't ask (an outside seat, the chair, you) takes its mail from its inbox itself."""
+        item = self.db(lambda h: (lambda r: dict(r) if r else None)(h.db.execute("SELECT * FROM inbox WHERE id = ?", (item_id,)).fetchone()))
+        if item is None or item["state"] != "new":
+            return
+        seat = next((s for s in self.seats() if s["id"] == item["recipient"]), None)
+        if seat is None:
+            return
+        self.db(lambda h: h.db.execute("UPDATE inbox SET state = 'delivered', tries = tries + 1, delivered = ? WHERE id = ?",
+                                       (time.time(), item_id)))
+        sender = item["sender"]
+        answer = self.ask(seat, f"mail-{seat['id']}", f"Mail from {sender} ({item['kind']}): {item['text']}\n\n"
+                                                      f"Do what it asks, or answer it. What you say goes back to {sender}.")
+        if not answer:  # it didn't answer: the mail goes back to new, and the watchdog tries again
+            self.db(lambda h: h.db.execute("UPDATE inbox SET state = 'new' WHERE id = ?", (item_id,)))
+            return
+        self.db(lambda h: h.ack(item_id, "admin", "done"))
+        if sender != "hall" and item["kind"] != "reply":
+            try:
+                self.db(lambda h: h.send(seat["id"], {"to": sender, "kind": "reply", "text": answer[:8000], "reply_to": item_id}))
+            except Refused:
+                pass  # the sender is gone
 
     def on_vote(self, vote_id: int) -> None:
         seats = self.seats()
@@ -838,6 +1199,7 @@ class Orchestrator:
         if vote["room"] is None:
             return
         reasons = "\n".join(f"- {b['seat']} chose {b['choice']}: {b['reason']}" for b in vote["ballots"])
+        self.notify_head(f"The council split on: {vote['question']}\n{reasons}")
         self.db(lambda h: h.post(vote["room"], "hall", {"kind": "escalation", "text":
                                  f"The council split on: {vote['question']}\n{reasons}\nWhich is right, and why?"}))
 
@@ -872,6 +1234,34 @@ def route(hall: Hall, who: str, method: str, parts: list[str], query: dict, data
         case "POST", ["settings"]:
             admin_only()
             return hall.set_settings(data)
+        case "GET", ["rigs"]:
+            return {"rigs": hall.rig_list()}
+        case "POST", ["rigs"]:
+            admin_only()
+            return hall.rig_apply(data)
+        case "GET", ["rigs", name]:
+            return hall.rig(name)
+        case "DELETE", ["rigs", name]:
+            admin_only()
+            return hall.rig_down(name, data.get("snapshot", True) is not False)
+        case "POST", ["rigs", name, "snapshot"]:
+            admin_only()
+            return hall.rig_snapshot(name, data.get("label", ""))
+        case "POST", ["rigs", name, "restore"]:
+            admin_only()
+            return hall.rig_restore(name, data)
+        case "POST", ["inbox"]:
+            return hall.send(me, data)
+        case "GET", ["inbox"]:
+            return {"mail": hall.mail(query["seat"] if admin and query.get("seat") else me, query.get("state"))}
+        case "POST", ["inbox", item, "ack"]:
+            return hall.ack(number(item, "mail"), who, data.get("state", "done"))
+        case "POST", ["presence"]:
+            if admin:
+                raise Refused(403, "Only seats send a heartbeat.")
+            return hall.beat(who, data)
+        case "GET", ["head"]:
+            return hall.head()
         case "POST", ["benchmarks"]:
             admin_only()  # the computer's own services run the tests; a seat can't mark its own work
             return hall.bench_record(data)

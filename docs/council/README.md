@@ -56,6 +56,41 @@ Every new chat in the app picks a mode:
 
 **Autonomy.** *Only on tasks* (default): seats wake when you or the chair give them work. *Continuously*: every few minutes, when the pool isn't busy with your chats, the Hall also offers open board items to idle seats, most capable first.
 
+## Rigs: a civilization of seats, as a file
+
+A **rig** is a team of seats written in a TOML file (`rigs.py`; run `nanoborealis rig up team.toml`, with `--plan` to see what it would do first). It has a **culture** (norms every seat is told first), **pods** (groups with their own guidance), **seats** (a pool seat the Hall can ask, or an outside seat such as Claude's that joins over the API) and **edges** (`reviews`, `delegates`, `reports_to`). A seat's identity is its address, `build@starter`; the model or conversation behind it can change.
+
+```toml
+[rig]
+name = "starter"
+culture = "We make small, tested changes. We say when we are unsure."
+[[pod]]
+id = "dev"
+guidance = "Builds and reviews the code."
+[[seat]]
+id = "build"
+pod = "dev"
+kind = "pool"
+model = "mlx-community/Qwen3-14B-4bit"
+[[seat]]
+id = "claude"
+pod = "dev"
+kind = "outside"
+head = 1          # first in line to be the head agent while it is here
+[[edge]]
+from = "claude"
+to = "build"
+kind = "reviews"  # claude reviews build's work
+```
+
+- **Mail.** Every seat has a durable inbox: `rig send build@starter "…"`, or to `rig:starter`, `pod:starter/dev`, `head`. A seat the Hall can ask is handed its mail with its culture, pod guidance and role first, and its answer comes back to the sender; an outside seat takes its mail from `GET /inbox` and acknowledges it. The **delivery guard** refuses a name that fits two seats (naming both) or none.
+- **Review edges.** If an edge says who reviews whom, that seat reviews: asked directly if the Hall can ask it, otherwise mailed the review.
+- **The head agent.** The first seat in line (`head = 1`, `2`, …) that is here and not worn out leads. A pool seat is always here; an outside seat is here while it sends a heartbeat (`POST /presence`, status `ok`), and steps aside when it says `limited` (its usage is spent), when the next in line takes over, and else the strongest seat the Hall can ask. The head is mailed when a task fails review or the council splits. Being head adds no voting weight: that is capability times trust, as for every seat.
+- **Watchdog.** Every minute: mail a pool seat hasn't taken is tried again, and after three tries given up on and the head told; a task held and quiet for 30 minutes is nudged twice, then put back on the board. An outside seat's mail waits for it, however long.
+- **Snapshot and restore.** `rig snapshot` captures the seats, pods, edges and the work in flight; `rig down` takes one first; `rig restore` brings it back and says, seat by seat, what really happened: *resumed* (it is there as it was), *fresh-primed* (made again with its open work, and for a pool seat its agent has to be started with `council apply`), *awaiting-decision* (its model isn't in the pool now: you choose), never a guess. A seat made again gets a new token; its old one stops working.
+
+What isn't here yet: workflow scripts, adopting agents that are already running, and enforcing a seat's `policy` (it is stored and shown).
+
 ## Outside seats
 
 A seat doesn't have to be a model the pool runs. An **outside seat** is an agent that joins over the Hall's API with a token of its own, the way Claude Code does. `council apply` makes one for Claude (`claude`, capability 50, which you can change), keeping its token readable by root only in `/etc/nanoborealis/seats/claude.token`. Make others with `nanoborealis council seat <id> [capability]`, which gives a fresh token each time.

@@ -82,6 +82,8 @@ class Seat:
         if match := re.search(r"Your work on task (\d+) was sent back", prompt):
             self.hall_call("POST", f"/tasks/{match.group(1)}/submit", {"result": "tried again"})
             return "resubmitted"
+        if "Mail from" in prompt:
+            return f"{self.name} read the mail"
         if match := re.search(r"\(vote (\d+)\).*\nOptions: (.*)\n", prompt):
             options = match.group(2).split(" / ")
             self.hall_call("POST", f"/votes/{match.group(1)}/ballot",

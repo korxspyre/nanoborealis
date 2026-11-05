@@ -23,6 +23,9 @@ on:
       - 'system_files/usr/share/nanoborealis/hallseat.py'
       - 'system_files/usr/share/nanoborealis/privacy.py'
       - 'system_files/usr/share/nanoborealis/nanobench.py'
+      - 'system_files/usr/share/nanoborealis/rigs.py'
+      - 'system_files/usr/share/nanoborealis/rigctl.py'
+      - 'tests/rigs_check.py'
       - 'tests/nanobench_check.py'
       - 'tests/privacy_check.py'
       - 'tests/orchestrator_check.py'
@@ -80,6 +83,10 @@ jobs:
       # Mixed intelligence: recipes, quotas, and the privacy rules (a local-only task never reaches the cloud).
       - name: The mixer
         run: python3 tests/mixer_check.py
+
+      # Rigs: teams of seats as a file, their mail, the head agent, the watchdog, snapshot and restore.
+      - name: Rigs
+        run: python3 tests/rigs_check.py
 
       # NanoBench: the council's own benchmarks, graded by code, and their scores with intervals.
       - name: NanoBench

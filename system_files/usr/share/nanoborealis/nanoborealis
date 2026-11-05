@@ -36,6 +36,8 @@ Usage: $(basename "$0") <command>
   council ...       seat a council on the pool's loadout, one agent per model, meeting in the Hall:
                     apply, status, bench (the council's own benchmarks), seat ID [capability],
                     autonomy on-task|continuous, escalation on|off, remove
+  rig ...           teams of seats as a file: up SPEC.toml [--plan], ps [NAME], down NAME, snapshot NAME,
+                    restore NAME, send TO TEXT, inbox [SEAT], head
   set-key           replace the OpenRouter API key
   privacy on|off|status   send the agent's cloud calls through a relay on this computer that swaps
                     emails, keys, numbers and addresses for placeholders and back (no images are sent)
@@ -467,9 +469,10 @@ for s in json.load(sys.stdin): print(s["id"])' 2>/dev/null || true; }
         secret() {  # name, value on stdin: a Podman secret of the agent account's
             as_agent podman secret create --replace "$1" - >/dev/null
         }
-        outside_seat() {  # id, name, capability: an outside seat with a fresh token, kept root-only
+        outside_seat() {  # id, name, capability, [place in line to be the head agent]: an outside seat with a fresh token, kept root-only
             local body; body="$(python3 -c 'import json, sys; print(json.dumps({"id": sys.argv[1], "name": sys.argv[2],
-                "model": "an outside agent", "family": "outside", "capability": float(sys.argv[3]), "external": True, "rotate": True}))' "$1" "$2" "$3")" || return 1
+                "model": "an outside agent", "family": "outside", "capability": float(sys.argv[3]), "external": True, "rotate": True}
+                | ({"head_rank": int(sys.argv[4])} if len(sys.argv) > 4 else {})))' "$1" "$2" "$3" ${4:+"$4"})" || return 1
             sudo install -d -m 0700 /etc/nanoborealis/seats
             hall POST /seats "$body" | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])' \
                 | sudo sh -c "umask 077 && cat > /etc/nanoborealis/seats/$1.token"
@@ -542,7 +545,7 @@ print(json.dumps({k: s[k] for k in ("id", "name", "model", "family", "capability
                 # Claude's seat: an outside seat, for Claude Code to join over the Hall's API. It is only made
                 # if it isn't there; its token is kept (root-only) for you to hand to Claude, see: council seat.
                 if ! hall GET /seats | python3 -c 'import json, sys; sys.exit(0 if any(s["id"] == "claude" for s in json.load(sys.stdin)["seats"]) else 1)'; then
-                    outside_seat claude Claude 50 >/dev/null && echo "seated claude (an outside seat; its token is in /etc/nanoborealis/seats/claude.token)"
+                    outside_seat claude Claude 50 1 >/dev/null && echo "seated claude: an outside seat, first in line to be the head agent while it is here (its token is in /etc/nanoborealis/seats/claude.token)"
                 fi
 
                 agentctl daemon-reload
@@ -603,6 +606,10 @@ print("Autonomy: %s. Escalation: %s." % (s["autonomy"], escalation))' ;;
                 echo "usage: $me council apply | status | bench [--n N] | seat <id> [capability] | autonomy on-task|continuous | escalation on|off | remove" >&2
                 exit 2 ;;
         esac ;;
+    rig)
+        # Teams of seats as a file (docs/council/README.md, "Rigs"): up, ps, down, snapshot, restore, send, inbox, head.
+        # Needs the council's Hall running: nanoborealis council apply.
+        sudo python3 /usr/share/nanoborealis/rigctl.py "${@:2}" ;;
     open)
         if [ "${2:-}" = "--web" ] || ! command -v nanoborealis-app >/dev/null; then
             xdg-open "$WEBUI_URL"
