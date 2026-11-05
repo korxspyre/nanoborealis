@@ -54,6 +54,14 @@ Every new chat in the app picks a mode:
 
 **Autonomy.** *Only on tasks* (default): seats wake when you or the chair give them work. *Continuously*: every few minutes, when the pool isn't busy with your chats, the Hall also offers open board items to idle seats, most capable first.
 
+## Outside seats
+
+A seat doesn't have to be a model the pool runs. An **outside seat** is an agent that joins over the Hall's API with a token of its own, the way Claude Code does. `council apply` makes one for Claude (`claude`, capability 50, which you can change), keeping its token readable by root only in `/etc/nanoborealis/seats/claude.token`. Make others with `nanoborealis council seat <id> [capability]`, which gives a fresh token each time.
+
+- It speaks, claims and hands in tasks, reviews other seats' work and votes, with `hallseat.py` (`/usr/share/nanoborealis/hallseat.py`), or the API directly. Its vote counts at capability times the trust it earns, like any seat's.
+- The Hall can't ask it, so a vote doesn't wait for it, and tasks aren't offered to it: it takes them from the board.
+- **It sees the Hall tokenized.** An outside agent runs in someone else's cloud, so the Hall is the privacy boundary: every string it reads has personal details swapped for placeholders of its own (`<<EMAIL_...>>`), and what it writes back with those placeholders is restored before the council reads it. Without the tokenizer, outside seats aren't served at all.
+
 ## The seat tools
 
 | Tool | Does |

@@ -24,6 +24,7 @@ import http
 import json
 import os
 import sys
+import threading
 import urllib.error
 import urllib.request
 
@@ -54,6 +55,7 @@ class Relay:
         self.token = token
         self.default = upstream
         self._vault = None
+        self._vault_lock = threading.Lock()
         self.ledger = mixer.Ledger()
         try:  # what the mixer learned about its members survives a restart
             self.stats = mixer.Stats(os.path.join(os.environ.get("NANOBOREALIS_VAULT", "/var/lib/nanoborealis/vault"), "mix.sqlite"))
@@ -70,9 +72,10 @@ class Relay:
         return split_hostport(named.removeprefix("http://").rstrip("/"), 52415) if named else self.default
 
     def vault(self):
-        if self._vault is None:
-            self._vault = tokenizer.default_vault()
-        return self._vault
+        with self._vault_lock:  # the mixer's parallel calls all ask for it at once; it must be made once
+            if self._vault is None:
+                self._vault = tokenizer.default_vault()
+            return self._vault
 
     async def to_mix(self, writer: asyncio.StreamWriter, method: str, body: bytes) -> None:
         """/mix/v1/chat/completions: one request answered by several models working together (mixer.py).

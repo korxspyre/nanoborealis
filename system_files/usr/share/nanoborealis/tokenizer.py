@@ -33,6 +33,7 @@ import re
 import secrets
 import sqlite3
 import threading
+import time
 from pathlib import Path
 
 OPEN, CLOSE = "<<", ">>"
@@ -128,9 +129,15 @@ class Vault:
                 pass
             keyfile = folder / "vault.key"
             if not keyfile.exists():
-                fd = os.open(keyfile, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                with os.fdopen(fd, "wb") as f:
-                    f.write(secrets.token_bytes(32))
+                try:
+                    fd = os.open(keyfile, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    with os.fdopen(fd, "wb") as f:
+                        f.write(secrets.token_bytes(32))
+                except FileExistsError:  # another process made it a moment ago: use its key
+                    for _ in range(50):
+                        if keyfile.stat().st_size >= 32:
+                            break
+                        time.sleep(0.02)
             self.secret = keyfile.read_bytes()
             self.db = sqlite3.connect(folder / "vault.sqlite", check_same_thread=False)
             try:

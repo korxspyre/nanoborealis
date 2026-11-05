@@ -96,6 +96,9 @@ MIGRATIONS = [
     ("seats", "port", "INTEGER"),  # where its API is, on this computer (nanobot serve); none for the chair
     ("seats", "api_key", "TEXT"),  # the Hall's key to that API
     ("rooms", "seat", "TEXT"),  # a one-on-one room's seat
+    # An outside seat: an agent that joins over the API (Claude Code, say) and isn't run by the pool. The Hall
+    # can't ask it, so a vote doesn't wait for it; and it sees the Hall tokenized (see handler()).
+    ("seats", "external", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
@@ -207,6 +210,7 @@ class Hall:
             raise Refused(404, f"No seat {seat_id}.")
         found = {k: row[k] for k in row.keys() if k not in ("token_hash", "api_key")}
         found["chair"] = bool(found["chair"])
+        found["external"] = bool(found.get("external"))
         found["trust"] = self.trust(seat_id)
         found["weight"] = self.weight(found)
         return found
@@ -239,6 +243,10 @@ class Hall:
             self.db.execute("INSERT INTO seats (id, name, model, family, capability, chair, token_hash, created) "
                             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (seat_id, name, model, family, capability,
                                                                 int(bool(data.get("chair"))), digest(token), time.time()))
+        if "external" in data:  # left out: unchanged
+            if data["external"] and (port is not None or data.get("chair")):
+                raise Refused(400, "An outside seat has no API of its own and isn't the chair.")
+            self.db.execute("UPDATE seats SET external = ? WHERE id = ?", (int(bool(data["external"])), seat_id))
         if "port" in data:  # left out: unchanged
             self.db.execute("UPDATE seats SET port = ? WHERE id = ?", (port, seat_id))
         port = self.db.execute("SELECT port FROM seats WHERE id = ?", (seat_id,)).fetchone()["port"]
@@ -418,8 +426,8 @@ class Hall:
         found["leading"] = ranked[0][0] if weight else None
         found["margin"] = round(margin, 4)
         found["split"] = bool(weight) and margin < self.settings()["split_margin"]
-        # The chair may vote, but a vote doesn't wait for it: it's your agent, which the Hall can't ask.
-        waiting = {s["id"] for s in self.seats() if not s["chair"]} - {b["seat"] for b in ballots}
+        # The chair and outside seats may vote, but a vote doesn't wait for them: the Hall can't ask them.
+        waiting = {s["id"] for s in self.seats() if not s["chair"] and not s["external"]} - {b["seat"] for b in ballots}
         found["waiting_for"] = sorted(waiting)
         return found
 
@@ -518,6 +526,7 @@ class Orchestrator:
         self.jobs: queue.Queue = queue.Queue()
         self.busy = False
         self._vault = None
+        self._vault_lock = threading.Lock()
         self.ledger = mixer.Ledger() if mixer else None  # who has been asked lately, and who is resting
         try:  # which free model does well at what survives a restart
             self.stats = mixer.Stats(STATE / "mix.sqlite") if mixer else None
@@ -525,9 +534,10 @@ class Orchestrator:
             self.stats = mixer.Stats() if mixer else None
 
     def vault(self):
-        if self._vault is None:
-            self._vault = tokenizer.Vault(STATE / "vault")
-        return self._vault
+        with self._vault_lock:  # parallel proposers all ask for it at once; it must be made once
+            if self._vault is None:
+                self._vault = tokenizer.Vault(STATE / "vault")
+            return self._vault
 
     def start(self) -> None:
         threading.Thread(target=self.work, daemon=True).start()
@@ -804,6 +814,17 @@ def route(hall: Hall, who: str, method: str, parts: list[str], query: dict, data
     raise Refused(404, "No such endpoint.")
 
 
+def shield(vault, node, scope: str):
+    """Every string in an answer, tokenized for `scope` (keys and numbers stay as they are)."""
+    if isinstance(node, str):
+        return vault.tokenize(node, scope)
+    if isinstance(node, list):
+        return [shield(vault, v, scope) for v in node]
+    if isinstance(node, dict):
+        return {k: shield(vault, v, scope) for k, v in node.items()}
+    return node
+
+
 def handler(hall: Hall, orchestrator: Orchestrator) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         server_version = "nanoborealis-hall"
@@ -835,7 +856,17 @@ def handler(hall: Hall, orchestrator: Orchestrator) -> type[BaseHTTPRequestHandl
                 url = urlsplit(self.path)
                 parts = [p for p in url.path.split("/") if p]
                 query = {k: v[-1] for k, v in parse_qs(url.query).items()}
+                outside = who != "admin" and orchestrator.db(lambda h: h.seat(who)["external"])
+                if outside:
+                    # An outside seat is an agent in someone else's cloud, so the Hall is the privacy boundary:
+                    # it is shown the Hall tokenized (with placeholders of its own), what it writes is restored
+                    # before the council reads it, and with no tokenizer it isn't served at all.
+                    if tokenizer is None:
+                        raise Refused(503, "Outside seats need the tokenizer, which isn't installed.")
+                    data = orchestrator.vault().restore(data)
                 result = orchestrator.db(lambda h: route(h, who, self.command, parts, query, data))
+                if outside:
+                    result = shield(orchestrator.vault(), result, f"seat-{who}")
                 self.answer(200, result)
             except Refused as e:
                 self.answer(e.status, {"error": str(e)})

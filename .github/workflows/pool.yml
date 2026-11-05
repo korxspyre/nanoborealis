@@ -20,6 +20,8 @@ on:
       - 'system_files/usr/share/nanoborealis/tokenizer.py'
       - 'system_files/usr/share/nanoborealis/sources.py'
       - 'system_files/usr/share/nanoborealis/mixer.py'
+      - 'system_files/usr/share/nanoborealis/hallseat.py'
+      - 'tests/orchestrator_check.py'
       - 'tests/mixer_check.py'
       - 'system_files/usr/libexec/nanoborealis-relay'
       - 'system_files/usr/libexec/nanoborealis-hall'

@@ -374,6 +374,31 @@ TXT
                     export NANOBOREALIS_POOL_ENGINE
                 fi
                 pool_py "$2" "${@:3}" ;;
+            sources)
+                # Inference sources besides the pool: a llama.cpp/Strata/Avalon/FreeToken server on another PC, a
+                # notebook on a free GPU tier, OpenRouter's free models. Reached through the relay at /src/<name>;
+                # one on the internet is tokenized on the way (docs/council/README.md). `key` stores a source's key
+                # where only the relay can read it.
+                case "${3:-list}" in
+                    key)
+                        [[ "${4:-}" =~ ^[A-Z][A-Z0-9_]{2,40}$ ]] || { echo "usage: $me pool sources key VARIABLE   (the name a source was added with, --key-env)" >&2; exit 2; }
+                        read -r -s -p "Key for $4: " value; echo
+                        printf '%s' "$value" | sudo python3 -c '
+import os, sys
+name, path = sys.argv[1], "/etc/nanoborealis/sources.env"
+value = sys.stdin.read().strip()
+lines = [l for l in (open(path).read().splitlines() if os.path.exists(path) else []) if not l.startswith(name + "=")]
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+os.write(fd, ("\n".join([*lines, name + "=" + value]) + "\n").encode()); os.close(fd)' "$4"
+                        sudo systemctl try-restart nanoborealis-pool-relay.service
+                        echo "Stored. The relay has it now." ;;
+                    list|add|remove|probe)
+                        sudo install -d -m 0755 /etc/nanoborealis
+                        sudo env NANOBOREALIS_SOURCES_FILE=/etc/nanoborealis/sources.json python3 /usr/share/nanoborealis/sources.py "${@:3}" ;;
+                    *)
+                        echo "usage: $me pool sources list | add NAME URL [--key-env VAR] [--model M]... [--free-only] | remove NAME | probe NAME | key VAR" >&2
+                        exit 2 ;;
+                esac ;;
             leave)
                 if pool_ready; then
                     [ -z "$(agent_pool_model || true)" ] || in_agent remove pool
@@ -403,6 +428,7 @@ TXT
                 echo "       $me pool nodes | plan [--rebuild] | apply [--rebuild] [--yes] | drain NAME | undrain NAME" >&2
                 echo "       $me pool bench [MODEL...] [--prompt N] [--try MODEL [--on A,B]] [--results]" >&2
                 echo "       $me pool scores [refresh] | policy [KEY=VALUE...] | gpu" >&2
+                echo "       $me pool sources list | add NAME URL | remove NAME | probe NAME | key VAR" >&2
                 exit 2 ;;
         esac
         exit 0 ;;
@@ -430,6 +456,13 @@ case "$cmd" in
 for s in json.load(sys.stdin): print(s["id"])' 2>/dev/null || true; }
         secret() {  # name, value on stdin: a Podman secret of the agent account's
             as_agent podman secret create --replace "$1" - >/dev/null
+        }
+        outside_seat() {  # id, name, capability: an outside seat with a fresh token, kept root-only
+            local body; body="$(python3 -c 'import json, sys; print(json.dumps({"id": sys.argv[1], "name": sys.argv[2],
+                "model": "an outside agent", "family": "outside", "capability": float(sys.argv[3]), "external": True, "rotate": True}))' "$1" "$2" "$3")" || return 1
+            sudo install -d -m 0700 /etc/nanoborealis/seats
+            hall POST /seats "$body" | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])' \
+                | sudo sh -c "umask 077 && cat > /etc/nanoborealis/seats/$1.token"
         }
         case "${2:-status}" in
             apply)
@@ -496,10 +529,24 @@ print(json.dumps({k: s[k] for k in ("id", "name", "model", "family", "capability
                     "Secret=chair-hall,type=env,target=NANOBOREALIS_HALL_TOKEN" \
                     | sudo -u "$AGENT_USER" tee "$qdir/nanobot.container.d/council.conf" >/dev/null
 
+                # Claude's seat: an outside seat, for Claude Code to join over the Hall's API. It is only made
+                # if it isn't there; its token is kept (root-only) for you to hand to Claude, see: council seat.
+                if ! hall GET /seats | python3 -c 'import json, sys; sys.exit(0 if any(s["id"] == "claude" for s in json.load(sys.stdin)["seats"]) else 1)'; then
+                    outside_seat claude Claude 50 >/dev/null && echo "seated claude (an outside seat; its token is in /etc/nanoborealis/seats/claude.token)"
+                fi
+
                 agentctl daemon-reload
                 for id in $keep; do agentctl restart "seat-$id.service"; done
                 agentctl restart nanobot.service
-                echo "The council has $count seat(s) and the chair. Talk to it from the app, or see: $me council status" ;;
+                echo "The council has $count seat(s), the chair and Claude's outside seat. Talk to it from the app, or see: $me council status" ;;
+            seat)
+                # An outside seat: an agent that isn't run by the pool but joins over the Hall's API, as Claude
+                # Code does. It sees the Hall tokenized (personal details swapped for placeholders), a vote doesn't
+                # wait for it, and its weight is the capability you give it times the trust it earns.
+                [[ "${3:-}" =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]] || { echo "usage: $me council seat <id> [capability 0-100]   (new token each time)" >&2; exit 2; }
+                outside_seat "$3" "$(python3 -c 'import sys; print(sys.argv[1].title())' "$3")" "${4:-50}" \
+                    && echo "Seat $3 made. Its token is in /etc/nanoborealis/seats/$3.token (root only). To join: set NANOBOREALIS_HALL_URL and" \
+                            "NANOBOREALIS_HALL_TOKEN, then: python3 /usr/share/nanoborealis/hallseat.py me" ;;
             status)
                 if ! systemctl is-active --quiet nanoborealis-hall.service; then
                     echo "No council yet. Seat one on the pool's loadout with: $me council apply"
@@ -538,7 +585,7 @@ print("Autonomy: %s. Escalation: %s." % (s["autonomy"], escalation))' ;;
                 sudo systemctl restart nanoborealis-firewall.service
                 echo "The council is dismissed. The seats' memories and the Hall's history stay, for next time." ;;
             *)
-                echo "usage: $me council apply | status | autonomy on-task|continuous | escalation on|off | remove" >&2
+                echo "usage: $me council apply | status | seat <id> [capability] | autonomy on-task|continuous | escalation on|off | remove" >&2
                 exit 2 ;;
         esac ;;
     open)
