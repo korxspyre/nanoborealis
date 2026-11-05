@@ -55,6 +55,10 @@ TRUST_MIN, TRUST_MAX = 0.2, 3.0
 TRUST_HALF_LIFE_DAYS = 30.0  # old praise and blame fade, and trust drifts back toward 1
 TRUST_EVENTS = {"accepted": 0.05, "rejected": -0.05, "thumbs_up": 0.1, "thumbs_down": -0.1}
 TASK_STATES = ("open", "claimed", "review", "done", "failed")
+BENCH_AREAS = ("reasoning", "format", "fidelity", "tools", "review")  # nanobench.py's
+BENCH_ABBREVIATIONS = {"reasoning": "reasoning", "format": "format", "fidelity": "fidelity", "tools": "tools", "review": "review"}
+BENCH_DAYS = 30  # results older than this no longer count
+BENCH_MIN_ITEMS = 10  # fewer than this and a score says nothing yet, so it doesn't move trust
 SEAT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
 
 SCHEMA = """
@@ -91,6 +95,11 @@ CREATE TABLE IF NOT EXISTS trust (
     id INTEGER PRIMARY KEY, seat TEXT NOT NULL, delta REAL NOT NULL, reason TEXT NOT NULL, at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS benchmarks (
+    id INTEGER PRIMARY KEY, model TEXT NOT NULL, suite TEXT NOT NULL, seed INTEGER NOT NULL, area TEXT NOT NULL,
+    passed INTEGER NOT NULL, n INTEGER NOT NULL, at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS benchmarks_model ON benchmarks (model, at);
 """
 MIGRATIONS = [
     ("seats", "port", "INTEGER"),  # where its API is, on this computer (nanobot serve); none for the chair
@@ -100,6 +109,21 @@ MIGRATIONS = [
     # can't ask it, so a vote doesn't wait for it; and it sees the Hall tokenized (see handler()).
     ("seats", "external", "INTEGER NOT NULL DEFAULT 0"),
 ]
+
+
+def short_card(card: dict) -> str:
+    """A model's overall benchmark as a few words, for beside its name; "" when it hasn't been benchmarked."""
+    overall = card.get("overall")
+    return f"benchmark {overall['score']:.0f} (sure >= {overall['lo']:.0f}, {overall['n']} items)" if overall else ""
+
+
+def card_text(card: dict) -> str:
+    """Every area of a scorecard, for the council to compare."""
+    if not card:
+        return "not benchmarked yet"
+    parts = [f"{BENCH_ABBREVIATIONS.get(a, a)} {r['score']:.0f} (>= {r['lo']:.0f})" for a, r in card.items() if a != "overall"]
+    overall = card["overall"]
+    return ", ".join(parts) + f"; overall {overall['score']:.0f} (>= {overall['lo']:.0f}, {overall['n']} items)"
 
 
 class Refused(Exception):
@@ -188,11 +212,78 @@ class Hall:
         return self.settings()
 
     def trust(self, seat: str, now: float | None = None) -> float:
+        """1, plus what reviews and thumbs have earned or cost (fading with time), plus the benchmark term:
+        what the model's own NanoBench results say, which is the part of trust nobody's opinion can move."""
         now = now or time.time()
         total = 0.0
         for row in self.db.execute("SELECT delta, at FROM trust WHERE seat = ?", (seat,)):
             total += row["delta"] * 0.5 ** (max(0.0, now - row["at"]) / 86400 / TRUST_HALF_LIFE_DAYS)
+        row = self.db.execute("SELECT model FROM seats WHERE id = ?", (seat,)).fetchone()
+        if row:
+            total += self.bench_term(row["model"], now)
         return round(min(TRUST_MAX, max(TRUST_MIN, 1.0 + total)), 3)
+
+    # -- Benchmarks ----------------------------------------------------------------------------------
+
+    def scorecard(self, model: str, now: float | None = None) -> dict:
+        """{area: {score, lo, hi, n}, "overall": {...}} for a model, in percent, from the last BENCH_DAYS days.
+        lo and hi are the 95% Wilson interval: a few items give a wide one, and the Hall trusts the low end."""
+        now = now or time.time()
+        card, total_passed, total_n = {}, 0, 0
+        for row in self.db.execute("SELECT area, SUM(passed) AS p, SUM(n) AS n FROM benchmarks WHERE model = ? AND at > ? "
+                                   "GROUP BY area ORDER BY area", (model, now - BENCH_DAYS * 86400)):
+            card[row["area"]] = self.rate(row["p"], row["n"])
+            total_passed, total_n = total_passed + row["p"], total_n + row["n"]
+        if total_n:
+            card["overall"] = self.rate(total_passed, total_n)
+        return card
+
+    @staticmethod
+    def rate(passed: int, n: int) -> dict:
+        import math
+        z, p = 1.96, passed / n
+        denom = 1 + z * z / n
+        centre = (p + z * z / (2 * n)) / denom
+        half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+        return {"score": round(100 * p, 1), "lo": round(100 * max(0.0, centre - half), 1),
+                "hi": round(100 * min(1.0, centre + half), 1), "n": n}
+
+    def bench_term(self, model: str, now: float | None = None) -> float:
+        """The benchmark part of trust: the low end of the overall score against a coin flip. Perfect over 30
+        items is about +0.3; a coin flip over 30 is about -0.1; fewer than BENCH_MIN_ITEMS counts for nothing."""
+        overall = self.scorecard(model, now).get("overall")
+        if not overall or overall["n"] < BENCH_MIN_ITEMS:
+            return 0.0
+        return round(max(-0.3, min(0.4, (overall["lo"] / 100 - 0.5) * 0.8)), 4)
+
+    def bench_record(self, data: dict) -> dict:
+        """One NanoBench run for a model, posted by the computer's own services (a seat can't mark its own work)."""
+        model = text(data.get("model"), "The model", 200)
+        suite, seed, results = text(data.get("suite"), "The suite", 40), data.get("seed"), data.get("results")
+        if isinstance(seed, bool) or not isinstance(seed, int) or not isinstance(results, dict) or not results:
+            raise Refused(400, "A run has a seed and results per area.")
+        rows = []
+        for area, r in results.items():
+            if area not in BENCH_AREAS or not isinstance(r, dict):
+                raise Refused(400, f"An area is one of {', '.join(BENCH_AREAS)}.")
+            passed, n = r.get("passed"), r.get("n")
+            if any(isinstance(v, bool) or not isinstance(v, int) for v in (passed, n)) or not 0 <= passed <= n <= 500 or n == 0:
+                raise Refused(400, f"{area}: passed and n are counts, with passed no more than n.")
+            rows.append((area, passed, n))
+        now = time.time()
+        for area, passed, n in rows:
+            self.db.execute("INSERT INTO benchmarks (model, suite, seed, area, passed, n, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (model, suite, seed, area, passed, n, now))
+        card = self.scorecard(model)
+        summary = ", ".join(f"{a} {r['score']:.0f}% (sure >= {r['lo']:.0f}%)" for a, r in card.items())
+        for seat in self.db.execute("SELECT id FROM seats WHERE model = ?", (model,)).fetchall():  # on the ledger, to read
+            self.add_trust(seat["id"], 0.0, f"benchmark {suite}: {summary}"[:500])
+        return {"model": model, "scorecard": card, "trust_term": self.bench_term(model)}
+
+    def benchmarks(self, model: str | None = None) -> list[dict]:
+        rows = self.db.execute("SELECT * FROM benchmarks" + (" WHERE model = ?" if model else "") + " ORDER BY id DESC LIMIT 200",
+                               (model,) if model else ())
+        return [dict(r) for r in rows]
 
     def add_trust(self, seat: str, delta: float, reason: str) -> None:
         self.db.execute("INSERT INTO trust (seat, delta, reason, at) VALUES (?, ?, ?, ?)",
@@ -211,6 +302,7 @@ class Hall:
         found = {k: row[k] for k in row.keys() if k not in ("token_hash", "api_key")}
         found["chair"] = bool(found["chair"])
         found["external"] = bool(found.get("external"))
+        found["scorecard"] = self.scorecard(found["model"])
         found["trust"] = self.trust(seat_id)
         found["weight"] = self.weight(found)
         return found
@@ -291,8 +383,16 @@ class Hall:
 
     def messages(self, room_id: int, after: int = 0, limit: int = 200) -> list[dict]:
         self.room(room_id)
-        return [dict(r) for r in self.db.execute(
+        found = [dict(r) for r in self.db.execute(
             "SELECT * FROM messages WHERE room = ? AND id > ? ORDER BY id LIMIT ?", (room_id, after, limit))]
+        cards: dict[str, str] = {}
+        for message in found:  # who is speaking, as their benchmarks put it, so every reader can weigh the words
+            author = message["author"]
+            if author not in cards:
+                row = self.db.execute("SELECT model FROM seats WHERE id = ?", (author,)).fetchone()
+                cards[author] = short_card(self.scorecard(row["model"])) if row else ""
+            message["card"] = cards[author]
+        return found
 
     def post(self, room_id: int, author: str, data: dict) -> dict:
         self.room(room_id)
@@ -658,32 +758,52 @@ class Orchestrator:
             if seat and last["author"] == "you":
                 self.say(room_id, seat["id"], self.ask(seat, f"direct-{room_id}", last["text"]) or "(no answer)")
             return
-        for seat in self.seats():
+        seats = self.seats()
+        board = self.scoreboard(seats)
+        for seat in seats:
             recent = self.db(lambda h: h.messages(room_id))[-CONTEXT_MESSAGES:]
-            lines = "\n".join(f"[{m['author']}] {m['text']}" for m in recent if m["kind"] != "pass")
-            prompt = (f"The Hall, room {room_id}: {room['title']}\n\n{lines}\n\nYou are {seat['id']}. Reply to the "
+            lines = "\n".join(f"[{m['author']}{' · ' + m['card'] if m.get('card') else ''}] {m['text']}"
+                              for m in recent if m["kind"] != "pass")
+            prompt = (f"The Hall, room {room_id}: {room['title']}\n\n{board}{lines}\n\nYou are {seat['id']}. Reply to the "
                       "room in a few sentences if you add something new, or answer exactly PASS.")
             self.say(room_id, seat["id"], self.ask(seat, f"hall-{room_id}", prompt))
 
+    def scoreboard(self, seats: list[dict]) -> str:
+        """The council's benchmarks, for a prompt: each seat's NanoBench scores, so a seat can weigh what the
+        others say by what they are good at, and tell whether to claim a task or leave it to a better one."""
+        if not any(s.get("scorecard") for s in seats):
+            return ""
+        rows = "\n".join(f"- {s['id']}: {card_text(s.get('scorecard') or {})}" for s in seats)
+        return ("The council's scorecard, from tests of this council's own kind of work graded by code. The figure after '>=' "
+                "is the low end of a 95% interval: trust it over the bare score. Weigh what each seat says by what it is "
+                f"good at:\n{rows}\n\n")
+
     def on_task(self, task_id: int) -> None:
         """Offer an open task to the seats, weightiest first, until one takes it on."""
-        for seat in self.seats():
+        seats = self.seats()
+        board = self.scoreboard(seats)
+        for seat in seats:
             task = self.db(lambda h: h.task(task_id))
             if task["state"] != "open":
                 return
             self.ask(seat, f"task-{task_id}",
-                     f"Task {task_id} is open on the council's board: {task['title']}\n\n{task['detail']}\n\n"
+                     f"{board}Task {task_id} is open on the council's board: {task['title']}\n\n{task['detail']}\n\n"
                      "If you can do it well, claim it with task_claim, do it, and hand it in with task_submit. "
-                     "If it isn't for you, answer exactly PASS.")
+                     "If it isn't for you, or a seat above is better at this kind of work, answer exactly PASS.")
 
     def on_review(self, task_id: int) -> None:
         task = self.db(lambda h: h.task(task_id))
         reviewer = next(iter(self.seats(exclude=(task["claimed_by"],))), None)
         if task["state"] != "review" or reviewer is None:
             return  # a council of one: the person reviews it
+        try:
+            author = card_text(self.db(lambda h: h.seat(task["claimed_by"]))["scorecard"])
+        except Refused:
+            author = "not benchmarked yet"
         self.ask(reviewer, f"task-{task_id}",
-                 f"{task['claimed_by']} handed in task {task_id} ({task['title']}):\n\n{task['result']}\n\n"
-                 "Review it honestly with task_review: accept it, or reject it and say what's wrong.")
+                 f"{task['claimed_by']} (its scorecard: {author}) handed in task {task_id} ({task['title']}):\n\n"
+                 f"{task['result']}\n\nReview it honestly with task_review: accept it, or reject it and say what's wrong. "
+                 "A seat weak at review shouldn't wave work through, and a strong author still needs checking.")
 
     def on_revise(self, task_id: int) -> None:
         task = self.db(lambda h: h.task(task_id))
@@ -702,12 +822,14 @@ class Orchestrator:
             self.db(lambda h: h.note(task_id, "advisor", "advice", advice))
 
     def on_vote(self, vote_id: int) -> None:
-        for seat in self.seats():
+        seats = self.seats()
+        board = self.scoreboard(seats)
+        for seat in seats:
             vote = self.db(lambda h: h.vote(vote_id))
             if vote["closed"]:
                 return
             if seat["id"] in vote["waiting_for"]:
-                self.ask(seat, f"vote-{vote_id}", f"The council is voting (vote {vote_id}): {vote['question']}\n"
+                self.ask(seat, f"vote-{vote_id}", f"{board}The council is voting (vote {vote_id}): {vote['question']}\n"
                                                   f"Options: {' / '.join(vote['options'])}\n\n"
                                                   "Cast your ballot with the vote tool, with a short reason.")
 
@@ -750,6 +872,11 @@ def route(hall: Hall, who: str, method: str, parts: list[str], query: dict, data
         case "POST", ["settings"]:
             admin_only()
             return hall.set_settings(data)
+        case "POST", ["benchmarks"]:
+            admin_only()  # the computer's own services run the tests; a seat can't mark its own work
+            return hall.bench_record(data)
+        case "GET", ["benchmarks"]:
+            return {"benchmarks": hall.benchmarks(query.get("model"))}
         case "POST", ["escalation-key"]:
             # The OpenRouter key escalation uses: the chair's own, copied here by `council apply` and
             # whenever the app sets a new one. Used for free models only.

@@ -144,12 +144,19 @@ class SourceError(Exception):
         self.status, self.retry_after = status, retry_after
 
 
-def chat_once(route: str, model: str, messages: list[dict], *, vault_factory=None, source: Source | None = None,
-              pool_url: str = "http://127.0.0.1:52415", timeout: float = 600, path: Path | None = None) -> str:
-    """The text of one non-streaming chat answer from `route` ("pool" for exo, else a source). A source on
-    the internet is asked in tokenized form, with placeholders of its own, and its answer is restored.
+def chat_once(route: str, model: str, messages: list[dict], **kw) -> str:
+    """The text of one non-streaming chat answer; see chat_message."""
+    return str(chat_message(route, model, messages, **kw).get("content") or "")
+
+
+def chat_message(route: str, model: str, messages: list[dict], *, tools: list | None = None, options: dict | None = None,
+                 vault_factory=None, source: Source | None = None, pool_url: str = "http://127.0.0.1:52415",
+                 timeout: float = 600, path: Path | None = None) -> dict:
+    """The whole assistant message (content and any tool_calls) of one non-streaming chat answer from `route`
+    ("pool" for exo, else a source). A source on the internet is asked in tokenized form, with placeholders of
+    its own, and its answer is restored. `options` are extra request fields (temperature, max_tokens).
     Raises tokenizer.Unprotectable for an image, and SourceError when the source refuses or is down."""
-    payload: dict = {"model": model, "messages": messages}
+    payload: dict = {"model": model, "messages": messages, **(options or {}), **({"tools": tools} if tools else {})}
     vault, key = None, ""
     if route == "pool":
         url = pool_url.rstrip("/") + "/v1/chat/completions"
@@ -183,7 +190,10 @@ def chat_once(route: str, model: str, messages: list[dict], *, vault_factory=Non
     if vault:
         data = vault.restore(data)
     try:
-        return str(data["choices"][0]["message"]["content"] or "")
+        message = data["choices"][0]["message"]
+        if not isinstance(message, dict):
+            raise TypeError
+        return message
     except (KeyError, IndexError, TypeError):
         raise SourceError(502, "no answer in the reply") from None
 

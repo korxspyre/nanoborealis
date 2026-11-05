@@ -304,6 +304,43 @@ def run(base: str, admin_token: str) -> None:
     else:  # a pool seat took it first: the board is shared
         check(True, "an outside seat can claim a task and hand it in (a pool seat took this one first)")
     check(me("DELETE", "/seats/a")[0] == 403, "an outside seat can't manage seats")
+    # Benchmarks: the objective half of trust, and the scorecard in what the seats are told.
+    trust_before = next(s["trust"] for s in admin("GET", "/seats")["seats"] if s["id"] == "a")
+    run_a = {"model": "m/a", "suite": "nanobench-1", "seed": 3, "results": {
+        "reasoning": {"passed": 14, "n": 15}, "tools": {"passed": 15, "n": 15}, "review": {"passed": 9, "n": 15}}}
+    status, posted = call(base, admin_token, "POST", "/benchmarks", run_a)
+    seat_a = next(s for s in admin("GET", "/seats")["seats"] if s["id"] == "a")
+    check(status == 200 and seat_a["scorecard"]["overall"]["n"] == 45 and seat_a["scorecard"]["tools"]["score"] == 100.0
+          and seat_a["scorecard"]["review"]["lo"] < seat_a["scorecard"]["review"]["score"] < seat_a["scorecard"]["review"]["hi"],
+          "a benchmark run gives its seats a scorecard, each score with its 95% interval")
+    check(seat_a["trust"] > trust_before and posted["trust_term"] > 0, "...a good result raises trust, from the low end of the interval")
+    unbenched = next(s for s in admin("GET", "/seats")["seats"] if s["id"] == "b")
+    check(unbenched["scorecard"] == {} and unbenched["trust"] <= 1.0 + 0.2, "...a seat nobody has benchmarked has no scorecard and no benchmark trust")
+    trust_b = next(s["trust"] for s in admin("GET", "/seats")["seats"] if s["id"] == "b")
+    status, _ = call(base, admin_token, "POST", "/benchmarks", {**run_a, "results": {"reasoning": {"passed": 2, "n": 5}}, "model": "m/b"})
+    now_b = next(s for s in admin("GET", "/seats")["seats"] if s["id"] == "b")
+    check(status == 200 and now_b["trust"] == trust_b and now_b["scorecard"]["overall"]["n"] == 5,
+          "...a few items give a scorecard but move nothing yet")
+    bad = call(base, admin_token, "POST", "/benchmarks", {**run_a, "results": {"reasoning": {"passed": 9, "n": 3}}})[0]
+    check(bad == 400 and call(base, admin_token, "POST", "/benchmarks", {**run_a, "results": {"cooking": {"passed": 1, "n": 1}}})[0] == 400,
+          "...impossible results and unknown areas are refused")
+    check(call(base, a.token, "POST", "/benchmarks", run_a)[0] == 403, "...and a seat can't post its own benchmarks")
+    low = {"model": "m/b", "suite": "nanobench-1", "seed": 4, "results": {"reasoning": {"passed": 8, "n": 30}}}
+    call(base, admin_token, "POST", "/benchmarks", low)
+    check(next(s for s in admin("GET", "/seats")["seats"] if s["id"] == "b")["trust"] < 1.0,
+          "...a weak result over enough items lowers it")
+
+    admin("POST", f"/rooms/{room}/messages", {"text": "Which of us should take the next build?"})
+    until(lambda: any(c[0] == "b" and c[1] == f"hall-{room}" and "scorecard" in c[2] for c in CALLS[-6:]))
+    told = next((c[2] for c in reversed(CALLS) if c[0] == "b" and c[1] == f"hall-{room}"), "")
+    check("scorecard" in told and "- a: reasoning" in told and "tools 100" in told and "- b: reasoning" in told,
+          "every seat is told the council's scorecard before it speaks, so it can weigh the others' words")
+    spoken = [m for m in admin("GET", f"/rooms/{room}/messages")["messages"] if m["author"] == "a"]
+    check(spoken and "benchmark" in spoken[-1]["card"] and "sure >=" in spoken[-1]["card"],
+          "a seat's messages carry its benchmark, for anyone reading them")
+    outside = [m for m in me("GET", f"/rooms/{room}/messages")[1]["messages"] if m["author"] == "a"]
+    check(outside and "benchmark" in outside[-1]["card"], "...an outside seat sees them too")
+
     shown = subprocess.run([sys.executable, str(ROOT / "system_files/usr/share/nanoborealis/hallseat.py"), "read", str(room)],
                            capture_output=True, text=True, env={**os.environ, "NANOBOREALIS_HALL_URL": base,
                                                                 "NANOBOREALIS_HALL_TOKEN": made["token"]})

@@ -34,7 +34,8 @@ Usage: $(basename "$0") <command>
                     join [--private NAME] [--cpu], serve MODEL, stop MODEL, status, logs, leave; and a
                     council of models at once: nodes, plan, apply, drain, undrain, bench, scores, policy
   council ...       seat a council on the pool's loadout, one agent per model, meeting in the Hall:
-                    apply, status, seat ID [capability], autonomy on-task|continuous, escalation on|off, remove
+                    apply, status, bench (the council's own benchmarks), seat ID [capability],
+                    autonomy on-task|continuous, escalation on|off, remove
   set-key           replace the OpenRouter API key
   privacy on|off|status   send the agent's cloud calls through a relay on this computer that swaps
                     emails, keys, numbers and addresses for placeholders and back (no images are sent)
@@ -548,6 +549,11 @@ print(json.dumps({k: s[k] for k in ("id", "name", "model", "family", "capability
                 for id in $keep; do agentctl restart "seat-$id.service"; done
                 agentctl restart nanobot.service
                 echo "The council has $count seat(s), the chair and Claude's outside seat. Talk to it from the app, or see: $me council status" ;;
+            bench)
+                # NanoBench: the council's own tests, run on each seat's model through the pool and graded by code.
+                # The results go to the Hall as the benchmark part of trust, and into what every seat is told.
+                echo "Benchmarking each seat's model on the pool; the pool is busy meanwhile. (--n sets items per area, default 6.)"
+                sudo python3 /usr/share/nanoborealis/nanobench.py seats "${@:3}" ;;
             seat)
                 # An outside seat: an agent that isn't run by the pool but joins over the Hall's API, as Claude
                 # Code does. It sees the Hall tokenized (personal details swapped for placeholders), a vote doesn't
@@ -594,7 +600,7 @@ print("Autonomy: %s. Escalation: %s." % (s["autonomy"], escalation))' ;;
                 sudo systemctl restart nanoborealis-firewall.service
                 echo "The council is dismissed. The seats' memories and the Hall's history stay, for next time." ;;
             *)
-                echo "usage: $me council apply | status | seat <id> [capability] | autonomy on-task|continuous | escalation on|off | remove" >&2
+                echo "usage: $me council apply | status | bench [--n N] | seat <id> [capability] | autonomy on-task|continuous | escalation on|off | remove" >&2
                 exit 2 ;;
         esac ;;
     open)
