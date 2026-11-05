@@ -34,8 +34,10 @@ Usage: $(basename "$0") <command>
                     join [--private NAME] [--cpu], serve MODEL, stop MODEL, status, logs, leave; and a
                     council of models at once: nodes, plan, apply, drain, undrain, bench, scores, policy
   council ...       seat a council on the pool's loadout, one agent per model, meeting in the Hall:
-                    apply, status, autonomy on-task|continuous, escalation on|off, remove
+                    apply, status, seat ID [capability], autonomy on-task|continuous, escalation on|off, remove
   set-key           replace the OpenRouter API key
+  privacy on|off|status   send the agent's cloud calls through a relay on this computer that swaps
+                    emails, keys, numbers and addresses for placeholders and back (no images are sent)
   rebuild [X.Y.Z]   rebuild the image (optionally at a new nanobot version) and restart
   reset             DELETE the agent's home: memory, sessions, skills, settings, its tools
   uninstall         remove the agent and the $AGENT_USER account (projects are kept)
@@ -406,14 +408,21 @@ os.write(fd, ("\n".join([*lines, name + "=" + value]) + "\n").encode()); os.clos
                     sudo rm -f "$(pool_home)/.config/containers/systemd/exo.container"
                     poolctl daemon-reload || true
                     pool_ports remove
-                    sudo systemctl disable --now --quiet nanoborealis-pool-relay.service 2>/dev/null || true
-                    sudo rm -f /etc/nanoborealis/pool.env /etc/nanoborealis/pool.json
+                    sudo rm -f /etc/nanoborealis/pool.json
+                    # With privacy on, the agent's cloud calls go through the relay, so it stays.
+                    if ! test -f /etc/nanoborealis/privacy.on; then
+                        sudo systemctl disable --now --quiet nanoborealis-pool-relay.service 2>/dev/null || true
+                        sudo rm -f /etc/nanoborealis/pool.env
+                    fi
                     ! agent_installed || sudo systemctl restart nanoborealis-firewall.service
                     echo "This computer has left the pool."
                 elif test -f /etc/nanoborealis/pool.json; then  # it only coordinated the pool
                     [ -z "$(agent_pool_model || true)" ] || in_agent remove pool
-                    sudo systemctl disable --now --quiet nanoborealis-pool-relay.service 2>/dev/null || true
-                    sudo rm -f /etc/nanoborealis/pool.env /etc/nanoborealis/pool.json
+                    sudo rm -f /etc/nanoborealis/pool.json
+                    if ! test -f /etc/nanoborealis/privacy.on; then
+                        sudo systemctl disable --now --quiet nanoborealis-pool-relay.service 2>/dev/null || true
+                        sudo rm -f /etc/nanoborealis/pool.env
+                    fi
                     ! agent_installed || sudo systemctl restart nanoborealis-firewall.service
                     echo "This computer no longer coordinates the pool."
                 fi
@@ -701,9 +710,77 @@ PY
         read -r -s -p "New OpenRouter API key: " key; echo
         [ -n "$key" ] || { echo "no key entered" >&2; exit 1; }
         printf '%s' "$key" | as_agent podman secret create --replace openrouter_api_key - >/dev/null
+        if [ -f /etc/nanoborealis/privacy.on ]; then  # the relay holds the key the agent's calls are made with
+            printf '%s' "$key" | sudo python3 /usr/share/nanoborealis/sources.py key OPENROUTER_API_KEY >/dev/null
+            sudo systemctl try-restart nanoborealis-pool-relay.service
+        fi
         unset key
         agentctl restart nanobot.service
         echo "key replaced; agent restarted" ;;
+    privacy)
+        # Where the agent's own cloud calls go. Off, they go straight to OpenRouter. On, they go through the
+        # relay on this computer first, which swaps personal details (emails, keys, phone numbers, cards,
+        # addresses, the names on your list) for placeholders only this computer can read, and swaps them back
+        # in the answer. Images can't be tokenized, so with privacy on they are not sent to the cloud.
+        me="$(basename "$0")"
+        marker=/etc/nanoborealis/privacy.on
+        in_privacy() { as_agent podman exec -i nanobot python3 - "$@" < /usr/share/nanoborealis/privacy.py; }
+        pool_in_use() {  # does a pool still need the relay and its token?
+            test -f /etc/nanoborealis/pool.json && return 0
+            local home; home="$(getent passwd nanoborealis-pool | cut -d: -f6)"
+            [ -n "$home" ] && sudo test -f "$home/.config/containers/systemd/exo.container"
+        }
+        case "${2:-status}" in
+            on)
+                # The relay holds the real key from here on, in a file only root and systemd can read.
+                as_agent podman secret inspect --showsecret --format '{{.SecretData}}' openrouter_api_key 2>/dev/null \
+                    | sudo python3 /usr/share/nanoborealis/sources.py key OPENROUTER_API_KEY >/dev/null \
+                    || { echo "the agent has no OpenRouter key yet: set one with $me set-key" >&2; exit 1; }
+                sudo install -d -m 0755 /etc/nanoborealis
+                sudo env NANOBOREALIS_SOURCES_FILE=/etc/nanoborealis/sources.json python3 /usr/share/nanoborealis/sources.py \
+                    add openrouter https://openrouter.ai/api/v1 --key-env OPENROUTER_API_KEY --free-only \
+                    --extra '{"provider": {"max_price": {"prompt": 0, "completion": 0, "request": 0, "image": 0}}}' >/dev/null
+                if ! sudo test -f /etc/nanoborealis/pool.env; then
+                    python3 -c 'import secrets; print("NANOBOREALIS_RELAY_TOKEN=" + secrets.token_urlsafe(32))' \
+                        | sudo sh -c 'umask 077 && cat > /etc/nanoborealis/pool.env'
+                fi
+                sudo touch "$marker"
+                sudo systemctl restart nanoborealis-firewall.service
+                sudo systemctl enable --quiet nanoborealis-pool-relay.service
+                sudo systemctl restart nanoborealis-pool-relay.service
+                token="$(sudo sed -n 's/^NANOBOREALIS_RELAY_TOKEN=//p' /etc/nanoborealis/pool.env)"
+                # Only point the agent at the relay once the relay answers, so a fault here can't leave it cut off.
+                for _ in $(seq 1 20); do
+                    curl -sf -m 15 -H "Authorization: Bearer $token" http://127.0.0.1:11436/src/openrouter/v1/models >/dev/null && ok=1 && break
+                    sleep 1
+                done
+                [ "${ok:-}" = 1 ] || { echo "the relay didn't answer for OpenRouter, so the agent was left as it was: sudo journalctl -u nanoborealis-pool-relay" >&2; exit 1; }
+                in_privacy on http://host.containers.internal:11436 "$token"
+                echo "Privacy is on. Free cloud models see placeholders, not your emails, keys, numbers or addresses."
+                echo "Names are only caught when you list them: put {\"terms\": {\"Alice Smith\": \"PERSON\"}} in /var/lib/nanoborealis/vault/protect.json."
+                echo "The agent still holds its own copy of the key, so this protects what the agent says honestly, not against a hostile agent." ;;
+            off)
+                in_privacy off
+                sudo rm -f "$marker"
+                if ! pool_in_use; then
+                    sudo systemctl disable --now --quiet nanoborealis-pool-relay.service 2>/dev/null || true
+                    sudo rm -f /etc/nanoborealis/pool.env
+                    sudo systemctl restart nanoborealis-firewall.service
+                fi
+                echo "Privacy is off: the agent's cloud calls go straight to OpenRouter." ;;
+            status)
+                if [ -f "$marker" ] && systemctl is-active --quiet nanoborealis-pool-relay.service; then
+                    echo "privacy: on (the relay is running)"
+                elif [ -f "$marker" ]; then
+                    echo "privacy: ON BUT THE RELAY IS NOT RUNNING, so the agent can't reach the cloud: sudo systemctl restart nanoborealis-pool-relay"
+                else
+                    echo "privacy: off"
+                fi
+                in_privacy status ;;
+            *)
+                echo "usage: $me privacy on | off | status" >&2
+                exit 2 ;;
+        esac ;;
     rebuild)
         build="$AGENT_HOME/nanoborealis"
         if [ -d /usr/share/nanoborealis/image ]; then

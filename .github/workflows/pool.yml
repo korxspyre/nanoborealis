@@ -21,6 +21,8 @@ on:
       - 'system_files/usr/share/nanoborealis/sources.py'
       - 'system_files/usr/share/nanoborealis/mixer.py'
       - 'system_files/usr/share/nanoborealis/hallseat.py'
+      - 'system_files/usr/share/nanoborealis/privacy.py'
+      - 'tests/privacy_check.py'
       - 'tests/orchestrator_check.py'
       - 'tests/mixer_check.py'
       - 'system_files/usr/libexec/nanoborealis-relay'
@@ -76,6 +78,10 @@ jobs:
       # Mixed intelligence: recipes, quotas, and the privacy rules (a local-only task never reaches the cloud).
       - name: The mixer
         run: python3 tests/mixer_check.py
+
+      # `nanoborealis privacy`: the agent's cloud calls routed through the tokenizing relay, and put back exactly.
+      - name: Privacy routing
+        run: python3 tests/privacy_check.py
 
       - name: The council's Hall
         run: python3 tests/hall_check.py

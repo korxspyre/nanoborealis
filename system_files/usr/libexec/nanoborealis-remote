@@ -1089,6 +1089,24 @@ def hall_key(key: str) -> None:
         log(f"couldn't give the council's Hall the new key: {e}")
 
 
+PRIVACY_MARKER = Path(os.environ.get("NANOBOREALIS_REMOTE_PRIVACY_MARKER", "/etc/nanoborealis/privacy.on"))
+SOURCES_PY = os.environ.get("NANOBOREALIS_REMOTE_SOURCES_PY", "/usr/share/nanoborealis/sources.py")
+
+
+def relay_key(key: str) -> None:
+    """With `nanoborealis privacy` on, the agent's OpenRouter calls go through the pool relay, which holds the
+    real key; keep its copy current. (The key goes in on stdin, never on a command line.)"""
+    if not PRIVACY_MARKER.exists():
+        return
+    try:
+        subprocess.run([sys.executable, SOURCES_PY, "key", "OPENROUTER_API_KEY"], input=key, text=True, check=True,
+                       capture_output=True, timeout=20)
+        subprocess.run(["systemctl", "try-restart", "nanoborealis-pool-relay.service"], check=False, timeout=30,
+                       capture_output=True)
+    except (OSError, subprocess.SubprocessError) as e:
+        log(f"couldn't give the pool relay the new key: {type(e).__name__}")
+
+
 async def set_agent_key(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
     """A new OpenRouter key for the agent (typed into the app by its owner). The agent restarts."""
     global _usage
@@ -1105,6 +1123,8 @@ async def set_agent_key(data: dict, query: dict, owner: str, device_id: str) -> 
     _usage = None
     log(f"{owner} gave the agent a new OpenRouter key")
     await asyncio.to_thread(hall_key, key.strip())
+    if TEST_AGENT_HOME is None:
+        await asyncio.to_thread(relay_key, key.strip())
     await restart_agent()
     return 200, {"saved": True}
 

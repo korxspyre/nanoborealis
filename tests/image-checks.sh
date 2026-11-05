@@ -34,7 +34,7 @@ expect "setup-from-stick compiles" python3 -c 'import ast, sys; ast.parse(open(s
     /usr/libexec/nanoborealis-setup-from-stick
 expect "compute-config compiles" python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' \
     /usr/share/nanoborealis/compute-config.py
-for f in /usr/libexec/nanoborealis-relay /usr/share/nanoborealis/{pool,loadout,benchdb,scores,tokenizer,sources,mixer,hallseat}.py; do
+for f in /usr/libexec/nanoborealis-relay /usr/share/nanoborealis/{pool,loadout,benchdb,scores,tokenizer,sources,mixer,hallseat,privacy}.py; do
     expect "$f compiles" python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$f"
 done
 # The loadout planner, bench database and scores load on the image's own Python (sqlite3 included).

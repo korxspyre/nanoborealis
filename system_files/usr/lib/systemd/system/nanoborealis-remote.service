@@ -18,6 +18,9 @@ RuntimeDirectoryMode=0755
 UMask=0077
 PrivateTmp=yes
 ProtectSystem=full
+# `nanoborealis privacy` keeps the pool relay's copy of the OpenRouter key in /etc/nanoborealis/sources.env;
+# a new key typed into the app has to reach it.
+ReadWritePaths=-/etc/nanoborealis
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes

@@ -8,6 +8,7 @@ OpenRouter's free models.
     python3 sources.py add <name> <url> [--key-env VAR] [--model M]... [--free-only] [--extra '{json}']
     python3 sources.py remove <name>
     python3 sources.py probe <name>      ask the source which models it serves
+    python3 sources.py key <VARIABLE>    store a key (read from stdin) for the relay, root only
 
 A source is reached through the pool relay at /src/<name>/v1/..., so the agent has one address and
 one token whatever sits behind it. Where the source is decides what happens on the way:
@@ -257,11 +258,37 @@ def cmd_probe(name: str, path: Path) -> None:
     print(f"{name} serves {len(ids)} model(s): " + ", ".join(str(i) for i in ids[:12]) + (" ..." if len(ids) > 12 else ""))
 
 
+SOURCES_ENV = Path(os.environ.get("NANOBOREALIS_SOURCES_ENV") or "/etc/nanoborealis/sources.env")
+
+
+def store_key(name: str, value: str, path: Path | None = None) -> None:
+    """Keep `value` as NAME=value in the file systemd hands to the relay, readable by root only."""
+    path = path or SOURCES_ENV
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]{2,40}", name) or not value.strip() or "\n" in value:
+        raise ValueError("a key is stored under an UPPER_CASE name, and is one line")
+    try:
+        lines = [l for l in path.read_text(encoding="utf-8").splitlines() if not l.startswith(name + "=")]
+    except OSError:
+        lines = []
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("\n".join([*lines, f"{name}={value.strip()}"]) + "\n")
+    tmp.replace(path)
+
+
 def main(argv: list[str]) -> None:
     if not argv:
         sys.exit(__doc__)
     action, rest = argv[0], argv[1:]
-    if action == "list":
+    if action == "key" and len(rest) == 1:  # the key comes on stdin, never on a command line
+        try:
+            store_key(rest[0], sys.stdin.read())
+        except ValueError as error:
+            sys.exit(str(error))
+        print(f"stored {rest[0]}")
+    elif action == "list":
         cmd_list(SOURCES_FILE)
     elif action == "add":
         cmd_add(rest, SOURCES_FILE)
