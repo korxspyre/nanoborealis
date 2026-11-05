@@ -17,7 +17,13 @@ on:
       - 'system_files/usr/share/nanoborealis/loadout.py'
       - 'system_files/usr/share/nanoborealis/benchdb.py'
       - 'system_files/usr/share/nanoborealis/scores.py'
+      - 'system_files/usr/share/nanoborealis/tokenizer.py'
+      - 'system_files/usr/share/nanoborealis/sources.py'
+      - 'system_files/usr/share/nanoborealis/mixer.py'
+      - 'tests/mixer_check.py'
       - 'system_files/usr/libexec/nanoborealis-relay'
+      - 'system_files/usr/libexec/nanoborealis-hall'
+      - 'tests/tokenizer_check.py'
   workflow_dispatch:
     inputs:
       exo_repo:
@@ -59,6 +65,15 @@ jobs:
           [[ "$commit" == "$ref"* ]] || { echo "::error::exo-commit ($commit) isn't EXO_REF ($ref)"; exit 1; }
           grep -q "inputs.exo_ref || '$ref'" .github/workflows/pool.yml || { echo "::error::pool.yml's default exo isn't $ref"; exit 1; }
           echo "exo $commit everywhere"
+
+      # The reversible tokenization proxy, and the relay in front of stand-in sources: a source on the
+      # internet must never see an email, key, phone number or listed name, and still answer correctly.
+      - name: Tokenization proxy and inference sources
+        run: python3 tests/tokenizer_check.py
+
+      # Mixed intelligence: recipes, quotas, and the privacy rules (a local-only task never reaches the cloud).
+      - name: The mixer
+        run: python3 tests/mixer_check.py
 
       - name: The council's Hall
         run: python3 tests/hall_check.py

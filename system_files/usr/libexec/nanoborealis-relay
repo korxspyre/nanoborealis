@@ -18,11 +18,23 @@ _UPSTREAM is used when there's no such file.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hmac
+import http
 import json
 import os
 import sys
+import urllib.error
+import urllib.request
 
+sys.path.insert(0, os.environ.get("NANOBOREALIS_TOOLS", "/usr/share/nanoborealis"))
+import mixer  # noqa: E402  (several models answering one request)
+import sources  # noqa: E402  (the inference sources beyond the pool)
+import tokenizer  # noqa: E402  (what keeps personal details off the internet)
+
+MIX = "/mix/v1/chat/completions"
+MIX_FILE = os.environ.get("NANOBOREALIS_MIX_FILE", "/etc/nanoborealis/mix.json")
+MIX_LOCAL_ONLY = os.environ.get("NANOBOREALIS_MIX_SENSITIVITY") == "local-only"  # the owner's switch: never the cloud
 ALLOWED = ("/v1/chat/completions", "/v1/completions", "/v1/models")
 HOP_BY_HOP = {"authorization", "connection", "host", "keep-alive", "proxy-connection", "transfer-encoding",
               "upgrade", "content-length", "te", "trailer"}
@@ -41,6 +53,12 @@ class Relay:
     def __init__(self, token: str, upstream: tuple[str, int]):
         self.token = token
         self.default = upstream
+        self._vault = None
+        self.ledger = mixer.Ledger()
+        try:  # what the mixer learned about its members survives a restart
+            self.stats = mixer.Stats(os.path.join(os.environ.get("NANOBOREALIS_VAULT", "/var/lib/nanoborealis/vault"), "mix.sqlite"))
+        except Exception:
+            self.stats = mixer.Stats()
 
     @property
     def upstream(self) -> tuple[str, int]:
@@ -50,6 +68,142 @@ class Relay:
         except OSError:
             return self.default
         return split_hostport(named.removeprefix("http://").rstrip("/"), 52415) if named else self.default
+
+    def vault(self):
+        if self._vault is None:
+            self._vault = tokenizer.default_vault()
+        return self._vault
+
+    async def to_mix(self, writer: asyncio.StreamWriter, method: str, body: bytes) -> None:
+        """/mix/v1/chat/completions: one request answered by several models working together (mixer.py).
+        The request is an ordinary chat request, plus an optional {"mix": {"kind": "chat|code|reasoning",
+        "sensitivity": "open|local-only", "stakes": "normal|high"}}. Every cloud call goes through
+        sources.chat_once, so it is tokenized with that source's own placeholders. The answer is not streamed."""
+        if method != "POST":
+            await self.respond(writer, "405 Method Not Allowed", "POST a chat request")
+            return
+        try:
+            payload = json.loads(body or b"{}")
+            messages = payload["messages"]
+            if not isinstance(messages, list) or not messages:
+                raise ValueError
+        except (ValueError, KeyError, TypeError):
+            await self.respond(writer, "400 Bad Request", "the request needs a list of messages")
+            return
+        opts = payload.get("mix") if isinstance(payload.get("mix"), dict) else {}
+        pick = lambda key, allowed, default: opts.get(key) if opts.get(key) in allowed else default  # noqa: E731
+        local_only = pick("sensitivity", ("open", "local-only"), "open") == "local-only" or MIX_LOCAL_ONLY
+        task = mixer.Task(messages, pick("kind", ("chat", "code", "reasoning"), "chat"),
+                          "local-only" if local_only else "open", pick("stakes", ("normal", "high"), "normal"))
+        host, port = self.upstream
+        members = []
+        for member in mixer.load_members(MIX_FILE):
+            source = None if member.route == "pool" else sources.find(member.route)
+            if member.route == "pool" or source:
+                # Private is worked out here, never taken from the file: only the pool and sources on the owner's network are.
+                members.append(dataclasses.replace(member, private=member.route == "pool" or source.kind == "local"))
+        mix = mixer.Mixer(members, lambda m, msgs: sources.chat_once(
+            m.route, m.model, msgs, vault_factory=self.vault, pool_url=f"http://{host}:{port}"), self.ledger, self.stats)
+        try:
+            result = await asyncio.get_running_loop().run_in_executor(None, mix.run, task)
+        except mixer.NoMember as error:
+            await self.respond(writer, "503 Service Unavailable", str(error))
+            return
+        except tokenizer.Unprotectable as error:
+            await self.respond(writer, "400 Bad Request", str(error))
+            return
+        reply = json.dumps({"object": "chat.completion", "model": "mix", "choices": [{
+            "index": 0, "message": {"role": "assistant", "content": result.answer}, "finish_reason": "stop"}],
+            "x_mix": {"recipe": result.recipe, "checked": result.ok, "audit": result.audit}}).encode()
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n"
+                     + f"Content-Length: {len(reply)}\r\n\r\n".encode() + reply)
+        await writer.drain()
+
+    async def to_source(self, writer: asyncio.StreamWriter, method: str, path: str, body: bytes) -> None:
+        """/src/<name>/v1/...: another inference source (sources.py). One that is out on the internet gets the
+        request tokenized and its answer detokenized, so what leaves this computer holds no personal details."""
+        parts = path.split("/")  # "", "src", name, "v1", ...
+        rest = "/" + "/".join(parts[4:])
+        if len(parts) < 5 or parts[3] != "v1" or rest not in sources.PATHS:
+            await self.respond(writer, "403 Forbidden", "only the chat API is shared")
+            return
+        source = sources.find(parts[2])
+        if source is None:
+            await self.respond(writer, "404 Not Found", f"no inference source called {parts[2]}")
+            return
+        data, vault = None, None
+        if method == "POST":
+            try:
+                payload = json.loads(body or b"{}")
+                if not isinstance(payload, dict):
+                    raise ValueError
+            except ValueError:
+                await self.respond(writer, "400 Bad Request", "the request isn't JSON")
+                return
+            why = sources.allowed(source, str(payload.get("model") or ""))
+            if why:
+                await self.respond(writer, "403 Forbidden", why)
+                return
+            payload = sources.merge(payload, source.extra)
+            if source.tokenizes:
+                vault = self.vault()
+                try:
+                    payload = vault.protect_request(payload, scope=source.name)  # each source gets its own placeholders
+                except tokenizer.Unprotectable as error:
+                    await self.respond(writer, "400 Bad Request", str(error))
+                    return
+            data = json.dumps(payload).encode()
+        elif source.tokenizes:
+            vault = self.vault()  # a GET has no body to protect, but its answer may be restored all the same
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def put(chunk):
+            loop.call_soon_threadsafe(queue.put_nowait, chunk)
+
+        loop.run_in_executor(None, self.pump, source, rest, method, data, vault, put)
+        while (chunk := await queue.get()) is not None:
+            writer.write(chunk)
+            await writer.drain()
+
+    def pump(self, source, rest: str, method: str, data, vault, put) -> None:
+        """Runs in a thread: the source's answer, restored if the request was tokenized, handed to put()."""
+        started = False
+        try:
+            headers = {"Content-Type": "application/json"}
+            if source.key():
+                headers["Authorization"] = f"Bearer {source.key()}"
+            request = urllib.request.Request(source.url + rest, data=data, method=method, headers=headers)
+            try:
+                response = urllib.request.urlopen(request, timeout=900)
+            except urllib.error.HTTPError as error:
+                response = error
+            status = response.status if hasattr(response, "status") else response.code
+            kind = response.headers.get("Content-Type", "application/json")
+            head = f"HTTP/1.1 {status} {http.HTTPStatus(status).phrase}\r\nContent-Type: {kind}\r\nConnection: close\r\n"
+            if "text/event-stream" in kind:
+                put((head + "\r\n").encode())
+                started = True
+                restorer = tokenizer.SSERestorer(vault) if vault else None
+                for raw in response:
+                    for out in (restorer.line(raw) if restorer else [raw]):
+                        put(out)
+                return
+            payload = response.read()
+            if vault:
+                try:
+                    payload = json.dumps(vault.restore(json.loads(payload))).encode()
+                except ValueError:
+                    payload = vault.detokenize(payload.decode("utf-8", "replace")).encode()
+            started = True
+            put(f"{head}Content-Length: {len(payload)}\r\n\r\n".encode() + payload)
+        except Exception as error:  # the source is down, or hung up: say so, and never print the request
+            if not started:
+                body = json.dumps({"error": f"the inference source didn't answer ({type(error).__name__})"}).encode()
+                put(f"HTTP/1.1 502 Bad Gateway\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n"
+                    "Connection: close\r\n\r\n".encode() + body)
+        finally:
+            put(None)
 
     async def respond(self, writer: asyncio.StreamWriter, status: str, message: str) -> None:
         body = json.dumps({"error": message}).encode()
@@ -67,7 +221,8 @@ class Relay:
             if not hmac.compare_digest(lookup.get("authorization", "").encode(), f"Bearer {self.token}".encode()):
                 await self.respond(writer, "401 Unauthorized", "missing or wrong token")
                 return
-            if target.split("?", 1)[0] not in ALLOWED:
+            path = target.split("?", 1)[0]
+            if path not in ALLOWED and path != MIX and not path.startswith("/src/"):
                 await self.respond(writer, "403 Forbidden", "only the chat API is shared")
                 return
             if "chunked" in lookup.get("transfer-encoding", "").lower():
@@ -78,6 +233,12 @@ class Relay:
                 await self.respond(writer, "413 Payload Too Large", "request too large")
                 return
             body = await reader.readexactly(length) if length else b""
+            if path.startswith("/src/"):
+                await self.to_source(writer, method, path, body)
+                return
+            if path == MIX:
+                await self.to_mix(writer, method, body)
+                return
             upstream = self.upstream
             up_reader, up_writer = await asyncio.open_connection(*upstream)
             forwarded = "".join(f"{k}: {v}\r\n" for k, v in headers if k.lower() not in HOP_BY_HOP)

@@ -9,7 +9,14 @@ ConditionPathExists=/etc/nanoborealis/pool.env
 [Service]
 # NANOBOREALIS_RELAY_TOKEN, written by `nanoborealis pool` and readable by root only.
 EnvironmentFile=/etc/nanoborealis/pool.env
+# Keys for the inference sources in /etc/nanoborealis/sources.json (sources.py), root-only like pool.env.
+EnvironmentFile=-/etc/nanoborealis/sources.env
 Environment=NANOBOREALIS_RELAY_LISTEN=0.0.0.0:11436 NANOBOREALIS_RELAY_UPSTREAM=127.0.0.1:52415
+# The tokenizer's vault: what each placeholder stands for. It stays on this computer, and only the relay reads it.
+Environment=NANOBOREALIS_VAULT=/var/lib/nanoborealis/vault
+StateDirectory=nanoborealis/vault
+StateDirectoryMode=0700
+UMask=0077
 ExecStart=/usr/libexec/nanoborealis-relay
 DynamicUser=yes
 Restart=on-failure

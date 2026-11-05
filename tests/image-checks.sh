@@ -34,11 +34,13 @@ expect "setup-from-stick compiles" python3 -c 'import ast, sys; ast.parse(open(s
     /usr/libexec/nanoborealis-setup-from-stick
 expect "compute-config compiles" python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' \
     /usr/share/nanoborealis/compute-config.py
-for f in /usr/libexec/nanoborealis-relay /usr/share/nanoborealis/{pool,loadout,benchdb,scores}.py; do
+for f in /usr/libexec/nanoborealis-relay /usr/share/nanoborealis/{pool,loadout,benchdb,scores,tokenizer,sources,mixer}.py; do
     expect "$f compiles" python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$f"
 done
 # The loadout planner, bench database and scores load on the image's own Python (sqlite3 included).
 expect "pool tools import" python3 -c 'import sys; sys.path.insert(0, "/usr/share/nanoborealis"); import pool'
+# The tokenizer round-trips on the image's own Python, with its vault in memory.
+expect "tokenizer round-trips" python3 -c 'import sys; sys.path.insert(0, "/usr/share/nanoborealis"); import tokenizer; v = tokenizer.Vault(); t = "mail a.b@example.com"; s = v.tokenize(t); assert "example.com" not in s and v.detokenize(s) == t'
 expect "pool node service template" grep -q '^Image=ghcr.io/korxspyre/nanoborealis-pool:' \
     /usr/share/nanoborealis/exo.container
 expect "pool relay service installed" test -f /usr/lib/systemd/system/nanoborealis-pool-relay.service

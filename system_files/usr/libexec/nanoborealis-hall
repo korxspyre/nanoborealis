@@ -28,7 +28,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-STATE = Path(os.environ.get("NANOBOREALIS_HALL_STATE", "/var/lib/nanoborealis/hall"))
+sys.path.insert(0, os.environ.get("NANOBOREALIS_TOOLS", "/usr/share/nanoborealis"))
+try:
+    import mixer  # several free models answering one question together
+    import sources  # one question to one source, tokenized if it is on the internet
+    import tokenizer  # what keeps personal details off the internet when the Hall asks a cloud model
+except ImportError:  # without them nothing goes to the cloud: advise() sends only through the tokenizer
+    mixer = sources = tokenizer = None
+# The owner's switch (also the relay's): with it set, no question leaves for a cloud model at all.
+CLOUD_OFF = os.environ.get("NANOBOREALIS_MIX_SENSITIVITY") == "local-only"
+
+STATE =Path(os.environ.get("NANOBOREALIS_HALL_STATE", "/var/lib/nanoborealis/hall"))
 LISTEN = os.environ.get("NANOBOREALIS_HALL_LISTEN", "127.0.0.1:11437")
 MAX_BODY = 1024 * 1024
 TEXT_LIMIT = 64 * 1024
@@ -37,6 +47,7 @@ DEFAULTS = {
     "autonomy": "on-task",  # or "continuous": seats also pick up open tasks by themselves
     "escalation": True,  # stuck or split: ask the escalation model (free models only)
     "escalation_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "escalation_mix": True,  # ask several free models of different makes and have the strongest combine them, not one
     "split_margin": 0.15,  # a vote won by less than this share of the weight is split
     "review_rejects_to_fail": 2,
 }
@@ -162,6 +173,8 @@ class Hall:
                 raise Refused(400, "autonomy is on-task or continuous.")
             if key == "escalation" and not isinstance(value, bool):
                 raise Refused(400, "escalation is true or false.")
+            if key == "escalation_mix" and not isinstance(value, bool):
+                raise Refused(400, "escalation_mix is true or false.")
             if key == "escalation_model" and not (isinstance(value, str) and value.endswith(":free")):
                 raise Refused(400, "The escalation model must be a free one (its id ends in :free).")
             if key == "split_margin" and not (isinstance(value, (int, float)) and 0 <= value < 1):
@@ -504,6 +517,17 @@ class Orchestrator:
         self.hall = hall
         self.jobs: queue.Queue = queue.Queue()
         self.busy = False
+        self._vault = None
+        self.ledger = mixer.Ledger() if mixer else None  # who has been asked lately, and who is resting
+        try:  # which free model does well at what survives a restart
+            self.stats = mixer.Stats(STATE / "mix.sqlite") if mixer else None
+        except Exception:
+            self.stats = mixer.Stats() if mixer else None
+
+    def vault(self):
+        if self._vault is None:
+            self._vault = tokenizer.Vault(STATE / "vault")
+        return self._vault
 
     def start(self) -> None:
         threading.Thread(target=self.work, daemon=True).start()
@@ -578,16 +602,32 @@ class Orchestrator:
         """The escalation model's advice, free models only; "" when escalation can't run."""
         settings = self.db(lambda h: h.settings())
         key_file = STATE / "openrouter.key"
-        if not settings["escalation"] or not str(settings["escalation_model"]).endswith(":free") or not key_file.exists():
+        if (not settings["escalation"] or not str(settings["escalation_model"]).endswith(":free")
+                or not key_file.exists() or tokenizer is None or CLOUD_OFF):
             return ""
-        body = {"model": settings["escalation_model"], **FREE_ONLY, "messages": [
-            {"role": "system", "content": "You advise a council of smaller AI models that is stuck or split. Answer "
-                                          "the question directly and briefly, with your reasoning."},
-            {"role": "user", "content": question}]}
+        messages = [{"role": "system", "content": "You advise a council of smaller AI models that is stuck or split. Answer "
+                                                  "the question directly and briefly, with your reasoning."},
+                    {"role": "user", "content": question}]
+        # A free cloud model may log what it is sent. Every call here goes through sources.chat_once, which
+        # tokenizes it (personal details swapped for placeholders only this computer can read, different ones
+        # for each model) and restores the answer. If the tokenizer can't run, nothing is sent.
+        source = sources.Source("openrouter", OPENROUTER_URL.removesuffix("/chat/completions"), "external",
+                                free_only=True, extra=FREE_ONLY, key_file=str(key_file))
+
+        def call(member, msgs):
+            return sources.chat_once("openrouter", member.model, msgs, source=source, vault_factory=self.vault, timeout=300)
+
         try:
-            return reply_text(post_json(OPENROUTER_URL, body, key_file.read_text().strip(), 300))
-        except Exception as e:
-            print(f"nanoborealis-hall: escalation failed: {e}", file=sys.stderr, flush=True)
+            chosen = settings["escalation_model"]
+            if not settings.get("escalation_mix"):  # one model, the one the owner picked
+                return call(mixer.Member("openrouter", chosen, chosen.split("/")[0], 65), messages).strip()
+            members = list(mixer.DEFAULT_MEMBERS)
+            if all(m.model != chosen for m in members):  # the owner's pick joins as an anchor
+                members.append(mixer.Member("openrouter", chosen, chosen.split("/")[0], 65))
+            task = mixer.Task(messages, kind="reasoning", stakes="high")  # several makes answer, one combines, another checks
+            return mixer.Mixer(members, call, self.ledger, self.stats).run(task).answer.strip()
+        except Exception as e:  # never print the question: only what went wrong
+            print(f"nanoborealis-hall: escalation failed: {type(e).__name__}", file=sys.stderr, flush=True)
             return ""
 
     def say(self, room: int, author: str, text: str) -> None:

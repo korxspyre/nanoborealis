@@ -121,7 +121,11 @@ def openrouter(port: int) -> None:
         def do_POST(self) -> None:
             ADVICE.append({**json.loads(self.rfile.read(int(self.headers["Content-Length"]))),
                            "_key": self.headers.get("Authorization")})
-            out = json.dumps({"choices": [{"message": {"content": "Advice: go with the simpler one."}}]}).encode()
+            body = ADVICE[-1]
+            text = "\n".join(str(m.get("content")) for m in body["messages"])
+            echoed = re.findall(r"<<[A-Za-z_]+_[0-9a-f]{10,16}>>", text)[:1]  # a model that repeats a name it was given
+            out = json.dumps({"choices": [{"message": {"content": "Advice: go with the simpler one."
+                                                                  + (f" About {echoed[0]}." if echoed else "")}}]}).encode()
             self.send_response(200)
             self.send_header("Content-Length", str(len(out)))
             self.end_headers()
@@ -147,7 +151,8 @@ def main() -> None:
         openrouter(advisor_port)
         env = {**os.environ, "NANOBOREALIS_HALL_STATE": tmp, "NANOBOREALIS_HALL_LISTEN": f"127.0.0.1:{port}",
                "NANOBOREALIS_HALL_OPENROUTER_URL": f"http://127.0.0.1:{advisor_port}/api/v1/chat/completions",
-               "NANOBOREALIS_HALL_SEAT_TIMEOUT": "30"}
+               "NANOBOREALIS_HALL_SEAT_TIMEOUT": "30",
+               "NANOBOREALIS_TOOLS": str(ROOT / "system_files/usr/share/nanoborealis")}
         hall = subprocess.Popen([sys.executable, str(ROOT / "system_files/usr/libexec/nanoborealis-hall")], env=env)
         try:
             def listening() -> bool:
@@ -235,6 +240,31 @@ def run(base: str, admin_token: str) -> None:
                                if m["author"] == "advisor"), None) if len(ADVICE) == asked else None)
     time.sleep(1)
     check(len(ADVICE) == asked and note is not None, "with escalation off, nothing is sent to OpenRouter")
+
+    # Mixed escalation: several free models of different makes, tokenized.
+    secret = "alice.smith@example.com"
+    admin("POST", "/settings", {"escalation": True, "escalation_mix": True})
+    asked = len(ADVICE)
+    sent = admin("POST", f"/rooms/{room}/messages", {"kind": "escalation", "text": f"Should we mail {secret} the plan?"})
+    posted = until(lambda: next((m for m in admin("GET", f"/rooms/{room}/messages")["messages"][::-1]
+                                 if m["author"] == "advisor" and secret in m["text"]), None))
+    models = {r["model"] for r in ADVICE[asked:]}
+    check(len(models) >= 3, f"escalation asks several free models, not one ({len(models)} here)")
+    check(all(r["model"].endswith(":free") and r["provider"]["max_price"]["prompt"] == 0 for r in ADVICE[asked:]),
+          "...all of them free, with a price limit of 0")
+    check(not any(secret in json.dumps(r) for r in ADVICE[asked:]) and any("<<EMAIL_" in json.dumps(r) for r in ADVICE[asked:]),
+          "...and none of them was sent the email address, only a placeholder for it")
+    check(posted is not None and secret in posted["text"], "...while the advice posted to the Hall has the real address back in it")
+    reviews = [r for r in ADVICE[asked:] if r["messages"][0]["content"].startswith("You review")]
+    check(bool(reviews) and "You advise" not in json.dumps(reviews[0]["messages"][1:]),
+          "...a model of another make reviews the combined answer, seeing only the question and the answer")
+
+    admin("POST", "/settings", {"escalation_mix": False})
+    asked = len(ADVICE)
+    admin("POST", f"/rooms/{room}/messages", {"kind": "escalation", "text": "Again?"})
+    until(lambda: len(ADVICE) > asked)
+    time.sleep(1)
+    check(len(ADVICE) == asked + 1, "with escalation_mix off, one model is asked, as before")
 
 
 if __name__ == "__main__":
