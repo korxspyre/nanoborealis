@@ -517,11 +517,16 @@ def developer_note(device_id: str, what: str) -> None:
         pass
 
 
-def as_root(*args: str) -> list[str]:
-    """A command line run by the system's service manager as root, outside this service's sandbox
-    (its private /tmp and read-only /usr and /etc would otherwise get in the way of real work)."""
-    return ["systemd-run", "--quiet", "--collect", "--wait", "--expand-environment=no",
-            "--setenv=HOME=/root", "--setenv=TERM=dumb", "--working-directory=/root", *args]
+ROOT_ENV = ["HOME=/root", "USER=root", "LOGNAME=root", "LANG=C.UTF-8",
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"]
+
+
+def as_root(*args: str, term: str = "dumb") -> list[str]:
+    """args as root in the computer's own mount namespace (PID 1's), outside this service's sandbox:
+    its private /tmp and read-only /usr and /etc would otherwise get in the way of real work.
+    (systemd-run would be tidier, but the service manager resets connections from in here.)"""
+    return ["nsenter", "--target", "1", "--mount", "--", "env", "-i", "--chdir=/root", *ROOT_ENV, f"TERM={term}",
+            *args]
 
 
 async def run_command(data: dict, owner: str, root: bool = False) -> tuple[int, dict]:
@@ -534,8 +539,7 @@ async def run_command(data: dict, owner: str, root: bool = False) -> tuple[int, 
     timeout = clamp(data.get("timeout") or 120, 120, 3600 if root else COMMAND_TIMEOUT_MAX)
     unit = f"nanoborealis-command-{secrets.token_hex(4)}.service"
     if root:
-        session = as_root("--pipe", f"--unit={unit}", "--description=NanoBorealis: a developer's command",
-                          f"--property=RuntimeMaxSec={timeout + 5}", "--", "/bin/bash", "-l", "-c", command)
+        session = as_root("/bin/bash", "-l", "-c", command)
     else:
         session = in_owner_session(owner, "--pipe", f"--unit={unit}", "--description=NanoBorealis: a command from a paired device",
                                    f"--property=RuntimeMaxSec={timeout + 5}",
@@ -549,8 +553,7 @@ async def run_command(data: dict, owner: str, root: bool = False) -> tuple[int, 
     except asyncio.TimeoutError:
         timed_out = True
         os.killpg(process.pid, signal.SIGKILL)
-        stop = (["systemctl", "stop", unit] if root else as_owner(owner, "systemctl", "--user", "stop", unit)) \
-            if session else None
+        stop = as_owner(owner, "systemctl", "--user", "stop", unit) if session and not root else None
         if stop:  # the command itself runs in the owner's manager, which keeps it going otherwise
             await asyncio.to_thread(subprocess.run, stop, capture_output=True, timeout=30)
         output, _ = await process.communicate()
@@ -585,10 +588,8 @@ async def open_terminal(target: str, reader: asyncio.StreamReader, writer: async
     # the computer.
     if query.get("as") == "root" and is_developer(device_id):
         developer_note(device_id, "opened a root terminal")
-        session = ["systemd-run", "--quiet", "--collect", "--pty", "--expand-environment=no",
-                   f"--description=NanoBorealis: a developer's root terminal (device {device_id})",
-                   "--setenv=HOME=/root", "--working-directory=/root",
-                   *(f"--setenv={k}={v}" for k, v in environment.items() if k != "PATH"), "--", "/bin/bash", "-l"]
+        session = as_root(*(f"{k}={v}" for k, v in environment.items() if k not in ("PATH", "LANG", "TERM")),
+                          "/bin/bash", "-l", term=environment["TERM"])
     else:
         session = in_owner_session(owner, "--pty", f"--description=NanoBorealis: a terminal for device {device_id}",
                                    *(f"--setenv={k}={v}" for k, v in environment.items() if k != "PATH"),
