@@ -45,6 +45,21 @@ if [ -n "${NANOBOREALIS_SEAT:-}" ] && [ -f /opt/nanoborealis-seat/config.json ];
     cp /opt/nanoborealis-seat/AGENTS.md "$state/workspace/AGENTS.md"
 fi
 
+# Every agent stays on the request in front of it: memory is an index of subjects, each in its own
+# file, opened only when the request is about it, so one chat's subject doesn't leak into the next.
+agents="$state/workspace/AGENTS.md"
+if [ -f "$agents" ] && ! grep -q '^## Stay on the request' "$agents"; then
+    cat >> "$agents" <<'EOF'
+
+## Stay on the request
+
+- Answer the request in front of you. Don't bring up other projects, past subjects or earlier chats unless the user does, or the request clearly depends on them.
+- `memory/MEMORY.md` is only an index. Open a subject's file under `memory/subjects/` only when the current request is about that subject.
+- When you save memory (including Dream), keep each subject in its own file under `memory/subjects/`, add one index line to `MEMORY.md` for a new subject, and never merge facts from one subject into another.
+- If a request is ambiguous about which project it means, ask instead of guessing from memory.
+EOF
+fi
+
 pkgs="$HOME/.config/nanoborealis/apt-packages"
 if [ ! -e "$pkgs" ] && [ -s "$HOME/.config/nanoaurora/apt-packages" ]; then
     mkdir -p "$(dirname "$pkgs")"
