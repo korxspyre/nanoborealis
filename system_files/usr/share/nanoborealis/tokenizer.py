@@ -180,7 +180,6 @@ class Vault:
     def spans(self, text: str) -> list[tuple[int, int, str]]:
         """Non-overlapping (start, end, kind) of everything sensitive in `text`, skipping existing placeholders."""
         taken = [m.span() for m in TOKEN.finditer(text)]
-        found: list[tuple[int, int, int, str]] = []  # start, -length, priority, ... resolved below
         candidates: list[tuple[int, int, int, str]] = []
         for priority, (kind, pattern, group, check) in enumerate(DETECTORS):
             for m in pattern.finditer(text):

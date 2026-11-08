@@ -247,7 +247,7 @@ def run(base: str, admin_token: str) -> None:
     secret = "alice.smith@example.com"
     admin("POST", "/settings", {"escalation": True, "escalation_mix": True})
     asked = len(ADVICE)
-    sent = admin("POST", f"/rooms/{room}/messages", {"kind": "escalation", "text": f"Should we mail {secret} the plan?"})
+    admin("POST", f"/rooms/{room}/messages", {"kind": "escalation", "text": f"Should we mail {secret} the plan?"})
     posted = until(lambda: next((m for m in admin("GET", f"/rooms/{room}/messages")["messages"][::-1]
                                  if m["author"] == "advisor" and secret in m["text"]), None))
     models = {r["model"] for r in ADVICE[asked:]}
