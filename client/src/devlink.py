@@ -97,6 +97,13 @@ def main() -> int:
     run.add_argument("-t", "--timeout", type=int, default=300)
     run.add_argument("-f", "--file")
     run.add_argument("words", nargs="*")
+    h = sub.add_parser("hands", help="give a job to another device lending its hands, through this computer")
+    h.add_argument("device")
+    h.add_argument("--request", required=True, help="the request this job serves")
+    h.add_argument("--folder", action="append", default=[], help="a folder the request is about (on that device)")
+    h.add_argument("--cwd", default="")
+    h.add_argument("-t", "--timeout", type=int, default=300)
+    h.add_argument("words", nargs="+")
     for name in ("push", "pull"):
         p = sub.add_parser(name)
         p.add_argument("--root", action="store_true")
@@ -109,6 +116,16 @@ def main() -> int:
             print(f"{m.name}  {m.host}:{m.port}  this device's id there: {m.device_id}")
         return 0
     machine = pick(args.machine)
+    if args.action == "hands":
+        status, answer, _ = pairing.call(
+            machine.host, machine.port, "POST", "/nanoborealis/hands/run", context=machine.context(),
+            body={"device": args.device, "command": " ".join(args.words), "timeout": args.timeout, "cwd": args.cwd,
+                  "task": {"request": args.request, "folders": args.folder}},
+            headers={"X-NanoBorealis-Device": machine.password}, timeout=args.timeout + 120)
+        if status != 200:
+            sys.exit(f"HTTP {status}: {answer.get('error', answer)}")
+        sys.stdout.write(answer.get("output", ""))
+        return int(answer.get("exit") or 0) if not answer.get("refused") else 3
     if args.action == "run":
         text = Path(args.file).read_text(encoding="utf-8") if args.file else " ".join(args.words)
         if not text.strip():

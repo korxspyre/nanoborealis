@@ -156,6 +156,10 @@ jobs:
       - name: Coding-agent features
         run: '"$RUNNER_TEMP/venv/bin/python" client/dev/codefeatures_check.py'
 
+      # Hands: what an agent may do on a lent device, held to the scope of its request.
+      - name: Hands permissions
+        run: '"$RUNNER_TEMP/venv/bin/python" client/dev/permissions_check.py'
+
       # The screens for them, and the workspace around them, built without a window.
       - name: Coding-agent screens build
         run: '"$RUNNER_TEMP/venv/bin/python" client/dev/codeui_check.py'

@@ -1638,6 +1638,8 @@ class HandsJob:
     command: str
     timeout: int
     by: str
+    task: dict = field(default_factory=dict)  # the request this job serves and its folders: the device holds it to them
+    cwd: str = ""
     created: float = field(default_factory=time.time)
     result: dict | None = None
     done: asyncio.Event = field(default_factory=asyncio.Event)
@@ -1680,7 +1682,8 @@ async def hands_poll(data: dict, query: dict, owner: str, device_id: str) -> tup
         return 200, {}
     job: HandsJob = entry.queue.popleft()
     entry.running[job.id] = job
-    return 200, {"job": {"id": job.id, "command": job.command, "timeout": job.timeout}}
+    return 200, {"job": {"id": job.id, "command": job.command, "timeout": job.timeout, "task": job.task,
+                         "cwd": job.cwd}}
 
 
 async def hands_done(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
@@ -1690,7 +1693,7 @@ async def hands_done(data: dict, query: dict, owner: str, device_id: str) -> tup
         return 404, {"error": "No such job."}
     output = data.get("output")
     job.result = {"exit": data.get("exit") if isinstance(data.get("exit"), int) else None,
-                  "timed_out": bool(data.get("timed_out")),
+                  "timed_out": bool(data.get("timed_out")), "refused": bool(data.get("refused")),
                   "output": output[-OUTPUT_LIMIT:] if isinstance(output, str) else ""}
     job.done.set()
     return 200, {"ok": True}
@@ -1703,14 +1706,14 @@ async def hands_list(data: dict, query: dict, owner: str, device_id: str) -> tup
                              for d, h in hands_lending().items()]}
 
 
-async def hands_submit(device: str, command: str, timeout: int, by: str) -> tuple[int, dict]:
+async def hands_submit(device: str, command: str, timeout: int, by: str, task: dict, cwd: str) -> tuple[int, dict]:
     devices.load()
     match = [d for d in hands_lending() if d == device or devices.by_id.get(d, {}).get("name", "").lower() == device.lower()]
     if not match:
         names = ", ".join(devices.by_id.get(d, {}).get("name", d) for d in hands_lending()) or "none"
         return 404, {"error": f"{device} isn't lending its hands right now (lending: {names})."}
     entry = hands[match[0]]
-    job = HandsJob(secrets.token_hex(6), match[0], command, timeout, by)
+    job = HandsJob(secrets.token_hex(6), match[0], command, timeout, by, task, cwd)
     entry.queue.append(job)
     entry.wake.set()
     log(f"{by} gave device {match[0]} a job: {command[:200]}")
@@ -1728,8 +1731,17 @@ async def hands_run(data: dict, query: dict, owner: str, device_id: str) -> tupl
     command, device = data.get("command"), data.get("device")
     if not isinstance(command, str) or not command.strip() or not isinstance(device, str):
         return 400, {"error": "Give a device and a command."}
+    task = data.get("task")
+    # Every job says which request it serves and which folders that request is about; the device
+    # holds it to them, so work that drifts to another subject has to ask first.
+    if (not isinstance(task, dict) or not isinstance(task.get("request"), str) or not task["request"].strip()
+            or not isinstance(task.get("folders", []), list)):
+        return 400, {"error": "Say which request this job serves: task = {request, folders}."}
+    task = {"request": task["request"][:2000], "folders": [str(f) for f in task.get("folders", [])][:20],
+            "id": str(task.get("id") or "")[:64]}
+    cwd = data.get("cwd") if isinstance(data.get("cwd"), str) else ""
     return await hands_submit(device, command, clamp(data.get("timeout") or 300, 300, HANDS_JOB_MAX),
-                              f"{owner} (device {device_id})")
+                              f"{owner} (device {device_id})", task, cwd)
 
 
 ADMIN_ROUTES = {
