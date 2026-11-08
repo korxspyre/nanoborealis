@@ -494,17 +494,52 @@ def owner_shell(owner: str) -> str:
     return shell if shell and os.path.exists(shell) and not shell.endswith(("nologin", "false")) else "/bin/bash"
 
 
-async def run_command(data: dict, owner: str) -> tuple[int, dict]:
-    """Run one shell command as the owner, in a login shell, and answer with its output."""
+DEVELOPER_LOG = STATE / "developer.log"
+DEVELOPER_BODY_LIMIT = 16 << 20  # a developer's command can carry files (base64) to put in place
+
+
+def is_developer(device_id: str) -> bool:
+    """A device given full control here (`nanoborealis devices developer <id>`): its commands and
+    terminals may run as root. Only root can grant it, at this computer."""
+    return bool(devices.by_id.get(device_id, {}).get("developer"))
+
+
+def developer_note(device_id: str, what: str) -> None:
+    """Every root action from a developer device, in the journal and in developer.log."""
+    entry = devices.by_id.get(device_id, {})
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {device_id} ({entry.get('name', '?')}) {what}"
+    log(f"as root for developer device {device_id}: {what[:300]}")
+    try:
+        with open(DEVELOPER_LOG, "a", encoding="utf-8") as f:
+            f.write(line.replace("\n", "\\n")[:4000] + "\n")
+        os.chmod(DEVELOPER_LOG, 0o600)
+    except OSError:
+        pass
+
+
+def as_root(*args: str) -> list[str]:
+    """A command line run by the system's service manager as root, outside this service's sandbox
+    (its private /tmp and read-only /usr and /etc would otherwise get in the way of real work)."""
+    return ["systemd-run", "--quiet", "--collect", "--wait", "--expand-environment=no",
+            "--setenv=HOME=/root", "--setenv=TERM=dumb", "--working-directory=/root", *args]
+
+
+async def run_command(data: dict, owner: str, root: bool = False) -> tuple[int, dict]:
+    """Run one shell command as the owner (or, for a developer device, as root), in a login shell,
+    and answer with its output."""
     import signal
     command = data.get("command")
     if not isinstance(command, str) or not command.strip():
         return 400, {"error": "No command."}
-    timeout = clamp(data.get("timeout") or 120, 120, COMMAND_TIMEOUT_MAX)
+    timeout = clamp(data.get("timeout") or 120, 120, 3600 if root else COMMAND_TIMEOUT_MAX)
     unit = f"nanoborealis-command-{secrets.token_hex(4)}.service"
-    session = in_owner_session(owner, "--pipe", f"--unit={unit}", "--description=NanoBorealis: a command from a paired device",
-                               f"--property=RuntimeMaxSec={timeout + 5}",
-                               "--", owner_shell(owner), "-l", "-c", command)
+    if root:
+        session = as_root("--pipe", f"--unit={unit}", "--description=NanoBorealis: a developer's command",
+                          f"--property=RuntimeMaxSec={timeout + 5}", "--", "/bin/bash", "-l", "-c", command)
+    else:
+        session = in_owner_session(owner, "--pipe", f"--unit={unit}", "--description=NanoBorealis: a command from a paired device",
+                                   f"--property=RuntimeMaxSec={timeout + 5}",
+                                   "--", owner_shell(owner), "-l", "-c", command)
     process = await asyncio.create_subprocess_exec(
         *(session or ["runuser", "-l", owner, "-c", command]), stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, cwd="/", start_new_session=True)
@@ -514,7 +549,8 @@ async def run_command(data: dict, owner: str) -> tuple[int, dict]:
     except asyncio.TimeoutError:
         timed_out = True
         os.killpg(process.pid, signal.SIGKILL)
-        stop = as_owner(owner, "systemctl", "--user", "stop", unit) if session else None
+        stop = (["systemctl", "stop", unit] if root else as_owner(owner, "systemctl", "--user", "stop", unit)) \
+            if session else None
         if stop:  # the command itself runs in the owner's manager, which keeps it going otherwise
             await asyncio.to_thread(subprocess.run, stop, capture_output=True, timeout=30)
         output, _ = await process.communicate()
@@ -547,9 +583,16 @@ async def open_terminal(target: str, reader: asyncio.StreamReader, writer: async
     # shell a terminal of its own there and relays it to this one, window size included. setsid
     # --ctty makes this terminal the controlling one, so job control and Ctrl+C work as they do at
     # the computer.
-    session = in_owner_session(owner, "--pty", f"--description=NanoBorealis: a terminal for device {device_id}",
-                               *(f"--setenv={k}={v}" for k, v in environment.items() if k != "PATH"),
-                               "--", owner_shell(owner), "-l")
+    if query.get("as") == "root" and is_developer(device_id):
+        developer_note(device_id, "opened a root terminal")
+        session = ["systemd-run", "--quiet", "--collect", "--pty", "--expand-environment=no",
+                   f"--description=NanoBorealis: a developer's root terminal (device {device_id})",
+                   "--setenv=HOME=/root", "--working-directory=/root",
+                   *(f"--setenv={k}={v}" for k, v in environment.items() if k != "PATH"), "--", "/bin/bash", "-l"]
+    else:
+        session = in_owner_session(owner, "--pty", f"--description=NanoBorealis: a terminal for device {device_id}",
+                                   *(f"--setenv={k}={v}" for k, v in environment.items() if k != "PATH"),
+                                   "--", owner_shell(owner), "-l")
     process = subprocess.Popen(["setsid", "--ctty", *(session or ["runuser", "-l", owner])], stdin=slave,
                                stdout=slave, stderr=slave, env=environment, cwd="/", close_fds=True)
     os.close(slave)
@@ -652,10 +695,12 @@ async def local(method: str, target: str, headers: list[tuple[str, str]], reader
     path = target.split("?", 1)[0]
     if method == "GET" and path == "/nanoborealis/hello":
         return await reply(writer, 200, {"service": "nanoborealis-remote", "pairing": 1, "terminal": 1, "admin": 1,
+                                         "developer": 1,
                                          "machine": MACHINE})
     if (method, path) in ADMIN_ROUTES or (path.startswith(HALL_PREFIX) and method in ("GET", "POST", "DELETE")):
         return await admin(method, target, headers, reader, writer, address)
     owner = None
+    device_id = None
     if path in ("/nanoborealis/terminal", "/nanoborealis/command"):
         device_id = devices.find(header(headers, DEVICE_HEADER))
         if device_id is None:
@@ -676,15 +721,22 @@ async def local(method: str, target: str, headers: list[tuple[str, str]], reader
         return await reply(writer, 404, {"error": "Not found."})
     try:
         length = int(header(headers, "content-length") or 0)
-        if not 0 <= length <= BODY_LIMIT:
+        developer = path == "/nanoborealis/command" and device_id is not None and is_developer(device_id)
+        if not 0 <= length <= (DEVELOPER_BODY_LIMIT if developer else BODY_LIMIT):
             raise ValueError("too long")
-        data = json.loads(await asyncio.wait_for(reader.readexactly(length), 15) if length else b"{}")
+        data = json.loads(await asyncio.wait_for(reader.readexactly(length), 120) if length else b"{}")
         if not isinstance(data, dict):
             raise ValueError("not an object")
     except (ValueError, asyncio.TimeoutError, asyncio.IncompleteReadError):
         return await reply(writer, 400, {"error": "Bad request."})
     if path == "/nanoborealis/command" and owner is not None:
-        status, payload = await run_command(data, owner)
+        root = data.get("as") == "root"
+        if root and not is_developer(device_id):
+            return await reply(writer, 403, {"error": "This device isn't a developer device here. At this computer, "
+                                                      f"run: nanoborealis devices developer {device_id}"})
+        if root:
+            developer_note(device_id, f"ran: {str(data.get('command'))[:2000]}")
+        status, payload = await run_command(data, owner, root=root)
         return await reply(writer, status, payload)
     if path == "/nanoborealis/unpair":
         device_id = devices.find(header(headers, DEVICE_HEADER))

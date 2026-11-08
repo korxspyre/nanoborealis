@@ -691,6 +691,8 @@ if not devices:
 for device_id, d in sorted(devices.items(), key=lambda item: item[1].get("paired", 0)):
     day = lambda t: time.strftime("%Y-%m-%d %H:%M", time.localtime(t))
     owner = f", approved by {d['owner']} (its terminal runs as {d['owner']})" if d.get("owner") else ""
+    if d.get("developer"):
+        owner += "; DEVELOPER: may run commands as root"
     print(f"{device_id}  {d.get('name', '?')}\n          paired {day(d.get('paired', 0))}{owner}, "
           f"last seen {day(d.get('seen', 0))} from {d.get('address', '?')}")
 PY
@@ -715,8 +717,32 @@ os.replace(path + ".tmp", path)
 print(f"unpaired {name}: it can't reach this computer anymore")
 PY
                 ;;
+            developer)
+                # Full control for a paired device: its commands and terminals can run as root, for the
+                # developer working on this computer through the NanoBorealis app. Every root command is logged.
+                device="${3:-}" state="${4:-on}"
+                [[ "$device" =~ ^[0-9a-f]{8}$ && "$state" =~ ^(on|off)$ ]] || { echo "usage: $(basename "$0") devices developer <id> [on|off]" >&2; exit 2; }
+                sudo python3 - "$registry" "$device" "$state" <<'PY'
+import json, os, sys
+path, device, state = sys.argv[1:4]
+devices = json.load(open(path))
+if device not in devices:
+    sys.exit(f"no paired device {device}")
+if state == "on":
+    devices[device]["developer"] = True
+else:
+    devices[device].pop("developer", None)
+with open(path + ".tmp", "w") as f:
+    json.dump(devices, f, indent=2)
+os.chmod(path + ".tmp", 0o600)
+os.replace(path + ".tmp", path)
+name = devices[device].get("name", device)
+print(f"{name} can now run commands as root here (logged in /var/lib/nanoborealis/remote/developer.log)" if state == "on"
+      else f"{name} no longer runs anything as root here")
+PY
+                ;;
             *)
-                echo "usage: $(basename "$0") devices [list|remove <id>]" >&2
+                echo "usage: $(basename "$0") devices [list|remove <id>|developer <id> [on|off]]" >&2
                 exit 2 ;;
         esac ;;
     set-key)

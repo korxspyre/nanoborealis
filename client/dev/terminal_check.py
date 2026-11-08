@@ -47,6 +47,12 @@ async def main(address: str, pin_file: str, owner: str, here_socket: str = "") -
     check(status == 3, "a command's exit status comes back")
     status, output = await asyncio.to_thread(run_command, machine, "sleep 30", 2)
     check(status is None, "a command that runs too long is stopped")
+    from pairing import call
+    status, answer, _ = await asyncio.to_thread(
+        call, machine.host, machine.port, "POST", "/nanoborealis/command", context=machine.context(),
+        body={"command": "id -un", "as": "root"}, headers={"X-NanoBorealis-Device": machine.password})
+    check(status == 403 and "developer" in answer.get("error", ""),
+          f"a device not granted developer access can't run anything as root ({status})")
 
     term = Terminal(machine, rows=30, cols=100, console=True)
     await term.open()
