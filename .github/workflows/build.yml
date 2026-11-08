@@ -13,6 +13,7 @@ on:
   push:
     branches: [main]
     # Only changes that can alter the OS image rebuild it (a push cancels a build in progress).
+    # An empty commit changes no paths, so it never starts this build: use workflow_dispatch.
     paths-ignore:
       - '**/README.md'
       # The app's source (client/src) ships in the image; its tools and packaging don't.
