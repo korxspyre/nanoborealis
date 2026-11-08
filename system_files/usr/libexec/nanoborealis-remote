@@ -1620,7 +1620,123 @@ async def pool_policy(data: dict, query: dict, owner: str, device_id: str) -> tu
     return 200, {"policy": policy}
 
 
+# -- Hands: the agents' work on the owner's other devices ------------------------------------------
+# A paired device can lend its "hands": the app on it keeps asking here for work (a phone or a PC
+# behind a router can't be called, but it can call), runs each job in a sandbox of its own (a WSL2
+# system that sees only the shared folders on Windows, bubblewrap on Linux) and answers with the
+# result. Jobs are handed in by administrators' devices and by this computer's own tools; nothing
+# runs on a device without its app lending, and the device decides what its sandbox can reach.
+
+HANDS_POLL_SECONDS = 25
+HANDS_JOB_MAX = 3600
+
+
+@dataclass
+class HandsJob:
+    id: str
+    device: str
+    command: str
+    timeout: int
+    by: str
+    created: float = field(default_factory=time.time)
+    result: dict | None = None
+    done: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+@dataclass
+class HandsDevice:
+    box: dict = field(default_factory=dict)  # what the device says its sandbox is and can reach
+    last: float = 0.0
+    queue: deque = field(default_factory=deque)
+    wake: asyncio.Event = field(default_factory=asyncio.Event)
+    running: dict = field(default_factory=dict)
+
+
+hands: dict[str, HandsDevice] = {}
+HANDS_FRESH = HANDS_POLL_SECONDS * 3  # a device that hasn't asked for this long isn't lending
+
+
+def hands_lending() -> dict[str, HandsDevice]:
+    now = time.time()
+    return {d: h for d, h in hands.items() if now - h.last < HANDS_FRESH}
+
+
+async def hands_poll(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    """The device's app asks for its next job (waiting up to HANDS_POLL_SECONDS for one)."""
+    entry = hands.setdefault(device_id, HandsDevice())
+    if not entry.last or time.time() - entry.last > HANDS_FRESH:
+        log(f"{owner}'s device {device_id} lends its hands ({str(data.get('box', {}).get('kind', '?'))})")
+    entry.last = time.time()
+    if isinstance(data.get("box"), dict):
+        entry.box = {k: v for k, v in data["box"].items() if k in ("kind", "folders", "network", "os", "detail")}
+    if not entry.queue:
+        entry.wake.clear()
+        try:
+            await asyncio.wait_for(entry.wake.wait(), HANDS_POLL_SECONDS)
+        except asyncio.TimeoutError:
+            pass
+    entry.last = time.time()
+    if not entry.queue:
+        return 200, {}
+    job: HandsJob = entry.queue.popleft()
+    entry.running[job.id] = job
+    return 200, {"job": {"id": job.id, "command": job.command, "timeout": job.timeout}}
+
+
+async def hands_done(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    entry = hands.get(device_id)
+    job = entry.running.pop(str(data.get("id")), None) if entry else None
+    if job is None:
+        return 404, {"error": "No such job."}
+    output = data.get("output")
+    job.result = {"exit": data.get("exit") if isinstance(data.get("exit"), int) else None,
+                  "timed_out": bool(data.get("timed_out")),
+                  "output": output[-OUTPUT_LIMIT:] if isinstance(output, str) else ""}
+    job.done.set()
+    return 200, {"ok": True}
+
+
+async def hands_list(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    devices.load()
+    return 200, {"devices": [{"id": d, "name": devices.by_id.get(d, {}).get("name", d), "box": h.box,
+                              "queued": len(h.queue), "running": len(h.running)}
+                             for d, h in hands_lending().items()]}
+
+
+async def hands_submit(device: str, command: str, timeout: int, by: str) -> tuple[int, dict]:
+    devices.load()
+    match = [d for d in hands_lending() if d == device or devices.by_id.get(d, {}).get("name", "").lower() == device.lower()]
+    if not match:
+        names = ", ".join(devices.by_id.get(d, {}).get("name", d) for d in hands_lending()) or "none"
+        return 404, {"error": f"{device} isn't lending its hands right now (lending: {names})."}
+    entry = hands[match[0]]
+    job = HandsJob(secrets.token_hex(6), match[0], command, timeout, by)
+    entry.queue.append(job)
+    entry.wake.set()
+    log(f"{by} gave device {match[0]} a job: {command[:200]}")
+    try:
+        await asyncio.wait_for(job.done.wait(), timeout + HANDS_POLL_SECONDS + 30)
+    except asyncio.TimeoutError:
+        with contextlib.suppress(ValueError):
+            entry.queue.remove(job)
+        entry.running.pop(job.id, None)
+        return 504, {"error": f"{devices.by_id.get(match[0], {}).get('name', match[0])} didn't answer in time."}
+    return 200, {"device": match[0], **(job.result or {})}
+
+
+async def hands_run(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    command, device = data.get("command"), data.get("device")
+    if not isinstance(command, str) or not command.strip() or not isinstance(device, str):
+        return 400, {"error": "Give a device and a command."}
+    return await hands_submit(device, command, clamp(data.get("timeout") or 300, 300, HANDS_JOB_MAX),
+                              f"{owner} (device {device_id})")
+
+
 ADMIN_ROUTES = {
+    ("POST", "/nanoborealis/hands/poll"): hands_poll,
+    ("POST", "/nanoborealis/hands/done"): hands_done,
+    ("GET", "/nanoborealis/hands"): hands_list,
+    ("POST", "/nanoborealis/hands/run"): hands_run,
     ("GET", "/nanoborealis/agent"): agent_overview,
     ("GET", "/nanoborealis/agent/file"): agent_file_read,
     ("GET", "/nanoborealis/agent/files"): agent_file_list,
