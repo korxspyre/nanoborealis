@@ -538,18 +538,25 @@ async def run_command(data: dict, owner: str, root: bool = False) -> tuple[int, 
         return 400, {"error": "No command."}
     timeout = clamp(data.get("timeout") or 120, 120, 3600 if root else COMMAND_TIMEOUT_MAX)
     unit = f"nanoborealis-command-{secrets.token_hex(4)}.service"
+    # Linux limits one argument to 128 KB (MAX_ARG_STRLEN): a longer command (a developer's file, in base64) can't
+    # be exec'd as `-c command`, and failed with the connection reset. It goes in on stdin instead, read whole
+    # before it runs, so what it runs still finds its stdin at its end, as with /dev/null.
+    long = len(command.encode()) > 96 * 1024
+    script = 'script="$(cat)"; eval "$script"' if long else command
+    feed = command.encode() if long else None
     if root:
-        session = as_root("/bin/bash", "-l", "-c", command)
+        session = as_root("/bin/bash", "-l", "-c", script)
     else:
         session = in_owner_session(owner, "--pipe", f"--unit={unit}", "--description=NanoBorealis: a command from a paired device",
                                    f"--property=RuntimeMaxSec={timeout + 5}",
-                                   "--", owner_shell(owner), "-l", "-c", command)
+                                   "--", owner_shell(owner), "-l", "-c", script)
     process = await asyncio.create_subprocess_exec(
-        *(session or ["runuser", "-l", owner, "-c", command]), stdin=asyncio.subprocess.DEVNULL,
+        *(session or ["runuser", "-l", owner, "-c", script]),
+        stdin=asyncio.subprocess.PIPE if long else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, cwd="/", start_new_session=True)
     timed_out = False
     try:
-        output, _ = await asyncio.wait_for(process.communicate(), timeout)
+        output, _ = await asyncio.wait_for(process.communicate(feed), timeout)
     except asyncio.TimeoutError:
         timed_out = True
         os.killpg(process.pid, signal.SIGKILL)
