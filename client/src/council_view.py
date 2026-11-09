@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (C) 2026 korxspyre
-"""The council in the app (docs/council/README.md): Hall chats, the task board, and one-on-one chats
+"""The council in the app (docs/rigs/README.md): Hall chats, the task board, and one-on-one chats
 with a council seat. The chair, the agent you already have, keeps its own chats (workspace.py).
 
 Everything goes through the computer's pairing service to its Hall (admin.hall), where you speak
@@ -92,14 +92,14 @@ class CouncilView:
             for room in (r for r in self.rooms if r["kind"] == "hall"):
                 rows.append(self.side_row(room["title"], f"room:{room['id']}", ft.Icons.GROUPS_OUTLINED))
             if not rows:
-                rows.append(ft.Container(t.muted("No Hall chats yet. Start one above: the whole council answers."),
+                rows.append(ft.Container(t.muted("No Hall chats yet. Start one above: every seat answers."),
                                          padding=ft.Padding.only(left=12, right=8, top=8)))
         elif mode == "task":
             for task in self.tasks:
                 rows.append(self.side_row(task["title"], f"task:{task['id']}", ft.Icons.TASK_ALT_ROUNDED,
                                           t.badge(task["state"].upper(), STATE_COLORS.get(task["state"], t.MUTED))))
             if not rows:
-                rows.append(ft.Container(t.muted("No tasks yet. Post one above, and the council takes it on."),
+                rows.append(ft.Container(t.muted("No tasks yet. Post one above, and a rig takes it on."),
                                          padding=ft.Padding.only(left=12, right=8, top=8)))
         return rows
 
@@ -108,7 +108,7 @@ class CouncilView:
         seats = [s for s in self.seats if not s.get("chair")]
         if self.problem or not seats:
             return []
-        rows: list[ft.Control] = [ft.Container(t.muted("Council seats", size=11.5),
+        rows: list[ft.Control] = [ft.Container(t.muted("Rig seats", size=11.5),
                                                padding=ft.Padding.only(left=12, top=10, bottom=2))]
         for seat in seats:
             room = next((r for r in self.rooms if r["kind"] == "direct" and r.get("seat") == seat["id"]), None)
@@ -136,11 +136,11 @@ class CouncilView:
             await self.workspace.show_section(f"council:room:{room['id']}")
 
         topic.on_submit = start
-        self.dialog("New Hall chat", "Everyone on the council reads it, and each seat answers in turn or passes.",
+        self.dialog("New Hall chat", "Every seat reads it, and each answers in turn or passes.",
                     [topic], "Start", start)
 
     async def new_task(self) -> None:
-        title = t.field("The task", hint="Write a README for the council")
+        title = t.field("The task", hint="Write a README for my project")
         detail = t.field("Details (optional)", multiline=True)
 
         async def post(_event=None) -> None:
@@ -155,7 +155,7 @@ class CouncilView:
                 return
             await self.workspace.show_section(f"council:task:{task['id']}")
 
-        self.dialog("New task", "The council offers it to its seats: one takes it on, another reviews the result.",
+        self.dialog("New task", "The rig offers it to its seats: one takes it on, another reviews the result.",
                     [title, detail], "Post it", post)
 
     def dialog(self, title: str, blurb: str, fields: list[ft.Control], action: str, on_click) -> None:
@@ -190,7 +190,7 @@ class CouncilView:
                 return await self.room_view(int(ident))
             return await self.task_view(int(ident))
         except (PairingError, ValueError) as e:
-            return "Council", self.frame([t.card(t.muted(str(e)))])
+            return "Rigs", self.frame([t.card(t.muted(str(e)))])
 
     def frame(self, body: list[ft.Control], composer: ft.Control | None = None) -> ft.Control:
         column = ft.ListView(body, expand=True, spacing=10, padding=ft.Padding.symmetric(horizontal=24, vertical=16),
@@ -241,7 +241,7 @@ class CouncilView:
         listing = ft.Column([self.bubble(m) for m in messages], spacing=10)
         if not messages:
             listing.controls.append(t.muted("Say something to start."))
-        box = t.field(hint="Message the council" if room["kind"] == "hall" else f"Message {self.seat_name(room['seat'])}",
+        box = t.field(hint="Message every seat" if room["kind"] == "hall" else f"Message {self.seat_name(room['seat'])}",
                       multiline=True)
         box.max_lines = 6
         box.shift_enter = True
@@ -260,7 +260,7 @@ class CouncilView:
         box.on_submit = send
         actions: list[ft.Control] = [ft.Container(box, expand=True), t.primary_button("Send", on_click=send)]
         if room["kind"] == "hall":
-            actions.insert(1, t.icon_button(ft.Icons.HOW_TO_VOTE_OUTLINED, "Ask the council to vote",
+            actions.insert(1, t.icon_button(ft.Icons.HOW_TO_VOTE_OUTLINED, "Ask the seats to vote",
                                             on_click=lambda _e: self.page.run_task(self.new_vote, room_id, listing)))
         self.page.run_task(self.follow_room, room_id, listing, messages[-1]["id"] if messages else 0)
         title = room["title"] if room["kind"] == "hall" else self.seat_name(room.get("seat") or "")
@@ -305,7 +305,7 @@ class CouncilView:
                 return
             await self.refresh_room(room_id, listing)
 
-        self.dialog("Ask the council to vote", "Each seat votes; ballots count by capability and earned trust. "
+        self.dialog("Ask the seats to vote", "Each seat votes; ballots count by capability and earned trust. "
                     "A split vote goes to a free cloud model for advice.", [question, options], "Ask", ask)
 
     async def task_view(self, task_id: int) -> tuple[str, ft.Control]:
@@ -339,7 +339,7 @@ class CouncilView:
             actions.append(t.outline_button("Try again", icon=ft.Icons.REPLAY_ROUNDED,
                                             on_click=lambda _e: self.page.run_task(self.reopen, task_id)))
         elif state in ("open", "claimed"):
-            body.append(t.muted("The council is on it. This page follows along.", size=12.5))
+            body.append(t.muted("The rig is on it. This page follows along.", size=12.5))
             self.page.run_task(self.follow_task, task_id, state, len(task.get("notes") or []))
         return task["title"], self.frame(body, ft.Row(actions, spacing=8) if actions else None)
 

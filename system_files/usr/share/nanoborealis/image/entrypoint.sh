@@ -17,6 +17,26 @@ fi
 mkdir -p "$state/workspace/skills"
 cp -Rn /opt/nanobot-seed/workspace/skills/. "$state/workspace/skills/" 2>/dev/null || true
 
+# Free OpenRouter models whose free tier ended: an agent seeded with them would fall back to a model that only
+# answers 404. Each is swapped for a free model of the same use, in the config the agent already has.
+if [ -f "$state/config.json" ]; then
+    python3 - "$state/config.json" <<'EOF' || true
+import json, sys
+GONE = {"nvidia/nemotron-3-super-120b-a12b:free": "nvidia/nemotron-3.5-super-vl:free",
+        "qwen/qwen3.8-27b:free": "cohere/north-mini-code:free",
+        "thinkingmachines/inkling:free": "dots-studio/dots-3-note-preview:free"}
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+new = text
+for old, now in GONE.items():
+    new = new.replace(f'"{old}"', f'"{now}"')
+if new != text:
+    json.loads(new)  # only a config that still parses is written back
+    open(path, "w", encoding="utf-8").write(new)
+    print("nanoborealis: swapped free models that are no longer free in config.json")
+EOF
+fi
+
 # The agent's relative paths start in its workspace, so "projects/app" landed in a private folder
 # there, and not in ~/projects, the folder shared with the desktop (the app's Projects and Changes
 # panels watch it). Make the workspace's projects/ be the shared folder. Earlier work the agent put

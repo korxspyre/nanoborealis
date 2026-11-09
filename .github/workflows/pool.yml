@@ -26,6 +26,8 @@ on:
       - 'system_files/usr/share/nanoborealis/rigs.py'
       - 'system_files/usr/share/nanoborealis/rigctl.py'
       - 'tests/rigs_check.py'
+      - 'tests/cloud_seats_check.py'
+      - 'system_files/usr/share/nanoborealis/rigs/**'
       - 'tests/nanobench_check.py'
       - 'tests/privacy_check.py'
       - 'tests/orchestrator_check.py'
@@ -87,6 +89,10 @@ jobs:
       # Rigs: teams of seats as a file, their mail, the head agent, the watchdog, snapshot and restore.
       - name: Rigs
         run: python3 tests/rigs_check.py
+
+      # Cloud seats: a rig of free OpenRouter models the Hall asks itself, so a rig runs without a pool.
+      - name: Cloud seats
+        run: python3 tests/cloud_seats_check.py
 
       # NanoBench: the council's own benchmarks, graded by code, and their scores with intervals.
       - name: NanoBench

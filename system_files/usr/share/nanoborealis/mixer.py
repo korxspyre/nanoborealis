@@ -77,9 +77,10 @@ class Member:
 # pool planner's LiveBench scores are matched to them. Free tiers allow few requests, so the limits are modest.
 DEFAULT_MEMBERS = [
     Member("openrouter", "nvidia/nemotron-3-ultra-550b-a55b:free", "nvidia", 65, rpm=10, per_day=40),
-    Member("openrouter", "nvidia/nemotron-3-super-120b-a12b:free", "nvidia", 55, rpm=15, per_day=40),
-    Member("openrouter", "thinkingmachines/inkling:free", "thinkingmachines", 50, rpm=15, per_day=40),
-    Member("openrouter", "qwen/qwen3.8-27b:free", "qwen", 48, rpm=15, per_day=40),
+    # Checked against OpenRouter's model list on 2026-11-09: the super, inkling and qwen3.8 free tiers had ended.
+    Member("openrouter", "nvidia/nemotron-3.5-super-vl:free", "nvidia", 55, rpm=15, per_day=40),
+    Member("openrouter", "dots-studio/dots-3-note-preview:free", "dots", 50, rpm=15, per_day=40),
+    Member("openrouter", "cohere/north-mini-code:free", "cohere", 45, rpm=15, per_day=40),
     Member("openrouter", "nvidia/nemotron-3.5-lightning:free", "nvidia", 35, rpm=20, per_day=40),
 ]
 

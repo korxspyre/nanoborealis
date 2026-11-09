@@ -382,7 +382,7 @@ TXT
             sources)
                 # Inference sources besides the pool: a llama.cpp/Strata/Avalon/FreeToken server on another PC, a
                 # notebook on a free GPU tier, OpenRouter's free models. Reached through the relay at /src/<name>;
-                # one on the internet is tokenized on the way (docs/council/README.md). `key` stores a source's key
+                # one on the internet is tokenized on the way (docs/rigs/README.md). `key` stores a source's key
                 # where only the relay can read it.
                 case "${3:-list}" in
                     key)
@@ -454,16 +454,23 @@ confirm() {
     [ "$reply" = "yes" ]
 }
 
+hall() { sudo python3 /usr/share/nanoborealis/council.py hall "$@"; }
+hall_key() {  # the agent's OpenRouter key to the Hall: escalation and cloud seats ask free models with it
+    as_agent podman secret inspect --showsecret --format '{{.SecretData}}' openrouter_api_key 2>/dev/null \
+        | python3 -c 'import json, sys; print(json.dumps({"key": sys.stdin.read().strip()}))' \
+        | { read -r body; hall POST /escalation-key "$body" >/dev/null 2>&1 \
+            || echo "note: no OpenRouter key for the Hall yet; set one in the app's settings"; }
+}
+
 case "$cmd" in
     council)
-        # The council (docs/council/README.md): one seat per model of the pool's loadout, each its own
+        # The council (docs/rigs/README.md): one seat per model of the pool's loadout, each its own
         # agent with its own memory, meeting the others in the Hall. The agent you already have is the
         # chair. Seats reach their models through the pool relay, and the Hall with a token of their own.
         me="$(basename "$0")"
         council_dir="$AGENT_HOME/council"
         qdir="$AGENT_HOME/.config/containers/systemd"
         council_py() { python3 /usr/share/nanoborealis/council.py "$@"; }
-        hall() { sudo python3 /usr/share/nanoborealis/council.py hall "$@"; }
         seat_ids() { sudo cat "$council_dir/seats.json" 2>/dev/null | python3 -c 'import json, sys
 for s in json.load(sys.stdin): print(s["id"])' 2>/dev/null || true; }
         secret() {  # name, value on stdin: a Podman secret of the agent account's
@@ -526,12 +533,7 @@ print(json.dumps({k: s[k] for k in ("id", "name", "model", "family", "capability
                     echo "seated $id"
                 done
 
-                # Escalation asks free OpenRouter models with the chair's key (nanoborealis-remote keeps it
-                # current when the app sets a new one).
-                as_agent podman secret inspect --showsecret --format '{{.SecretData}}' openrouter_api_key 2>/dev/null \
-                    | python3 -c 'import json, sys; print(json.dumps({"key": sys.stdin.read().strip()}))' \
-                    | { read -r body; hall POST /escalation-key "$body" >/dev/null 2>&1 \
-                        || echo "note: no OpenRouter key for escalation yet; set one in the app's settings"; }
+                hall_key
 
                 # The chair: the agent you already talk to, with its own place in the Hall.
                 hall POST /seats '{"id": "chair", "name": "Chair", "model": "your agent'"'"'s own models", "chair": true, "capability": 50, "rotate": true}' \
@@ -607,8 +609,18 @@ print("Autonomy: %s. Escalation: %s." % (s["autonomy"], escalation))' ;;
                 exit 2 ;;
         esac ;;
     rig)
-        # Teams of seats as a file (docs/council/README.md, "Rigs"): up, ps, down, snapshot, restore, send, inbox, head.
-        # Needs the council's Hall running: nanoborealis council apply.
+        # Teams of agents as a file (docs/rigs/README.md): up, ps, down, snapshot, restore, send, inbox, head.
+        # A rig needs no pool: its cloud seats are free OpenRouter models the Hall asks itself, so `rig up` starts
+        # the Hall and hands it the agent's OpenRouter key when they aren't there yet.
+        case "${2:-}" in
+            up|restore)
+                if ! systemctl is-active --quiet nanoborealis-hall.service; then
+                    sudo systemctl enable --now --quiet nanoborealis-hall.service
+                    sudo systemctl restart nanoborealis-firewall.service
+                    for _ in $(seq 1 30); do hall GET /me >/dev/null 2>&1 && break; sleep 1; done
+                fi
+                hall_key ;;
+        esac
         sudo python3 /usr/share/nanoborealis/rigctl.py "${@:2}" ;;
     open)
         if [ "${2:-}" = "--web" ] || ! command -v nanoborealis-app >/dev/null; then

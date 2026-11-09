@@ -183,7 +183,7 @@ def status_segments(*, model: str = "", provider: str = "", used: int | None = N
     if pool:
         segs.append({"key": "pool", "text": pool, "tone": "muted", "tip": "Your pool of computers"})
     if crew:
-        segs.append({"key": "crew", "text": crew, "tone": "muted", "tip": "The council (/crew)"})
+        segs.append({"key": "crew", "text": crew, "tone": "muted", "tip": "Your rigs (/crew)"})
     return segs
 
 
@@ -232,13 +232,13 @@ CLIENT_COMMANDS = [
     ("/rewind", "Put the project's files back as they were before an earlier message"),
     ("/checkpoint", "Save the project's files now, with a name"),
     ("/context", "How full this chat's context is, and what to do about it"),
-    ("/crew", "Show or hide the council's seats, who leads, and their benchmarks"),
+    ("/crew", "Show or hide your rigs' seats, who leads, and their benchmarks"),
     ("/head", "Who is the head agent now"),
     ("/cost", "What the cloud models have cost so far"),
     ("/diff", "Open the changes the agent has made"),
     ("/privacy", "Where this chat's model runs and whether it is tokenized"),
     ("/memory", "Open what the agent remembers"),
-    ("/agents", "Open the council's seats"),
+    ("/agents", "Open your rigs"),
 ]
 CLIENT_COMMAND_NAMES = {c for c, _ in CLIENT_COMMANDS}
 

@@ -1111,7 +1111,7 @@ def hall_proxy(method: str, path: str, query_string: str, body: dict | None) -> 
     try:
         token = (HALL_STATE / "admin.token").read_text().strip()
     except OSError:
-        return 404, {"error": "This computer has no council yet. Seat one with: nanoborealis council apply"}
+        return 404, {"error": "This computer has no rig yet. Bring one up from the app, or with: nanoborealis rig up"}
     url = HALL_URL + path + (f"?{query_string}" if query_string else "")
     request = urllib.request.Request(url, method=method, data=json.dumps(body).encode() if body is not None else None,
                                      headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
@@ -1124,7 +1124,7 @@ def hall_proxy(method: str, path: str, query_string: str, body: dict | None) -> 
         except ValueError:
             return error.code, {"error": f"The Hall answered HTTP {error.code}."}
     except (urllib.error.URLError, OSError):
-        return 503, {"error": "The council's Hall isn't running. Start it with: nanoborealis council apply"}
+        return 503, {"error": "The Hall isn't running. Bring up a rig from the app, or with: nanoborealis rig up"}
 
 
 def hall_key(key: str) -> None:
@@ -1140,6 +1140,58 @@ def hall_key(key: str) -> None:
         urllib.request.urlopen(request, timeout=10).close()
     except OSError as e:
         log(f"couldn't give the council's Hall the new key: {e}")
+
+
+RIG_SPECS = Path(os.environ.get("NANOBOREALIS_REMOTE_RIG_SPECS", "/usr/share/nanoborealis/rigs"))
+
+
+def rig_specs() -> list[dict]:
+    """The rigs that ship with the OS, ready to bring up: name, file and the first comment lines as a blurb."""
+    found = []
+    for path in sorted(RIG_SPECS.glob("*.toml")):
+        lines = [line[2:].strip() for line in path.read_text(encoding="utf-8").splitlines()
+                 if line.startswith("# ") and "SPDX" not in line and "Copyright" not in line]
+        found.append({"name": path.stem, "file": str(path), "about": " ".join(lines[:2])})
+    return found
+
+
+async def rigs_overview(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    """Whether the Hall is running, its rigs, and the rigs that ship with the OS."""
+    status, rigs = await asyncio.to_thread(hall_proxy, "GET", "/rigs", "", None)
+    return 200, {"hall": status == 200, "rigs": rigs.get("rigs", []) if status == 200 else [],
+                 "specs": rig_specs(), "problem": "" if status == 200 else rigs.get("error", "")}
+
+
+async def rigs_up(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    """Bring up a rig, from a spec that ships with the OS (`name`) or one written in the app (`spec`, TOML).
+    Starts the Hall first when it isn't running, and hands it the agent's OpenRouter key: a rig's cloud seats
+    are free OpenRouter models the Hall asks itself, so no pool is needed."""
+    if isinstance(data.get("spec"), str) and data["spec"].strip():
+        spec = data["spec"][:200_000]
+    else:
+        chosen = next((s for s in rig_specs() if s["name"] == data.get("name")), None)
+        if chosen is None:
+            return 404, {"error": "There's no rig by that name on this computer."}
+        spec = Path(chosen["file"]).read_text(encoding="utf-8")
+    if (await asyncio.to_thread(hall_proxy, "GET", "/rigs", "", None))[0] != 200:
+        started = await asyncio.to_thread(subprocess.run, as_root("systemctl", "enable", "--now", "nanoborealis-hall.service"),
+                                          capture_output=True, text=True, timeout=60)
+        if started.returncode != 0:
+            return 502, {"error": f"The Hall wouldn't start: {started.stderr.strip()[-300:]}"}
+        await asyncio.to_thread(subprocess.run, as_root("systemctl", "restart", "nanoborealis-firewall.service"),
+                                capture_output=True, timeout=60)
+        for _ in range(30):
+            if (await asyncio.to_thread(hall_proxy, "GET", "/rigs", "", None))[0] == 200:
+                break
+            await asyncio.sleep(1)
+    key = await asyncio.to_thread(agent_podman, "secret", "inspect", "--showsecret", "--format", "{{.SecretData}}", KEY_SECRET)
+    if key.returncode == 0 and key.stdout.strip():
+        await asyncio.to_thread(hall_key, key.stdout.strip())
+    status, answer = await asyncio.to_thread(hall_proxy, "POST", "/rigs", "", {"spec": spec, "dry_run": bool(data.get("dry_run"))})
+    if status == 200:
+        answer.pop("tokens", None)  # outside seats' tokens are handed out on the computer itself, never over the network
+        log(f"{owner} brought up the rig {answer.get('rig')}" + (" (plan only)" if data.get("dry_run") else ""))
+    return status, answer
 
 
 PRIVACY_MARKER = Path(os.environ.get("NANOBOREALIS_REMOTE_PRIVACY_MARKER", "/etc/nanoborealis/privacy.on"))
@@ -1750,6 +1802,8 @@ ADMIN_ROUTES = {
     ("POST", "/nanoborealis/hands/done"): hands_done,
     ("GET", "/nanoborealis/hands"): hands_list,
     ("POST", "/nanoborealis/hands/run"): hands_run,
+    ("GET", "/nanoborealis/rigs"): rigs_overview,
+    ("POST", "/nanoborealis/rigs/up"): rigs_up,
     ("GET", "/nanoborealis/agent"): agent_overview,
     ("GET", "/nanoborealis/agent/file"): agent_file_read,
     ("GET", "/nanoborealis/agent/files"): agent_file_list,

@@ -10,6 +10,7 @@ terminal.Terminal), so it sees exactly what they would see at its screen.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import posixpath  # paths on the computer, which is Linux whatever this device is
 import shlex
@@ -25,6 +26,7 @@ from pairing import Machine, PairingError
 from terminal import Terminal, plain, run_command
 
 PROJECTS = "/srv/nanoborealis/projects"
+PDF_PAGES = 12  # pages of a PDF the files panel draws
 # The terminal's width in characters, as the panel shows them (a 12.5 px JetBrains Mono character is
 # 7.5 px wide, less the panel's padding): told 110 columns, tables and progress bars wrapped in a
 # panel that holds about 56, and the welcome banner's table came out in pieces.
@@ -223,7 +225,30 @@ class FilesPanel:
             on_click=lambda _e: self.page.run_task(self.go if entry["dir"] else self.show, path),
         )
 
+    async def show_pdf(self, path: str) -> ft.Control:
+        """PDF pages drawn on the computer (pdftoppm) and shown as pictures, at most PDF_PAGES."""
+        command = (f"d=$(mktemp -d); trap 'rm -rf \"$d\"' EXIT; pdftoppm -png -r 90 -l {PDF_PAGES} "
+                   f"{shlex.quote(path)} \"$d/p\" 2>/dev/null || exit 3; "
+                   f"pages=$(pdfinfo {shlex.quote(path)} 2>/dev/null | awk '/^Pages:/{{print $2}}'); echo \"@@pages ${{pages:-?}}\"; "
+                   f"for f in $(ls \"$d\" | sort -V); do echo \"@@page\"; base64 -w0 \"$d/$f\"; echo; done")
+        try:
+            status, output = await asyncio.to_thread(run_command, self.machine, command, 60)
+        except PairingError as e:
+            return t.muted(str(e))
+        if status != 0 or "@@page" not in output:
+            return t.muted("This PDF couldn't be drawn.")
+        total = output.split("@@pages ", 1)[1].split("\n", 1)[0].strip() if "@@pages " in output else "?"
+        pages = [p.strip() for p in output.split("@@page\n")[1:] if p.strip()]
+        controls: list[ft.Control] = [ft.Image(src=base64.b64decode(p), fit=ft.BoxFit.FIT_WIDTH,
+                                               border_radius=4) for p in pages]
+        if total not in ("?", str(len(pages))):
+            controls.append(t.muted(f"Showing the first {len(pages)} of {total} pages.", size=12))
+        return ft.Column(controls, spacing=10)
+
     async def show(self, path: str) -> None:
+        if path.lower().endswith(".pdf"):
+            await self.present(path, await self.show_pdf(path))
+            return
         command = (f"f={shlex.quote(path)}; if LC_ALL=C grep -qP '\\x00' \"$f\" 2>/dev/null; then echo BINARY; "
                    f"else head -c 200000 \"$f\"; fi")
         try:
@@ -231,17 +256,21 @@ class FilesPanel:
         except PairingError as e:
             output = str(e)
         name = posixpath.basename(path)
-        actions: list[ft.Control] = [t.quiet_button("Back", icon=ft.Icons.ARROW_BACK_ROUNDED,
-                                                    on_click=lambda _e: self.page.run_task(self.load))]
-        if host.is_host():
-            actions.append(t.quiet_button("Open", icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
-                                          on_click=lambda _e: subprocess.Popen(["xdg-open", path])))
         if output.strip() == "BINARY":
             body: ft.Control = t.muted("This file isn't text.")
         elif name.lower().endswith((".md", ".markdown")):
             body = ft.Container(transcript.markdown(output), padding=12)
         else:
             body = ft.Container(t.mono(output, selectable=True), padding=12)
+        await self.present(path, body)
+
+    async def present(self, path: str, body: ft.Control) -> None:
+        name = posixpath.basename(path)
+        actions: list[ft.Control] = [t.quiet_button("Back", icon=ft.Icons.ARROW_BACK_ROUNDED,
+                                                    on_click=lambda _e: self.page.run_task(self.load))]
+        if host.is_host():
+            actions.append(t.quiet_button("Open", icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
+                                          on_click=lambda _e: subprocess.Popen(["xdg-open", path])))
         self.preview.content = ft.Column([
             ft.Row([*actions, ft.Text(name, size=13, weight=ft.FontWeight.W_600, expand=True, no_wrap=True,
                                       overflow=ft.TextOverflow.ELLIPSIS)], spacing=4),

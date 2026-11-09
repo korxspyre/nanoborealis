@@ -10,6 +10,8 @@
     rigctl.py send <to> <text...>         mail a seat (id or name@rig), "rig:name", "pod:rig/pod" or "head"
     rigctl.py inbox [seat] [--state S]    your mail, or a seat's
     rigctl.py head                        who leads now, and the line to lead
+    rigctl.py task <title> [-- detail]    put work on the board; the rig's seats claim, do and review it
+    rigctl.py board [task id]             the board, or one task with its notes and result
 
 The Hall's URL and the admin token: NANOBOREALIS_HALL_URL (default http://127.0.0.1:11437) and
 NANOBOREALIS_HALL_ADMIN_TOKEN_FILE (default /var/lib/nanoborealis/hall/admin.token). Tokens of outside seats made new are
@@ -43,7 +45,7 @@ def hall(method: str, path: str, body: dict | None = None):
     except urllib.error.HTTPError as error:
         sys.exit(f"the Hall said {error.code}: {json.loads(error.read() or b'{}').get('error', '')}")
     except urllib.error.URLError as error:
-        sys.exit(f"the Hall didn't answer ({error.reason}): start it with: nanoborealis council apply")
+        sys.exit(f"the Hall didn't answer ({error.reason}): start a rig with: nanoborealis rig up <spec.toml>")
 
 
 def keep_tokens(tokens: dict) -> list[str]:
@@ -80,7 +82,7 @@ def main(argv: list[str]) -> None:
                 print(f"  {key:<7} {', '.join(plan[key])}")
         for line in keep_tokens(answer.get("tokens") or {}):
             print(f"  token   {line}")
-        if answer.get("tokens"):
+        if not answer.get("dry_run") and "kind = \"pool\"" in spec.replace("'", '"'):
             print("Seats the pool runs need their agent started: nanoborealis council apply")
     elif action == "ps":
         if args:
@@ -131,6 +133,22 @@ def main(argv: list[str]) -> None:
             print(f"  [{m['id']}] {m['state']:<9} {m['kind']:<8} from {m['sender']}: {m['text'][:100]}")
         if not mail:
             print("  no mail")
+    elif action == "task" and args:
+        title, _, detail = " ".join(args).partition(" -- ")
+        answer = hall("POST", "/tasks", {"title": title.strip(), "detail": detail.strip()})
+        print(f"task {answer['id']} is on the board; follow it with: nanoborealis rig board {answer['id']}")
+    elif action == "board":
+        if args:
+            task = hall("GET", f"/tasks/{args[0]}")
+            print(f"[{task['id']}] {task['state']}: {task['title']}" + (f" (by {task['claimed_by']})" if task.get("claimed_by") else ""))
+            for note in task.get("notes", []):
+                print(f"  {note['author']} {note['kind']}: {note['text'][:300]}")
+            if task.get("result"):
+                print("\n" + task["result"])
+        else:
+            tasks = hall("GET", "/tasks")["tasks"]
+            print("\n".join(f"  [{t['id']}] {t['state']:<8} {t['title'][:70]}" + (f"  ({t['claimed_by']})" if t.get("claimed_by") else "")
+                            for t in tasks) or "  the board is empty")
     elif action == "head":
         answer = hall("GET", "/head")
         print(f"Head agent: {answer['head']} ({answer['reason']})")

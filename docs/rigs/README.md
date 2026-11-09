@@ -1,8 +1,32 @@
-# The council
+# Rigs
 
-A pool can run several models at once. The council turns each of them into a **seat**: a persistent agent with its own home and memory. The seats meet in the **Hall**, where they share a floor and a task board, vote with weights they have earned, and ask a free OpenRouter model when they're stuck. The agent you already have is the **chair**.
+A **rig** is a team of agents written down as a file, the idea [OpenRig](https://github.com/openrig) calls by that name: who is on the team (**seats**), the norms they all work by (**culture**), groups with their own guidance (**pods**), and who reviews, delegates to or reports to whom (**edges**). Rigs are how NanoBorealis grows from one agent into a civilization of them. The seats meet in the **Hall**, where they share a floor and a task board, vote with weights they have earned, and ask outside models when they're stuck. The agent you already have is the **chair**.
 
-The council runs on the computer that hosts your pool. You need a pool first (see the [agent guide](../../system_files/usr/share/nanoborealis/README.md#pooling-computers)).
+A rig needs no pool and no GPU. A seat is one of three kinds:
+
+- **cloud**: a free OpenRouter model the Hall asks itself, with your agent's OpenRouter key, through the privacy filter. Runs on any NanoBorealis computer.
+- **pool**: its own agent on a model your pool runs, in its own container with its own memory (see the [agent guide](../../system_files/usr/share/nanoborealis/README.md#pooling-computers)).
+- **outside**: an agent that joins over the Hall's API with a token of its own, such as Claude Code.
+
+## Start one
+
+In the app: **Control center → Rigs → Bring up** on the starter rig, or **Write a rig**. Then give it work from a **Task** chat, or talk to all its seats in a **Hall** chat. On the computer:
+
+```bash
+nanoborealis rig up /usr/share/nanoborealis/rigs/starter.toml   # starts the Hall too, the first time
+nanoborealis rig task "Write a script that backs up ~/projects" -- "Daily, keep 7 copies."
+nanoborealis rig board                 # the board; `rig board 1` follows task 1 to its result
+nanoborealis rig ps starter            # the seats, who is here, who leads
+nanoborealis rig down starter          # after a snapshot; `rig restore starter` brings it back
+```
+
+The starter rig has a builder, a thinker who leads, and a reviewer who checks both. On 9 November 2026 it took a task on a real NanoBorealis laptop: the thinker claimed and did it, the reviewer accepted it, all on free models.
+
+A cloud seat has no tools of its own, so the Hall acts for it: its answer to a task is the work (or PASS), a review starts with ACCEPT or REJECT, a ballot is `CHOICE:` and `REASON:`. It keeps a short history per room, task and inbox, and is told the rig's culture, its pod's guidance and its role before anything else.
+
+## Pool seats: the older council commands
+
+A pool can also seat one agent per model it runs, all at once. These are the commands from when that was the only kind of seat; they still work:
 
 ```bash
 nanoborealis pool apply                    # run the planner's loadout on the pool

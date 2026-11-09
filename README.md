@@ -8,7 +8,7 @@
   <a href="LICENSE"><img alt="License: PolyForm Noncommercial 1.0.0" src="https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-8b5cf6"></a>
 </p>
 
-**NanoBorealis** is a Linux desktop that hosts a civilization of AI agents: local models on your own hardware and free cloud models, working together as seats in a council, keeping each other honest with their own benchmarks, and maintaining the system they live on. It's free: it runs on free cloud models and on the computers you already own, pooled together.
+**NanoBorealis** is a Linux desktop that hosts a civilization of AI agents: local models on your own hardware and free cloud models, working together in teams called rigs, keeping each other honest with their own benchmarks, and maintaining the system they live on. It's free: it runs on free cloud models and on the computers you already own, pooled together.
 
 It's built on [Aurora](https://getaurora.dev), a polished KDE Plasma desktop on Fedora Atomic from the [Universal Blue](https://universal-blue.org) family. The agents are [nanobot](https://github.com/HKUDS/nanobot), each in its own container on an immutable OS, so nothing they do can break the system: every update can be rolled back with one reboot.
 
@@ -36,8 +36,8 @@ NanoBorealis is made for people, not businesses. It's free, and it always will b
 | ✦ **Free to run** | It uses free models through [OpenRouter](https://openrouter.ai), with automatic fallback when one is busy. |
 | ✦ **Your hardware, pooled** | Lend a PC's GPU to the agent from the NanoBorealis app, which picks the best model that fits and benchmarks it. Or pool several computers with `nanoborealis pool` to run a model too big for any one of them. The pool planner picks the most capable set of models your hardware can run at agent speed, and corrects its estimates from real benchmarks. |
 | ✦ **Safe without being useless** | The agent runs rootless, in its own account, on an OS it can't change: the system stays intact and every update rolls back with one reboot. |
-| ✦ **A council of models** | Run several models at once on the pool. Each one is a seat with its own memory, and the seats meet in the Hall to discuss, share a task board, review each other's work and vote. A head agent and a watchdog keep the work moving. |
-| ✦ **Trust you can check** | NanoBench, the council's own benchmark, scores every seat on reasoning, format, fidelity, tool use and review. Scores travel with a seat's messages, so the others can weigh what it says, and a seat earns trust by being measured, not by its name. |
+| ✦ **Rigs: teams of agents** | A rig is a team written down as a file: its seats, the culture they work by, and who reviews whom. Seats can be free cloud models (no GPU needed), models your pool runs, or outside agents like Claude Code. They meet in the Hall to discuss, share a task board, review each other's work and vote. A head agent and a watchdog keep the work moving. |
+| ✦ **Trust you can check** | NanoBench, the rigs' own benchmark, scores every seat on reasoning, format, fidelity, tool use and review. Scores travel with a seat's messages, so the others can weigh what it says, and a seat earns trust by being measured, not by its name. |
 | ✦ **Private by default with cloud models** | A proxy on your computer swaps personal details (names, emails, phone numbers, addresses, account numbers, keys) for placeholder tokens before anything reaches a cloud model, and swaps them back in the reply. The mapping never leaves your computer; local models see the real text. |
 | ✦ **Rigs** | A whole civilization of seats described in one file: who sits, on which model, with mail between them, snapshots and restore. `nanoborealis rig`. |
 | ✦ **A coding agent's workbench** | The app works like Claude Code: tool cards, diffs, a changes pane, a terminal, plan-first, checkpoints and `/rewind`, a status bar and the crew of seats at work. |
@@ -84,7 +84,8 @@ nanoborealis rollback       # go back to the previous version
 nanoborealis devices        # devices paired with the NanoBorealis app (pair: pick this computer in the app)
 nanoborealis compute list   # devices lending their hardware to the agent
 nanoborealis pool join      # pool this computer with others to run bigger models
-nanoborealis council apply  # seat one agent per pooled model, meeting in the Hall
+nanoborealis rig up /usr/share/nanoborealis/rigs/starter.toml  # a team of free cloud agents
+nanoborealis rig task "..."  # give it work; `rig board` follows it
 nanoborealis council bench  # run NanoBench on the seats; scores become their trust
 nanoborealis rig            # start, snapshot and restore a civilization of seats from one file
 nanoborealis privacy on     # send the agent's own cloud calls through the tokenizing proxy
@@ -93,7 +94,7 @@ nanoborealis devices developer <id>   # let a paired device work on this compute
 
 **Developing NanoBorealis from inside it.** A device paired with the app can be made a developer device at the computer itself. Its commands and terminals can then run as root, every one logged in `/var/lib/nanoborealis/remote/developer.log`, and `nanoborealis devices developer <id> off` takes it back. [`client/src/devlink.py`](client/src/devlink.py) uses the app's own pairing from a terminal (`run`, `run --root`, `push`, `pull`), which is how Claude works on NanoBorealis as its developer: no SSH, no extra keys.
 
-The agent keeps its projects in `~/nanoborealis-projects`, a folder you share with it. What it can and can't do, how pools work, and what the sandbox doesn't protect against are in the [agent guide](system_files/usr/share/nanoborealis/README.md). How the council works is in [`docs/council`](docs/council/README.md).
+The agent keeps its projects in `~/nanoborealis-projects`, a folder you share with it. What it can and can't do, how pools work, and what the sandbox doesn't protect against are in the [agent guide](system_files/usr/share/nanoborealis/README.md). How rigs work is in [`docs/rigs`](docs/rigs/README.md).
 
 ## The app
 
@@ -110,7 +111,7 @@ NanoBorealis is a [bootc](https://containers.github.io/bootc/) image: the whole 
 
 - **Every build is checked** before it's published: [`tests/image-checks.sh`](tests/image-checks.sh) runs inside the new image, including checks that an upstream update hasn't undone the NanoBorealis look, and the agent and app test suites run against a real nanobot.
 - **Two editions.** Every build comes as NanoBorealis and as NanoBorealis NVIDIA, which adds NVIDIA's open driver and container toolkit so the pool can run models on the GPU. There's one installer: a computer with an NVIDIA GPU moves itself to the NVIDIA edition at first login, and `nanoborealis update --nvidia` or `--standard` switches by hand.
-- **Council.** Seats, the Hall and the app's Agent, Hall and Task modes: see [`docs/council`](docs/council/README.md).
+- **Rigs.** Seats, the Hall and the app's Agent, Hall and Task modes: see [`docs/rigs`](docs/rigs/README.md).
 - **Dev and stable.** One branch, `main`, and two channels, for the OS and the app alike. Every push to `main` (and the nightly rebuild of the OS) publishes the **dev** channel. A release is a tag: pushing `vX.Y.Z` (matching [`client/VERSION`](client/VERSION)) runs the [Release](.github/workflows/release.yml) workflow, which publishes the OS image as `:stable` and `:X.Y.Z` after the image checks pass, releases the app, and puts the installer and the app on the `vX.Y.Z` release. The app's install stick picks which channel a new computer follows, and `nanoborealis update --stable` or `--dev` moves an installed one. The app has the same two channels for its own updates.
 - **Signed.** Images are signed with [cosign](https://github.com/sigstore/cosign), keyless, by this repository's own workflows. To verify one: `cosign verify --certificate-identity-regexp '^https://github.com/korxspyre/nanoborealis/' --certificate-oidc-issuer https://token.actions.githubusercontent.com ghcr.io/korxspyre/nanoborealis:stable`
 - **Pools are proven** before they ship: CI splits one model across two [exo](https://github.com/exo-explore/exo) nodes and chats with it before the pool image is published.
@@ -124,7 +125,7 @@ NanoBorealis is a [bootc](https://containers.github.io/bootc/) image: the whole 
 | [`disk_config/`](disk_config) | Settings for the disk and installer ISO builds |
 | [`branding/`](branding) | The logo, and the scripts that paint the wallpaper, icons and this banner |
 | [`tests/`](tests) | Checks that run inside every built image |
-| [`docs/`](docs) | The council guide, the trademark policy, the commercial-license notice and the README screenshots |
+| [`docs/`](docs) | The rigs guide, the trademark policy, the commercial-license notice and the README screenshots |
 | [`.github/workflows/`](.github/workflows) | Builds, tests, installer ISOs, app releases: every push to `main` publishes the dev channel, and a `vX.Y.Z` tag releases stable |
 
 ## Roadmap
@@ -132,11 +133,11 @@ NanoBorealis is a [bootc](https://containers.github.io/bootc/) image: the whole 
 - **A lighter sandbox.** Containment should stop damage to the system, not stop the agents from being useful. The immutable OS already protects the system; next, the agents get your files and your network, with snapshots so anything they change can be undone, and a confirmation only for what can't.
 - **A mesh of every computer you own.** Install NanoBorealis's node on any machine, even one that can't run a model (a phone in Termux, a Windows PC through WSL2, a Raspberry Pi), and it lends what it has: hardware, a sandbox for the agents' hands, or just a screen.
 - **A flexible inference engine.** Serve the pool from llama.cpp and its forks (ternary models like Bonsai, MoE expert offloading, speculative decoding) as well as exo, so 25 local and 25 cloud agents can run at once on ordinary hardware.
-- **Claude as the head agent.** Claude already develops NanoBorealis through a developer device; next it takes a seat as the council's head agent, with the rest of the civilization doing the volume work under its review.
-- **Council on real hardware.** `council apply`, seats in real containers and the Hall behind the real firewall are tested against stand-ins; the first runs on a real pool are next, as are the NVIDIA, Windows (WSL2) and Android paths.
+- **Claude as the head agent.** Claude already develops NanoBorealis through a developer device; next it takes a seat as a rig's head agent, with the rest of the civilization doing the volume work under its review.
+- **Pool seats on real hardware.** Cloud-seat rigs run on a real NanoBorealis computer. Pool seats (`council apply`, seats in their own containers) are tested against stand-ins; the first runs on a real pool are next, as are the NVIDIA, Windows (WSL2) and Android paths.
 - **GPU pools in CI.** CI has no GPU, so the NVIDIA node is built and started there but proven only on real machines.
 - **Login screen and welcome app.** The desktop, lock screen and boot splash already wear the new look; the login screen and a guided first run are next.
-- **Privacy on by default.** The tokenizing proxy works for the pool relay, the council's escalation and, with `nanoborealis privacy on`, the chair agent's own calls (`tokenizer.py`, `sources.py`, `privacy.py`, mixed across several free models by `mixer.py`). Still to do: making it the default, taking the key out of the agent's reach, and names the owner hasn't listed.
+- **Privacy on by default.** The tokenizing proxy works for the pool relay, the Hall's escalation and cloud seats and, with `nanoborealis privacy on`, the chair agent's own calls (`tokenizer.py`, `sources.py`, `privacy.py`, mixed across several free models by `mixer.py`). Still to do: making it the default, taking the key out of the agent's reach, and names the owner hasn't listed.
 - **Signed macOS app, and install sticks from a Mac.**
 
 ## Credits

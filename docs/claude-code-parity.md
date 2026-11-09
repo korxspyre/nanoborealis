@@ -8,7 +8,7 @@ Status: design only. No client code was changed.
 
 - **Claude Code facts** come from the public docs at `code.claude.com/docs/en/`, fetched on 2026-11-05: overview, permission-modes, checkpointing, desktop, hooks, statusline, sub-agents. For the long pages (desktop, hooks, permission-modes, sub-agents) the fetch tool read only the first ~100k characters of 120–290k, so details past that are unread.
 - **Not verified against their own pages** (known only from the overview page's summary, so treat details as unconfirmed): skills frontmatter, MCP configuration, CLAUDE.md/auto-memory loading rules, session resume/branch, worktree internals, plugins, scheduled tasks, `/btw` behaviour beyond one line.
-- **Client facts** come from reading `client/README.md` and the source files named below. **Agent facts** come from `system_files/usr/share/nanoborealis/README.md`, `docs/council/README.md` and the client's handling of nanobot events. I did not run nanobot 0.3.5, so what it can emit (for example approval events) is inferred from what the client handles, and is marked where it matters.
+- **Client facts** come from reading `client/README.md` and the source files named below. **Agent facts** come from `system_files/usr/share/nanoborealis/README.md`, `docs/rigs/README.md` and the client's handling of nanobot events. I did not run nanobot 0.3.5, so what it can emit (for example approval events) is inferred from what the client handles, and is marked where it matters.
 
 ## 1. What the client is today (grounded)
 

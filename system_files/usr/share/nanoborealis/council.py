@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (C) 2026 korxspyre
-"""The council's seats, for `nanoborealis council` (docs/council/README.md).
+"""The council's seats, for `nanoborealis council` (docs/rigs/README.md).
 
 A seat is one model of the pool's loadout, run as its own nanobot agent: its own container, home
 and memory, its model reached through the pool relay, and the council's tools switched on by its

@@ -17,7 +17,7 @@
 
     "super": {
       "provider": "openrouter",
-      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "model": "nvidia/nemotron-3.5-super-vl:free",
       "maxTokens": 8192,
       "contextWindowTokens": 262144,
       "temperature": 0.2
@@ -31,17 +31,17 @@
       "temperature": 0.2
     },
 
-    "qwen": {
+    "coder": {
       "provider": "openrouter",
-      "model": "qwen/qwen3.8-27b:free",
+      "model": "cohere/north-mini-code:free",
       "maxTokens": 8192,
       "contextWindowTokens": 262144,
       "temperature": 0.2
     },
 
-    "inkling": {
+    "dots": {
       "provider": "openrouter",
-      "model": "thinkingmachines/inkling:free",
+      "model": "dots-studio/dots-3-note-preview:free",
       "maxTokens": 8192,
       "contextWindowTokens": 262144,
       "temperature": 0.2

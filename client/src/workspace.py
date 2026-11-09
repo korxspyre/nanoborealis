@@ -56,7 +56,7 @@ CONTROL_PAGES = [
     ("memory", "Memory", ft.Icons.PSYCHOLOGY_OUTLINED),
     ("devices", "Devices", ft.Icons.DEVICES_OUTLINED),
     ("pool", "Pool", ft.Icons.HUB_OUTLINED),
-    ("council", "Council", ft.Icons.GROUPS_OUTLINED),
+    ("council", "Rigs", ft.Icons.GROUPS_OUTLINED),
     ("logs", "Logs", ft.Icons.RECEIPT_LONG_OUTLINED),
     ("settings", "Settings", ft.Icons.SETTINGS_OUTLINED),
 ]
@@ -321,8 +321,8 @@ class Workspace:
         ])
 
     def mode_switch(self) -> ft.Control:
-        modes = [("agent", "Agent", "Your agent, or one council seat"), ("hall", "Hall", "The whole council at once"),
-                 ("task", "Task", "Give the council work")]
+        modes = [("agent", "Agent", "Your agent, or one seat of a rig"), ("hall", "Hall", "Every seat of your rigs at once"),
+                 ("task", "Task", "Put work on the rigs' board")]
         chips = [ft.Container(
             content=ft.Text(label, size=12.5, weight=ft.FontWeight.W_600,
                             color=t.ON_ACCENT if key == self.mode else t.MUTED),
@@ -483,7 +483,7 @@ class Workspace:
                     ft.Text(title, size=20, weight=ft.FontWeight.W_600),
                     t.muted(council.problem or ("Pick a Hall chat on the left, or start one: every seat reads it, "
                                                 "and each answers in turn." if self.mode == "hall" else
-                                                "Pick a task on the left, or post one: the council offers it to its "
+                                                "Pick a task on the left, or post one: the rig offers it to its "
                                                 "seats, and another seat reviews the result.")),
                 ], spacing=8), padding=32)
             else:
@@ -1601,7 +1601,7 @@ class Workspace:
         await council.load()
         if council.problem:
             self.crew_holder.visible = False
-            self.toast(f"No council to show: {council.problem}")
+            self.toast(f"No rig to show: {council.problem}")
             return
         try:
             head = await council.call("GET", "/head")

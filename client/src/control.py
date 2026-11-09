@@ -929,21 +929,96 @@ class ControlCenter:
             ft.Row([t.primary_button("Save", on_click=save)]),
         ], spacing=10, horizontal_alignment=ft.CrossAxisAlignment.STRETCH))
 
-    # -- Council -----------------------------------------------------------------------------------
+    # -- Rigs --------------------------------------------------------------------------------------
+
+    async def rig_up(self, name: str = "", spec: str = "") -> None:
+        self.toast("Bringing the rig up...")
+        try:
+            answer = await asyncio.to_thread(admin.rig_up, self.app.machine, name, spec)
+        except PairingError as e:
+            self.toast(str(e))
+        else:
+            made = ", ".join(answer.get("plan", {}).get("create", [])) or "no new seats"
+            self.toast(f"Rig {answer.get('rig')} is up ({made}).")
+        await self.reload("council")
+
+    async def rig_down(self, name: str) -> None:
+        try:
+            await asyncio.to_thread(admin.hall, self.app.machine, "DELETE", f"/rigs/{name}")
+        except PairingError as e:
+            self.toast(str(e))
+        else:
+            self.toast(f"{name} is down; a snapshot keeps its work for bringing it back.")
+        await self.reload("council")
+
+    def write_rig(self) -> None:
+        """A rig written in the app: TOML, checked by the Hall before anything is made (the plan comes first)."""
+        box = ft.TextField(multiline=True, min_lines=14, max_lines=22, text_style=ft.TextStyle(font_family=t.MONO, size=12.5),
+                           value='[rig]\nname = "my-rig"\nculture = "We stay on the request and check each other\'s work."\n\n'
+                                 '[[seat]]\nid = "builder"\nkind = "cloud"\nmodel = "cohere/north-mini-code:free"\n\n'
+                                 '[[seat]]\nid = "reviewer"\nkind = "cloud"\nmodel = "dots-studio/dots-3-note-preview:free"\nhead = 1\n\n'
+                                 '[[edge]]\nfrom = "reviewer"\nto = "builder"\nkind = "reviews"\n',
+                           border_radius=t.RADIUS, border_color=t.LINE_HI, focused_border_color=t.ACCENT)
+        note = t.muted("Seats are cloud (a free OpenRouter model), pool (a model your pool runs) or outside (an agent like "
+                       "Claude Code that joins with a token). Edges: reviews, delegates, reports_to.", size=12)
+
+        async def plan(_e=None) -> None:
+            try:
+                answer = await asyncio.to_thread(admin.rig_up, self.app.machine, "", box.value or "", True)
+            except PairingError as e:
+                note.value = str(e)
+            else:
+                p = answer["plan"]
+                note.value = "Plan: " + "; ".join(f"{k} {', '.join(p[k])}" for k in ("create", "update", "keep", "remove") if p[k])
+            self.page.update()
+
+        async def up(_e=None) -> None:
+            self.page.pop_dialog()
+            await self.rig_up(spec=box.value or "")
+        self.page.show_dialog(ft.AlertDialog(title=ft.Text("Write a rig"), content=ft.Column([box, note], tight=True, width=620),
+                                             actions=[t.quiet_button("Check the plan", on_click=plan),
+                                                      t.primary_button("Bring it up", on_click=up)]))
 
     async def council(self) -> ft.Control:
-        title, subtitle = "Council", "One agent per model of the pool, meeting in the Hall. Your agent is the chair."
+        title, subtitle = "Rigs", ("Teams of agents written down as a file: who is on the team, how they work together, "
+                                   "and who reviews whom. They meet in the Hall, take work from its board and check each other.")
+        try:
+            overview = await asyncio.to_thread(admin.rigs, self.app.machine)
+        except PairingError as e:
+            return self.frame(title, subtitle, [t.card(t.muted(str(e)))])
+        starters = [t.card(ft.Row([
+            ft.Icon(ft.Icons.GROUPS_OUTLINED, size=20, color=t.VIOLET),
+            ft.Column([ft.Text(s["name"], size=14, weight=ft.FontWeight.W_600), t.muted(s["about"], size=12)], spacing=2, expand=True),
+            t.primary_button("Bring up", on_click=lambda _e, n=s["name"]: self.page.run_task(self.rig_up, n)),
+        ], spacing=12)) for s in overview["specs"] if s["name"] not in {r["name"] for r in overview["rigs"]}]
+        write = t.outline_button("Write a rig", icon=ft.Icons.EDIT_NOTE_ROUNDED, on_click=lambda _e: self.write_rig())
+        if not overview["hall"]:
+            return self.frame(title, subtitle, [
+                t.card(ft.Column([ft.Text("No rig on this computer yet", size=15, weight=ft.FontWeight.W_600),
+                                  t.muted("Bring one up: it needs no pool or GPU. Its seats are free OpenRouter models, "
+                                          "asked through the privacy filter with your agent's OpenRouter key.")], spacing=6)),
+                *starters], actions=[write])
         try:
             seats, settings = await asyncio.gather(asyncio.to_thread(admin.hall, self.app.machine, "GET", "/seats"),
                                                    asyncio.to_thread(admin.hall, self.app.machine, "GET", "/settings"))
+            rigs_detail = await asyncio.gather(*(asyncio.to_thread(admin.hall, self.app.machine, "GET", f"/rigs/{r['name']}")
+                                                 for r in overview["rigs"]))
         except PairingError as e:
-            return self.frame(title, subtitle, [t.card(ft.Column([
-                ft.Text("No council on this computer yet", size=15, weight=ft.FontWeight.W_600),
-                t.muted(str(e)),
-                t.muted("A council seats one agent per model the pool runs. Once the pool serves its loadout, run "
-                        "this in a terminal on the computer:"),
-                t.mono("nanoborealis council apply", selectable=True),
-            ], spacing=8))])
+            return self.frame(title, subtitle, [t.card(t.muted(str(e)))])
+        rig_cards: list[ft.Control] = []
+        for rig in rigs_detail:
+            members = [ft.Row([ft.Icon(ft.Icons.CIRCLE, size=9, color=t.GOOD if s["here"] else t.FAINT),
+                               ft.Text(s["address"] or s["id"], size=13, weight=ft.FontWeight.W_600),
+                               t.muted(f"{s.get('role') or ''} · {s['model']}" + (f" · head #{s['head_rank']}" if s.get("head_rank") else ""),
+                                       size=12)], spacing=8) for s in rig["seats"]]
+            edges = [t.muted(f"{e['src']} {e['kind'].replace('_', ' ')} {e['dst']}", size=12) for e in rig["edges"]]
+            rig_cards.append(t.card(ft.Column([
+                ft.Row([ft.Text(rig["name"], size=15, weight=ft.FontWeight.W_600, expand=True),
+                        t.quiet_button("Take down", icon=ft.Icons.STOP_CIRCLE_OUTLINED,
+                                       on_click=lambda _e, n=rig["name"]: self.page.run_task(self.rig_down, n))]),
+                t.muted(rig["culture"] or "No culture written.", size=12.5), *members, *edges,
+                t.muted("Give it work from a Task chat, or talk to it in a Hall chat.", size=12),
+            ], spacing=6)))
         rows: list[ft.Control] = []
         for seat in seats["seats"]:
             rows.append(ft.Container(ft.Row([
@@ -972,6 +1047,7 @@ class ControlCenter:
 
         continuous = settings["autonomy"] == "continuous"
         body = [
+            *rig_cards, *starters,
             t.card(ft.Column([t.muted(f"SEATS · {len(seats['seats'])}", size=11), *rows,
                               t.muted("A seat's vote counts by its model's capability times the trust it has earned: "
                                       "accepted work and your thumbs up raise it, rejected work lowers it, and it "
@@ -993,7 +1069,7 @@ class ControlCenter:
                                          change, {"escalation": bool(e.control.value)},
                                          "Escalation is on." if e.control.value else "Escalation is off."))])),
         ]
-        return self.frame(title, subtitle, body)
+        return self.frame(title, subtitle, body, actions=[write])
 
     # -- Logs --------------------------------------------------------------------------------------
 

@@ -27,7 +27,7 @@ Your chats live on the NanoBorealis computer, so they carry over everywhere: a c
 
 Not built (needs the agent, not the app): permission prompts and modes that really block a tool call, conversation rewind, hooks, a browser pane, worktrees, subagent definitions. The design for them is in [`docs/claude-code-parity.md`](../docs/claude-code-parity.md).
 
-**Agent, Hall and Task modes.** With a [council](../docs/council/README.md) running, every new chat picks a mode: **Agent** (one agent, the chair or any seat), **Hall** (you and every seat in one room, with nametapes, vote cards and escalations marked) or **Task** (work posted to the board, followed through claims, reviews and the result). Without a council, chats are Agent chats.
+**Agent, Hall and Task modes.** With a [rig](../docs/rigs/README.md) running, every new chat picks a mode: **Agent** (one agent, the chair or any seat), **Hall** (you and every seat in one room, with nametapes, vote cards and escalations marked) or **Task** (work posted to the board, followed through claims, reviews and the result). Without a rig, chats are Agent chats.
 
 **The control center**
 

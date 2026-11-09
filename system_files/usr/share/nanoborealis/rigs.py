@@ -44,7 +44,9 @@ import tomllib
 NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,19}")
 POLICIES = ("floor", "inherit", "full_bypass")  # what a seat may do on its own: only the floor, what its rig allows, anything
 EDGE_KINDS = ("reviews", "delegates", "reports_to")
-KINDS = ("pool", "outside")
+# pool: its own agent on the pool; outside: joins over the API (Claude Code); cloud: a free OpenRouter model the Hall
+# asks itself, through the tokenizer, so a rig runs on a computer without a pool or a GPU.
+KINDS = ("pool", "outside", "cloud")
 MAX_SEATS = 32
 FRESH = 120.0  # seconds a heartbeat counts as being there
 
@@ -100,6 +102,8 @@ def validate(data: dict) -> dict:
         model = str(seat.get("model") or ("an outside agent" if kind == "outside" else ""))
         if kind == "pool" and not model:
             errors.append(f"seat {local}: a pool seat names its model")
+        if kind == "cloud" and not model.endswith(":free"):
+            errors.append(f"seat {local}: a cloud seat names a free OpenRouter model (its id ends in :free)")
         capability = seat.get("capability", 50)
         if isinstance(capability, bool) or not isinstance(capability, (int, float)) or not 0 <= capability <= 100:
             errors.append(f"seat {local}: capability is 0 to 100")
@@ -162,6 +166,11 @@ def briefing(rig: dict | None, pod: dict | None, seat: dict) -> str:
 # -- Who is the head -------------------------------------------------------------------------------------------
 
 
+def askable(seat: dict) -> bool:
+    """The Hall can ask it any time: a pool seat (it has an API) or a cloud seat (the Hall calls its model)."""
+    return seat.get("port") is not None or seat.get("kind") == "cloud"
+
+
 def pick_head(seats: list[dict], presence: dict[str, dict], now: float) -> dict:
     """The head agent: the first seat in line (head_rank) that is there and not worn out, else the strongest seat
     the Hall can ask itself, else the chair. A seat that isn't run by the pool (Claude, say) is there while it
@@ -170,7 +179,7 @@ def pick_head(seats: list[dict], presence: dict[str, dict], now: float) -> dict:
     states = []
     for seat in line:
         beat = presence.get(seat["id"])
-        if seat.get("port") is not None:  # run by the pool: the Hall can ask it any time
+        if askable(seat):  # the Hall can ask it any time
             state = "ready"
         elif not beat or now - float(beat["at"]) > FRESH:
             state = "away"
@@ -180,7 +189,7 @@ def pick_head(seats: list[dict], presence: dict[str, dict], now: float) -> dict:
     for entry in states:
         if entry["state"] == "ready":
             return {"head": entry["seat"], "reason": f"first in line that is here (rank {entry['rank']})", "line": states}
-    asked = sorted((s for s in seats if s.get("port") is not None), key=lambda s: -float(s.get("weight") or 0))
+    asked = sorted((s for s in seats if askable(s)), key=lambda s: -float(s.get("weight") or 0))
     if asked:
         return {"head": asked[0]["id"], "reason": "nobody in line is here, so the strongest seat the Hall can ask steps in", "line": states}
     chair = next((s for s in seats if s.get("chair")), None)

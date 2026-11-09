@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (C) 2026 korxspyre
-"""The Hall: where the council's seats meet (docs/council/README.md).
+"""The Hall: where the council's seats meet (docs/rigs/README.md).
 
 One SQLite database holds the seats, the rooms (Hall chats) and their messages, the task board, the
 votes, the trust ledger and the council's settings. Everything is JSON over HTTP, and every request
@@ -115,7 +115,10 @@ CREATE TABLE IF NOT EXISTS inbox (
 CREATE INDEX IF NOT EXISTS inbox_recipient ON inbox (recipient, state);
 CREATE TABLE IF NOT EXISTS snapshots (id INTEGER PRIMARY KEY, rig TEXT NOT NULL, label TEXT NOT NULL DEFAULT '', data TEXT NOT NULL, at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS presence (seat TEXT PRIMARY KEY, at REAL NOT NULL, status TEXT NOT NULL, note TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS turns (id INTEGER PRIMARY KEY, seat TEXT NOT NULL, session TEXT NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL, at REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS turns_session ON turns (seat, session, id);
 """
+CLOUD_TURNS = 12  # how much of a cloud seat's conversation in one room, task or inbox it is shown again
 MIGRATIONS = [
     ("seats", "port", "INTEGER"),  # where its API is, on this computer (nanobot serve); none for the chair
     ("seats", "api_key", "TEXT"),  # the Hall's key to that API
@@ -126,6 +129,8 @@ MIGRATIONS = [
     # Where a seat sits in a rig (rigs.py), and its place in line to be the head agent.
     ("seats", "rig", "TEXT"), ("seats", "pod", "TEXT"), ("seats", "role", "TEXT"), ("seats", "policy", "TEXT"),
     ("seats", "address", "TEXT"), ("seats", "guidance", "TEXT"), ("seats", "head_rank", "INTEGER"),
+    # pool, outside or cloud (rigs.KINDS). A cloud seat is a free OpenRouter model the Hall asks itself.
+    ("seats", "kind", "TEXT"),
 ]
 
 
@@ -357,6 +362,12 @@ class Hall:
             if data["external"] and (port is not None or data.get("chair")):
                 raise Refused(400, "An outside seat has no API of its own and isn't the chair.")
             self.db.execute("UPDATE seats SET external = ? WHERE id = ?", (int(bool(data["external"])), seat_id))
+        if "kind" in data:
+            if data["kind"] not in ("pool", "outside", "cloud", None):
+                raise Refused(400, "kind is pool, outside or cloud.")
+            if data["kind"] == "cloud" and not model.endswith(":free"):
+                raise Refused(400, "A cloud seat runs a free OpenRouter model (its id ends in :free).")
+            self.db.execute("UPDATE seats SET kind = ? WHERE id = ?", (data["kind"], seat_id))
         for column in ("rig", "pod", "role", "policy", "address", "guidance"):  # where it sits in a rig; left out: unchanged
             if column in data:
                 self.db.execute(f"UPDATE seats SET {column} = ? WHERE id = ?",
@@ -406,7 +417,7 @@ class Hall:
             seat = self.seat(r["id"])
             beat = beats.get(seat["id"])
             seat["mail_waiting"] = self.db.execute("SELECT COUNT(*) FROM inbox WHERE recipient = ? AND state != 'done'", (seat["id"],)).fetchone()[0]
-            seat["here"] = (seat["port"] is not None or bool(beat and now - beat["at"] <= (rigs.FRESH if rigs else 120)))
+            seat["here"] = (seat["port"] is not None or seat.get("kind") == "cloud" or bool(beat and now - beat["at"] <= (rigs.FRESH if rigs else 120)))
             seat["status"] = beat["status"] if beat else None
             seats.append(seat)
         return {"name": name, "culture": row["culture"], "created": row["created"], "seats": seats,
@@ -448,7 +459,8 @@ class Hall:
         tokens = {}
         for s in spec["seats"]:
             made = self.put_seat({"id": s["id"], "name": s["address"], "model": s["model"], "capability": s["capability"],
-                                  "family": "outside" if s["kind"] == "outside" else "", "external": s["kind"] == "outside",
+                                  "family": s["kind"] if s["kind"] != "pool" else "", "external": s["kind"] == "outside",
+                                  "kind": s["kind"],
                                   "rig": spec["name"], "pod": s["pod"], "role": s["role"], "policy": s["policy"],
                                   "address": s["address"], "guidance": s["guidance"], "head_rank": s["head_rank"]})
             if "token" in made:
@@ -616,7 +628,7 @@ class Hall:
         self.need_rigs()
         # Only mail for seats the Hall can ask: an outside seat's mail waits for it, however long that takes.
         items = [dict(r) for r in self.db.execute("SELECT inbox.* FROM inbox JOIN seats ON seats.id = inbox.recipient "
-                                                  "WHERE inbox.state = 'new' AND seats.port IS NOT NULL")]
+                                                  "WHERE inbox.state = 'new' AND (seats.port IS NOT NULL OR seats.kind = 'cloud')")]
         again, give_up = rigs.overdue_mail(items, now, mail_after)
         for item in again:
             self.db.execute("UPDATE inbox SET tries = tries + 1 WHERE id = ?", (item["id"],))
@@ -906,6 +918,31 @@ def reply_text(answer: dict) -> str:
         return ""
 
 
+def cloud_verdict(answer: str) -> tuple[str, str] | None:
+    """A cloud seat's review: ("accept", why) or ("reject", why) from ACCEPT/REJECT on its first line; None if neither."""
+    first, _, rest = (answer or "").strip().partition("\n")
+    word = re.match(r"\W*(ACCEPT|REJECT)\b\W*(.*)", first, re.IGNORECASE)
+    if not word:
+        return None
+    why = " ".join(x for x in (word.group(2).strip(), rest.strip()) if x)
+    if word.group(1).lower() == "reject":
+        return "reject", why or "rejected without a reason"
+    return "accept", why
+
+
+def cloud_choice(answer: str, options: list[str]) -> tuple[str, str] | None:
+    """A cloud seat's ballot from "CHOICE: x / REASON: y"; the option must match one exactly (case aside)."""
+    found = re.search(r"CHOICE:\s*(.+)", answer or "", re.IGNORECASE)
+    if not found:
+        return None
+    said = found.group(1).strip().strip("\"'*.` ")
+    choice = next((o for o in options if o.lower() == said.lower()), None)
+    if choice is None:
+        return None
+    reason = re.search(r"REASON:\s*(.+)", answer, re.IGNORECASE)
+    return choice, reason.group(1).strip()[:2000] if reason else ""
+
+
 class Orchestrator:
     def __init__(self, hall: Hall):
         import queue
@@ -992,7 +1029,7 @@ class Orchestrator:
     def seats(self, exclude: tuple = ()) -> list[dict]:
         """The seats the Hall can ask (they have an API: every seat but the chair), weightiest first."""
         def find(h: Hall) -> list[dict]:
-            rows = {r["id"]: r for r in h.db.execute("SELECT id, port, api_key FROM seats WHERE port IS NOT NULL")}
+            rows = {r["id"]: r for r in h.db.execute("SELECT id, port, api_key FROM seats WHERE port IS NOT NULL OR kind = 'cloud'")}
             found = [{**h.seat(i), "port": r["port"], "api_key": r["api_key"]} for i, r in rows.items() if i not in exclude]
             return sorted(found, key=lambda s: -s["weight"])
         return self.db(find)
@@ -1020,6 +1057,8 @@ class Orchestrator:
     def ask(self, seat: dict, session: str, prompt: str) -> str:
         """One turn of the seat's agent, in its session for this room or task; "" if it didn't answer."""
         brief = self.briefing(seat)
+        if seat.get("kind") == "cloud":
+            return self.ask_cloud(seat, session, prompt, brief)
         if brief:
             prompt = f"{brief}\n\n{prompt}"
         try:
@@ -1030,6 +1069,46 @@ class Orchestrator:
             print(f"nanoborealis-hall: {seat['id']} didn't answer: {e}", file=sys.stderr, flush=True)
             return ""
         return reply_text(answer)
+
+    def cloud_source(self):
+        """OpenRouter, free models only, through the tokenizer; None when nothing may go to the cloud."""
+        key_file = STATE / "openrouter.key"
+        if not key_file.exists() or tokenizer is None or sources is None or CLOUD_OFF:
+            return None
+        return sources.Source("openrouter", OPENROUTER_URL.removesuffix("/chat/completions"), "external",
+                              free_only=True, extra=FREE_ONLY, key_file=str(key_file))
+
+    def ask_cloud(self, seat: dict, session: str, prompt: str, brief: str) -> str:
+        """One turn of a cloud seat: its model is asked directly, with its briefing and its recent turns in this
+        session (the Hall keeps them, as a seat's own agent would). It has no tools: the Hall acts on its answer."""
+        source = self.cloud_source()
+        if source is None:
+            print(f"nanoborealis-hall: {seat['id']} is a cloud seat, and there's no OpenRouter key or the cloud is off",
+                  file=sys.stderr, flush=True)
+            return ""
+        past = self.db(lambda h: [dict(r) for r in h.db.execute(
+            "SELECT role, text FROM (SELECT * FROM turns WHERE seat = ? AND session = ? ORDER BY id DESC LIMIT ?) ORDER BY id",
+            (seat["id"], session, CLOUD_TURNS))])
+        system = (brief + "\n\n" if brief else "") + (
+            f"You are {seat.get('address') or seat['id']}, a member of a team of AI agents on the owner's own computer. "
+            "Stay on what you are asked now; earlier subjects matter only if this message brings them up. "
+            "Answer in plain text. You have no tools: when asked for a fixed form (PASS, ACCEPT, REJECT, CHOICE), use it exactly.")
+        messages = [{"role": "system", "content": system}, *({"role": p["role"], "content": p["text"]} for p in past),
+                    {"role": "user", "content": prompt}]
+        try:
+            answer = sources.chat_once("openrouter", seat["model"], messages, source=source, vault_factory=self.vault,
+                                       timeout=SEAT_TIMEOUT).strip()
+        except Exception as e:  # never print the prompt: only what went wrong
+            # The error's status and kind only (SourceError carries no prompt text).
+            print(f"nanoborealis-hall: {seat['id']} didn't answer: {type(e).__name__} {e if isinstance(e, sources.SourceError) else ''}",
+                  file=sys.stderr, flush=True)
+            return ""
+        if answer:
+            now = time.time()
+            self.db(lambda h: h.db.executemany("INSERT INTO turns (seat, session, role, text, at) VALUES (?, ?, ?, ?, ?)",
+                                               [(seat["id"], session, "user", prompt[:TEXT_LIMIT], now),
+                                                (seat["id"], session, "assistant", answer[:TEXT_LIMIT], now)]))
+        return answer
 
     def advise(self, question: str) -> str:
         """The escalation model's advice, free models only; "" when escalation can't run."""
@@ -1109,6 +1188,18 @@ class Orchestrator:
             task = self.db(lambda h: h.task(task_id))
             if task["state"] != "open":
                 return
+            if seat.get("kind") == "cloud":  # no tools: its answer is the work, or PASS
+                answer = self.ask(seat, f"task-{task_id}",
+                                  f"{board}Task {task_id} is open on the team's board: {task['title']}\n\n{task['detail']}\n\n"
+                                  "If you can do it well, reply with the finished work itself, and nothing else. If it isn't "
+                                  "for you, or a seat above is better at this kind of work, answer exactly PASS.")
+                if answer and not PASS.match(answer):
+                    try:
+                        self.db(lambda h: (h.claim(task_id, seat["id"]), h.submit(task_id, seat["id"], {"result": answer})))
+                    except Refused:
+                        pass  # someone else took it meanwhile
+                    return
+                continue
             self.ask(seat, f"task-{task_id}",
                      f"{board}Task {task_id} is open on the council's board: {task['title']}\n\n{task['detail']}\n\n"
                      "If you can do it well, claim it with task_claim, do it, and hand it in with task_submit. "
@@ -1136,9 +1227,20 @@ class Orchestrator:
             author = card_text(self.db(lambda h: h.seat(task["claimed_by"]))["scorecard"])
         except Refused:
             author = "not benchmarked yet"
-        self.ask(reviewer, f"task-{task_id}",
-                 f"{task['claimed_by']} (its scorecard: {author}) handed in task {task_id} ({task['title']}):\n\n"
-                 f"{task['result']}\n\nReview it honestly with task_review: accept it, or reject it and say what's wrong. "
+        handed = (f"{task['claimed_by']} (its scorecard: {author}) handed in task {task_id} ({task['title']}):\n\n"
+                  f"{task['detail']}\n\nThe work:\n{task['result']}\n\n")
+        if reviewer.get("kind") == "cloud":  # no tools: ACCEPT, or REJECT and why
+            answer = self.ask(reviewer, f"task-{task_id}", handed + "Review it honestly. Answer ACCEPT on the first line if it "
+                              "does the task well, or REJECT on the first line and then what's wrong.")
+            verdict = cloud_verdict(answer)
+            if verdict:
+                try:
+                    self.db(lambda h: h.review(task_id, reviewer["id"], {"verdict": verdict[0], "text": verdict[1]}))
+                except Refused:
+                    pass
+            return
+        self.ask(reviewer, f"task-{task_id}", handed +
+                 "Review it honestly with task_review: accept it, or reject it and say what's wrong. "
                  "A seat weak at review shouldn't wave work through, and a strong author still needs checking.")
 
     def on_revise(self, task_id: int) -> None:
@@ -1147,6 +1249,15 @@ class Orchestrator:
         if worker is None or task["state"] != "claimed":
             return
         why = next((n["text"] for n in reversed(task["notes"]) if n["kind"] == "reject"), "")
+        if worker.get("kind") == "cloud":
+            answer = self.ask(worker, f"task-{task_id}", f"Your work on task {task_id} was sent back: {why}\n\n"
+                                                         "Reply with the corrected work itself, and nothing else.")
+            if answer:
+                try:
+                    self.db(lambda h: h.submit(task_id, worker["id"], {"result": answer}))
+                except Refused:
+                    pass
+            return
         self.ask(worker, f"task-{task_id}", f"Your work on task {task_id} was sent back: {why}\n\n"
                                             "Fix it and hand it in again with task_submit.")
 
@@ -1189,7 +1300,17 @@ class Orchestrator:
             vote = self.db(lambda h: h.vote(vote_id))
             if vote["closed"]:
                 return
-            if seat["id"] in vote["waiting_for"]:
+            if seat["id"] in vote["waiting_for"] and seat.get("kind") == "cloud":
+                answer = self.ask(seat, f"vote-{vote_id}", f"{board}The team is voting (vote {vote_id}): {vote['question']}\n"
+                                  f"Options: {' / '.join(vote['options'])}\n\nAnswer with CHOICE: <one option, exactly as "
+                                  "written> on the first line and REASON: <one sentence> on the second.")
+                choice = cloud_choice(answer, vote["options"])
+                if choice:
+                    try:
+                        self.db(lambda h: h.ballot(vote_id, seat["id"], {"choice": choice[0], "reason": choice[1]}))
+                    except Refused:
+                        pass
+            elif seat["id"] in vote["waiting_for"]:
                 self.ask(seat, f"vote-{vote_id}", f"{board}The council is voting (vote {vote_id}): {vote['question']}\n"
                                                   f"Options: {' / '.join(vote['options'])}\n\n"
                                                   "Cast your ballot with the vote tool, with a short reason.")
