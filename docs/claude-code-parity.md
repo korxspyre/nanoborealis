@@ -2,7 +2,7 @@
 
 Goal: the client (`client/`, Python + Flet) should offer the same features, UI and workflow as Claude Code (the CLI and the desktop Code tab), with two things Claude Code doesn't have: a **council of models** (Hall, seats, task board) and a **pool** of computers. One hard rule runs through every section: anything that reaches a cloud model goes through the reversible tokenization proxy (`system_files/usr/share/nanoborealis/tokenizer.py`, `sources.py`, used by `nanoborealis-relay`). No UI feature below may add a path around it.
 
-Status: design only. No client code was changed.
+Status (2026-11-09): built. What this plan proposed is in the app and the agent image: the status bar, plan first, permission modes per chat (Auto, Accept edits, Ask first, Plan only; the image's `gate.py` enforces them around nanobot's shell and file tools, and the questions go to any of your devices), `/rewind` of the conversation (nanobot's `fork_chat`) and the files, hooks in Claude Code's format (PreToolUse, PostToolUse), named subagents (`subagents.py` over nanobot's `spawn`), an MCP servers page (nanobot's own MCP settings), `/btw`, skills by name, separate copies on a branch of their own (local clones: `git worktree` paths differ between the host and the container), a Background pane, and a real terminal (`vt.py`). Limits: hooks and modes cover the shell and file tools (not web or MCP tools), subagents run on the chat's model, and a background subagent's report is recognised from the chat's history, which nanobot doesn't mark. The sections below are the original plan, kept for its reasoning.
 
 ## How this was checked
 

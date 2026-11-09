@@ -35,12 +35,12 @@ NanoBorealis is made for people, not businesses. It's free, and it always will b
 | ✦ **An agent, not a chatbot** | It has its own Linux environment with `sudo`, installs its own tools, and builds and tests real projects in a folder you share with it. |
 | ✦ **Free to run** | It uses free models through [OpenRouter](https://openrouter.ai), with automatic fallback when one is busy. |
 | ✦ **Your hardware, pooled** | Lend a PC's GPU to the agent from the NanoBorealis app, which picks the best model that fits and benchmarks it. Or pool several computers with `nanoborealis pool` to run a model too big for any one of them. The pool planner picks the most capable set of models your hardware can run at agent speed, and corrects its estimates from real benchmarks. |
-| ✦ **Safe without being useless** | The agent runs rootless, in its own account, on an OS it can't change: the system stays intact and every update rolls back with one reboot. |
+| ✦ **Safe without being useless** | The agent runs rootless, in its own account, on an OS it can't change, so the system stays intact and every update rolls back with one reboot. It still gets your network, and your files through hands. What makes that safe is undo: hourly snapshots of your homes and projects, a checkpoint before every job on your devices, and a question only before what can't be taken back. |
+| ✦ **Hands on every device** | Lend a PC's or a phone's hands from the app, and the agents work on it as you would: in your files, with your tools. Every job names the request it serves and the folders it's about. Inside them it runs; outside them, or anything permanent, it waits for you to answer on any of your devices. A few things never run. |
 | ✦ **Rigs: teams of agents** | A rig is a team written down as a file: its seats, the culture they work by, and who reviews whom. Seats can be free cloud models (no GPU needed), models your pool runs, or outside agents like Claude Code. They meet in the Hall to discuss, share a task board, review each other's work and vote. A head agent and a watchdog keep the work moving. |
 | ✦ **Trust you can check** | NanoBench, the rigs' own benchmark, scores every seat on reasoning, format, fidelity, tool use and review. Scores travel with a seat's messages, so the others can weigh what it says, and a seat earns trust by being measured, not by its name. |
 | ✦ **Private by default with cloud models** | A proxy on your computer swaps personal details (names, emails, phone numbers, addresses, account numbers, keys) for placeholder tokens before anything reaches a cloud model, and swaps them back in the reply. The mapping never leaves your computer; local models see the real text. |
-| ✦ **Rigs** | A whole civilization of seats described in one file: who sits, on which model, with mail between them, snapshots and restore. `nanoborealis rig`. |
-| ✦ **A coding agent's workbench** | The app works like Claude Code: tool cards, diffs, a changes pane, a terminal, plan-first, checkpoints and `/rewind`, a status bar and the crew of seats at work. |
+| ✦ **A coding agent's workbench** | The app works like Claude Code: tool cards and diffs, permission modes per chat (Auto, Accept edits, Ask first, Plan only), `/rewind` of the conversation and the files, hooks, named subagents, MCP servers, `/btw` side questions, skills by name, separate copies on their own branch, a Background pane, a real terminal for `top` and `vim`, a status bar and the crew of seats at work. |
 | ✦ **Every device, one history** | Chat from the desktop, the WebUI, or the NanoBorealis app on any computer. Your chats live on your machine and show up everywhere. |
 | ✦ **Updates you control** | Nothing updates by itself. Builds are tested on the dev channel, released to stable, then installed only when you say so, and the previous version stays one reboot away. |
 
@@ -89,6 +89,8 @@ nanoborealis rig task "..."  # give it work; `rig board` follows it
 nanoborealis council bench  # run NanoBench on the seats; scores become their trust
 nanoborealis rig            # start, snapshot and restore a civilization of seats from one file
 nanoborealis privacy on     # send the agent's own cloud calls through the tokenizing proxy
+nanoborealis snapshot list  # undo: hourly copies of homes and projects; `snapshot restore <id> <path>`
+nanoborealis lan off        # keep the agent off your local network (it's on by default)
 nanoborealis devices developer <id>   # let a paired device work on this computer as root (logged)
 ```
 
@@ -130,8 +132,7 @@ NanoBorealis is a [bootc](https://containers.github.io/bootc/) image: the whole 
 
 ## Roadmap
 
-- **A lighter sandbox.** Containment should stop damage to the system, not stop the agents from being useful. The immutable OS already protects the system; next, the agents get your files and your network, with snapshots so anything they change can be undone, and a confirmation only for what can't.
-- **A mesh of every computer you own.** Install NanoBorealis's node on any machine, even one that can't run a model (a phone in Termux, a Windows PC through WSL2, a Raspberry Pi), and it lends what it has: hardware, a sandbox for the agents' hands, or just a screen.
+- **A mesh of every computer you own.** Hands already reach every device the app runs on; next, devices without the app (a Raspberry Pi, a server) lend theirs through a small node.
 - **A flexible inference engine.** Serve the pool from llama.cpp and its forks (ternary models like Bonsai, MoE expert offloading, speculative decoding) as well as exo, so 25 local and 25 cloud agents can run at once on ordinary hardware.
 - **Claude as the head agent.** Claude already develops NanoBorealis through a developer device; next it takes a seat as a rig's head agent, with the rest of the civilization doing the volume work under its review.
 - **Pool seats on real hardware.** Cloud-seat rigs run on a real NanoBorealis computer. Pool seats (`council apply`, seats in their own containers) are tested against stand-ins; the first runs on a real pool are next, as are the NVIDIA, Windows (WSL2) and Android paths.
