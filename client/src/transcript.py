@@ -346,6 +346,8 @@ class ToolCard:
             target = hint.strip().splitlines()[0]
         self.result: str = ""
         self.failed = False
+        self.ended: float | None = None
+        self.on_finish: Callable[["ToolCard"], None] | None = None  # the Background pane follows spawned subagents
         self.diff_text: str | None = None  # nanobot's own unified diff of the edit, when it sent one
         self.status = ft.Container(ft.ProgressRing(width=12, height=12, stroke_width=1.6, color=t.ACCENT),
                                    width=18, height=18, alignment=ft.Alignment.CENTER)
@@ -395,9 +397,16 @@ class ToolCard:
             return (len(content.splitlines()), 0) if isinstance(content, str) else None
         return None
 
+    @property
+    def running(self) -> bool:
+        return self.ended is None
+
     def finish(self, result: Any, failed: bool = False) -> None:
         self.result = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, indent=2)
         self.failed = failed
+        self.ended = time.monotonic()
+        if self.on_finish is not None:
+            self.on_finish(self)
         self.status.content = ft.Icon(ft.Icons.CLOSE_ROUNDED if failed else ft.Icons.CHECK_ROUNDED, size=15,
                                       color=t.BAD if failed else t.GOOD)
         seconds = time.monotonic() - self.started

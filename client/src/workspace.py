@@ -195,6 +195,7 @@ class Workspace:
         self.plan_mode = False
         self.agent_mode = "auto"  # this chat's permission mode for the agent's own tools (gate.py on the computer)
         self.skill_commands: dict[str, str] = {}  # "/code-review" -> the skill it runs
+        self.background: dict[str, dict] = {}  # spawned subagents' task ids -> label, chat, when, done
         self.side_listeners: list[Any] = []  # /btw answers streaming in, from temporary chats
         self.side_chats: set[str] = set()
         self.plan_turn = False  # the turn running now was sent as a plan request
@@ -226,7 +227,9 @@ class Workspace:
             kind: t.icon_button(icon, tip, on_click=lambda _e, k=kind: self.page.run_task(self.toggle_panel, k))
             for kind, icon, tip in (("terminal", ft.Icons.TERMINAL_ROUNDED, "Terminal (Ctrl+J)"),
                                     ("files", ft.Icons.FOLDER_OUTLINED, "Projects folder (Ctrl+E)"),
-                                    ("changes", ft.Icons.DIFFERENCE_OUTLINED, "Changes"))
+                                    ("changes", ft.Icons.DIFFERENCE_OUTLINED, "Changes"),
+                                    ("background", ft.Icons.PENDING_ACTIONS_ROUNDED,
+                                     "Background: subagents, the rigs' board, jobs on your devices"))
         }
         header = ft.Container(
             height=50, padding=ft.Padding.only(left=10, right=12), bgcolor=t.BG,
@@ -781,9 +784,11 @@ class Workspace:
         if view is None:
             view = {"terminal": lambda: panels.TerminalPanel(self.page, machine),
                     "files": lambda: panels.FilesPanel(self.page, machine, self.mention),
-                    "changes": lambda: panels.ChangesPanel(self.page, machine)}[kind]()
+                    "changes": lambda: panels.ChangesPanel(self.page, machine),
+                    "background": lambda: panels.BackgroundPanel(self.page, machine, self)}[kind]()
             self.panel_views[kind] = view
-        titles = {"terminal": f"Terminal · {machine.name}", "files": "Projects", "changes": "Changes"}
+        titles = {"terminal": f"Terminal · {machine.name}", "files": "Projects", "changes": "Changes",
+                  "background": "Background"}
         self.panel_kind = kind
         self.panel.content = ft.Column(expand=True, spacing=10, controls=[
             ft.Row([ft.Text(titles[kind], size=13.5, weight=ft.FontWeight.W_600, color=t.TEXT, expand=True),
@@ -798,6 +803,9 @@ class Workspace:
         await view.start()
 
     def close_panel(self) -> None:
+        background = self.panel_views.get("background")
+        if background is not None:
+            background.stop()  # it polls only while it's open
         self.panel.visible = False
         self.panel_kind = None
         for button in self.panel_buttons.values():
@@ -1185,6 +1193,7 @@ class Workspace:
         card = self.tools.get(call_id)
         if card is None:
             card = transcript.ToolCard(name, args, hint)
+            card.on_finish = self.note_background
             self.tools[call_id] = card
             self.add(card.view)
             verb, _target, _icon = transcript.describe(card.name, card.args)
@@ -1886,6 +1895,15 @@ class Workspace:
                     pass
 
     # -- Keys and focus ------------------------------------------------------------------------------
+
+    def note_background(self, card: Any) -> None:
+        """A spawned subagent works on after its tool call ends: the Background pane follows it until it reports."""
+        if card.name not in ("spawn", "subagent") or card.failed:
+            return
+        found = re.search(r"Subagent \[(.*?)\] started \(id: ([\w-]+)\)", card.result or "")
+        if found and self.chat_id:
+            self.background[found.group(2)] = {"label": found.group(1), "chat_id": self.chat_id, "started": time.time(),
+                                               "done": None}
 
     def release_terminal(self) -> None:
         term = self.panel_views.get("terminal")

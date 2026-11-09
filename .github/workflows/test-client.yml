@@ -168,6 +168,10 @@ jobs:
       - name: Terminal screen
         run: '"$RUNNER_TEMP/venv/bin/python" client/dev/vt_check.py'
 
+      # The Background pane: when a background subagent has reported, from a chat's history.
+      - name: Background pane
+        run: '"$RUNNER_TEMP/venv/bin/python" client/dev/background_check.py'
+
       # The screens for them, and the workspace around them, built without a window.
       - name: Coding-agent screens build
         run: '"$RUNNER_TEMP/venv/bin/python" client/dev/codeui_check.py'

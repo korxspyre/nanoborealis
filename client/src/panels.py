@@ -15,6 +15,7 @@ import json
 import posixpath  # paths on the computer, which is Linux whatever this device is
 import shlex
 import subprocess
+import time
 from typing import Callable
 
 import flet as ft
@@ -331,6 +332,114 @@ class FilesPanel:
         ], expand=True, spacing=8)
         self.list.visible = False
         self.preview.visible = True
+        self.page.update()
+
+
+def subagent_reported(messages: list[dict], task_id: str) -> bool:
+    """Whether a background subagent has reported, from the chat's history: nanobot doesn't mark its report there,
+    but the report always comes as the agent speaking again after acknowledging the spawn, before you say anything
+    else. So: after the spawn call that started `task_id`, the acknowledgement, then another answer of the agent's
+    with no message of yours in between (or the subagent's own words, when nanobot keeps them as their own row)."""
+    start = next((i for i, m in enumerate(messages)
+                  if f"(id: {task_id})" in json.dumps(m.get("toolEvents") or m.get("content") or "", default=str)), None)
+    if start is None:
+        return False
+    answers = 0
+    for m in messages[start + 1:]:
+        if m.get("role") == "user":
+            return False
+        if m.get("role") == "assistant" and str(m.get("content") or "").strip():
+            answers += 1
+            if answers >= 2:
+                return True
+    return False
+
+
+class BackgroundPanel:
+    """Everything working on the side, in one list, like Claude Code's background tasks: this chat's tool calls
+    still running, subagents working in the background until they report, the rigs' board, and the agents' jobs
+    on your devices with what they're waiting on you for. It refreshes every few seconds while it's open."""
+
+    EVERY = 4.0
+
+    def __init__(self, page: ft.Page, machine: Machine, workspace):
+        self.page, self.machine, self.workspace = page, machine, workspace
+        self.list = ft.ListView(spacing=6, expand=True)
+        self.view = ft.Column([self.list], expand=True)
+        self.running = False
+
+    async def start(self) -> None:
+        if not self.running:
+            self.running = True
+            self.page.run_task(self.loop)
+
+    def stop(self) -> None:
+        self.running = False
+
+    async def loop(self) -> None:
+        while self.running:
+            try:
+                await self.refresh()
+            except Exception as e:  # one bad read never stops the pane
+                print(f"nanoborealis-client: background pane: {e!r}")
+            await asyncio.sleep(self.EVERY)
+
+    def section(self, title: str, rows: list[ft.Control], empty: str) -> list[ft.Control]:
+        return [t.muted(title, size=11), *(rows or [t.muted(empty, size=12)])]
+
+    def item(self, icon: str, title: str, detail: str, color: str = t.ACCENT, on_click=None) -> ft.Control:
+        return ft.Container(ft.Row([ft.Icon(icon, size=16, color=color),
+                                    ft.Column([ft.Text(title, size=13, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS),
+                                               t.muted(detail, size=11.5)], spacing=0, expand=True)], spacing=8),
+                            padding=ft.Padding.symmetric(horizontal=8, vertical=6), border_radius=8, bgcolor=t.SIDEBAR,
+                            ink=on_click is not None, on_click=on_click)
+
+    async def refresh(self) -> None:
+        import admin
+        ws = self.workspace
+        now = time.time()
+        tools = [self.item(ft.Icons.PENDING_OUTLINED, f"{c.name}", f"running for {time.monotonic() - c.started:.0f}s")
+                 for c in list(ws.tools.values()) if getattr(c, "running", False)]
+        # Subagents: done once their report is in their chat's history.
+        pending = {tid: b for tid, b in ws.background.items() if not b["done"]}
+        if pending and ws.app.link is not None:
+            for chat in {b["chat_id"] for b in pending.values()}:
+                try:
+                    thread = await ws.app.link.load_thread(chat)
+                except Exception:
+                    continue
+                messages = thread.get("messages") or []
+                for tid, b in pending.items():
+                    if b["chat_id"] == chat and subagent_reported(messages, tid):
+                        b["done"] = now
+        subagents = [self.item(ft.Icons.CALL_SPLIT_ROUNDED if not b["done"] else ft.Icons.CHECK_ROUNDED, b["label"],
+                               (f"reported {int(now - b['done'])}s ago" if b["done"] else
+                                f"working for {int(now - b['started'])}s" if now - b["started"] < 1800 else
+                                "no report seen: look in its chat"),
+                               t.GOOD if b["done"] else t.VIOLET)
+                     for b in sorted(ws.background.values(), key=lambda b: -b["started"])[:12]]
+        try:
+            tasks = [x for x in (await asyncio.to_thread(admin.hall, self.machine, "GET", "/tasks"))["tasks"]
+                     if x["state"] in ("open", "claimed", "review")]
+        except Exception:
+            tasks = []
+        board = [self.item(ft.Icons.ASSIGNMENT_OUTLINED, x["title"], f"{x['state']}" + (f" · {x['claimed_by']}" if x.get("claimed_by") else ""),
+                           on_click=lambda _e, tid=x["id"]: self.page.run_task(ws.show_section, f"council:task:{tid}"))
+                 for x in tasks[:12]]
+        try:
+            lending = await asyncio.to_thread(admin.hands_devices, self.machine)
+            asks = await asyncio.to_thread(admin.hands_asks, self.machine)
+        except Exception:
+            lending, asks = [], []
+        devices = [self.item(ft.Icons.FRONT_HAND_OUTLINED, d["name"], f"{d['running']} running, {d['queued']} waiting")
+                   for d in lending if d.get("running") or d.get("queued")]
+        devices += [self.item(ft.Icons.HELP_OUTLINE_ROUNDED, f"Waiting for you: {a['command'][:60]}",
+                              f"{a['device_name']} · {a['reason']}", t.WARN,
+                              on_click=lambda _e, a=a: ws.app.hands.show_ask(a)) for a in asks]
+        self.list.controls = [*self.section("THIS CHAT", tools, "Nothing running."),
+                              *self.section("SUBAGENTS", subagents, "None in the background."),
+                              *self.section("RIGS' BOARD", board, "Nothing on the board."),
+                              *self.section("YOUR DEVICES", devices, "No agent jobs on your devices.")]
         self.page.update()
 
 
