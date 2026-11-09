@@ -52,5 +52,10 @@ hands.handle({"id": "j2", "command": read, "cwd": work, "task": {"request": "rea
              policy, lambda *a: "deny", log)
 check(len(checkpoints.entries()) == 1, "a job that only reads takes no checkpoint")
 
+home = str(hands.home().parent.parent)  # a shared folder that holds the checkpoints themselves (a phone's app folder)
+point = checkpoints.take([home], "j3", "touch x")
+check(home in point["folders"] and not os.path.exists(checkpoints.base() / point["id"] / "0" / "NanoBorealis" / "hands" / "checkpoints"),
+      "a folder holding the checkpoints doesn't copy them into themselves")
+
 print("checkpoint checks passed" if not failed else f"{failed} checkpoint check(s) failed")
 sys.exit(1 if failed else 0)

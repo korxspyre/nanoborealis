@@ -64,7 +64,16 @@ def take(folders: list[str], job: str, command: str) -> dict:
         if size > FOLDER_LIMIT:
             skipped[folder] = f"larger than {FOLDER_LIMIT // (1024 * 1024)} MB"
             continue
-        shutil.copytree(source, where / str(i), symlinks=True, ignore=shutil.ignore_patterns(*SKIP),
+        store = os.path.normcase(os.path.realpath(base()))
+        skip = shutil.ignore_patterns(*SKIP)
+
+        def ignore(folder: str, names: list[str]) -> set[str]:
+            # Never the checkpoints themselves: a shared folder that holds them (a phone's app folder) would copy
+            # each checkpoint into itself until the path is too long.
+            out = set(skip(folder, names))
+            out |= {n for n in names if os.path.normcase(os.path.realpath(os.path.join(folder, n))) == store}
+            return out
+        shutil.copytree(source, where / str(i), symlinks=True, ignore=ignore,
                         ignore_dangling_symlinks=True, dirs_exist_ok=True)
         copied.append(folder)
     (where / "checkpoint.json").write_text(json.dumps({"id": cid, "at": time.time(), "command": command, "job": job,
