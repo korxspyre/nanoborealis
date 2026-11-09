@@ -38,8 +38,23 @@ OUTPUT_LIMIT = 400_000  # the end of a job's output that's sent back
 ANDROID = "ANDROID_ROOT" in os.environ or hasattr(sys, "getandroidapilevel")
 
 
+def data_root() -> Path:
+    """Where this app may keep files: %LOCALAPPDATA% on Windows; on a phone, the app's own data folder (Flet's
+    FLET_APP_STORAGE_DATA: Android's home is /data, which an app can't write); else ~/.local/share."""
+    for candidate in (os.environ.get("LOCALAPPDATA"), os.environ.get("FLET_APP_STORAGE_DATA"),
+                      None if ANDROID else str(Path.home() / ".local" / "share")):
+        if candidate:
+            try:
+                Path(candidate).mkdir(parents=True, exist_ok=True)
+                return Path(candidate)
+            except OSError:
+                continue
+    import tempfile
+    return Path(tempfile.gettempdir())
+
+
 def home() -> Path:
-    base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".local" / "share") / "NanoBorealis" / "hands"
+    base = data_root() / "NanoBorealis" / "hands"
     base.mkdir(parents=True, exist_ok=True)
     return base
 

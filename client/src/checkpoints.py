@@ -28,7 +28,8 @@ KEEP_AT_LEAST = 5
 
 
 def base() -> Path:
-    root = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".local" / "share") / "NanoBorealis" / "hands" / "checkpoints"
+    import hands  # its data_root knows where a phone lets the app keep files
+    root = hands.home() / "checkpoints"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
