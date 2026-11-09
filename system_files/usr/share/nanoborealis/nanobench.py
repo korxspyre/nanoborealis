@@ -207,7 +207,7 @@ def run(call: Callable[[list[dict], list | None], dict], n: int = 6, seed: int |
     """The suite against `call(messages, tools) -> assistant message`. Returns the results to post to the Hall."""
     seed = int(time.time() // 86400) if seed is None else seed
     results = {a: {"passed": 0, "n": 0} for a in areas}
-    errors = 0
+    errors = empty = 0
     items = build(random.Random(seed), n, areas)
     for item in items:
         try:
@@ -215,12 +215,20 @@ def run(call: Callable[[list[dict], list | None], dict], n: int = 6, seed: int |
         except Exception:  # down, rate limited, refused: not the model's mistake, and not counted
             errors += 1
             continue
+        if isinstance(message, dict) and not content(message).strip() and not message.get("tool_calls"):
+            # No answer at all: a reasoning model that spent its whole token budget thinking. That says the budget
+            # was too small, not that the model got it wrong (Bonsai 2 scored 0/5 on fidelity this way, and 5/5
+            # with room to finish), so it isn't counted either.
+            errors += 1
+            empty += 1
+            continue
         results[item.area]["n"] += 1
         if item.check(message if isinstance(message, dict) else {"content": str(message or "")}):
             results[item.area]["passed"] += 1
     if errors * 2 > len(items):
         raise BenchError(f"{errors} of {len(items)} items errored: the model isn't answering, so there's no score")
-    return {"suite": SUITE, "seed": seed, "results": {a: r for a, r in results.items() if r["n"]}, "errors": errors}
+    return {"suite": SUITE, "seed": seed, "results": {a: r for a, r in results.items() if r["n"]}, "errors": errors,
+            "empty": empty}
 
 
 def summary(report: dict) -> list[str]:
@@ -244,7 +252,8 @@ def pool_url() -> str:
 
 def caller(route: str, model: str):
     import sources
-    options = {"temperature": 0, "max_tokens": 800}
+    # Room for a reasoning model to think and then answer: at 800, Bonsai 2 27B ran out before answering.
+    options = {"temperature": 0, "max_tokens": 4096}
 
     def call(messages: list[dict], tools: list | None) -> dict:
         return sources.chat_message(route, model, messages, tools=tools, options=options, pool_url=pool_url(), timeout=900)
