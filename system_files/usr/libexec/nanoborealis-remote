@@ -1772,7 +1772,11 @@ async def hands_list(data: dict, query: dict, owner: str, device_id: str) -> tup
 
 async def hands_submit(device: str, command: str, timeout: int, by: str, task: dict, cwd: str) -> tuple[int, dict]:
     devices.load()
-    match = [d for d in hands_lending() if d == device or devices.by_id.get(d, {}).get("name", "").lower() == device.lower()]
+
+    def names(d: str) -> set[str]:  # "gentop (Windows)" also answers to "gentop": agents drop the suffix
+        name = devices.by_id.get(d, {}).get("name", "").lower()
+        return {d.lower(), name, name.split(" (")[0].strip()}
+    match = [d for d in hands_lending() if device.strip().lower() in names(d)]
     if not match:
         names = ", ".join(devices.by_id.get(d, {}).get("name", d) for d in hands_lending()) or "none"
         return 404, {"error": f"{device} isn't lending its hands right now (lending: {names})."}
