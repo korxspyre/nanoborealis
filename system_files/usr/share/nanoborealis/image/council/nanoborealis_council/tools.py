@@ -245,3 +245,10 @@ class Escalate(CouncilTool):
             return ToolResult.error("Escalation is turned off for this council.")
         posted = await self.call("POST", f"/rooms/{room}/messages", {"kind": "escalation", "text": question})
         return f"asked for advice (#{posted['id']}); the answer will be posted in room {room}"
+
+
+# Permission modes for the agent's own shell and file tools (gate.py). nanobot imports this module when it loads
+# its plugin tools, before any tool runs, so this is where the gate goes in.
+from . import gate as _gate  # noqa: E402
+
+_gate.install()

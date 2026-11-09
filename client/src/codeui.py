@@ -41,24 +41,37 @@ def when(stamp: int) -> str:
             else time.strftime("%d %b %H:%M", time.localtime(stamp)))
 
 
-def rewind_dialog(items: list[dict], on_restore: Callable[[dict], None], on_close: Callable, note: str = "") -> ft.AlertDialog:
-    """Every checkpoint of this chat, newest first: restore the project's files to how they were before that message."""
+def rewind_dialog(items: list[dict], on_restore: Callable[[dict], None], on_close: Callable, note: str = "",
+                  on_restore_as: Callable[[dict, str], None] | None = None) -> ft.AlertDialog:
+    """Every message of this chat, newest first, as Claude Code's /rewind: go back to just before it in the
+    conversation (a new chat holding everything before it; this one stays), in the project's files (when a
+    checkpoint was saved for it), or both. An item has "label", "at", and "sha" (files) and/or "user_index"."""
     rows: list[ft.Control] = []
     for item in reversed(items):
+        buttons: list[ft.Control] = []
+        if on_restore_as is not None and item.get("user_index") is not None:
+            buttons.append(t.quiet_button("Conversation", on_click=lambda _e, i=item: on_restore_as(i, "conversation")))
+        if item.get("sha"):
+            buttons.append(t.quiet_button("Files", on_click=lambda _e, i=item: (on_restore_as or (lambda x, _w: on_restore(x)))(i, "files")))
+        if on_restore_as is not None and item.get("sha") and item.get("user_index") is not None:
+            buttons.append(t.outline_button("Both", on_click=lambda _e, i=item: on_restore_as(i, "both")))
+        if on_restore_as is None and item.get("sha"):
+            buttons = [t.outline_button("Restore files", on_click=lambda _e, i=item: on_restore(i))]
         rows.append(ft.Container(
             ft.Row([ft.Column([t.text(item["label"] or "(a message)", size=13.5, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
-                               t.muted(when(item["at"]), size=11.5)], spacing=1, expand=True),
-                    t.outline_button("Restore files", on_click=lambda _e, i=item: on_restore(i))],
-                   vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+                               t.muted(when(item["at"]) if item.get("at") else "", size=11.5)], spacing=1, expand=True),
+                    *buttons],
+                   vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=4, wrap=True),
             padding=ft.Padding.symmetric(horizontal=8, vertical=8), border=ft.Border.only(bottom=ft.BorderSide(1, t.LINE))))
     if not rows:
         rows.append(ft.Container(t.muted(note or "No checkpoints in this chat yet. One is saved before each message you send "
                                          "while the chat has a project folder."), padding=16))
     return ft.AlertDialog(
-        title=t.text("Rewind the project's files", size=16, weight=ft.FontWeight.W_600),
-        content=ft.Container(ft.Column([t.muted("Puts the files back as they were just before the message, and takes away files made since. "
-                                                "It saves the present first, so you can undo it. It doesn't change the conversation, or "
-                                                "anything a command did outside the project.", size=12),
+        title=t.text("Rewind", size=16, weight=ft.FontWeight.W_600),
+        content=ft.Container(ft.Column([t.muted("Go back to just before a message. Conversation: a new chat with everything "
+                                                "before it (this chat stays as it is). Files: the project's files as they were "
+                                                "then; the present is saved first, so you can undo it. Commands' effects "
+                                                "outside the project aren't undone (snapshots cover your homes).", size=12),
                                         ft.Column(rows, scroll=ft.ScrollMode.AUTO, spacing=0, height=min(360, 64 * max(1, len(rows))))],
                                        spacing=10, tight=True), width=520),
         actions=[t.quiet_button("Close", on_click=on_close)], bgcolor=t.PANEL)

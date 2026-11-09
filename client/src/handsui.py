@@ -179,9 +179,11 @@ class HandsUI:
                     self.app.workspace.toast(str(e))
 
         program = ask["command"].split()[0] if ask["command"].split() else "it"
+        own = ask.get("device") == "agent"  # the agent's own tools, in a chat's Ask first or Accept edits mode
         self.page.show_dialog(ft.AlertDialog(
             modal=True,
-            title=ft.Text(f"An agent asks to run this on {ask['device_name']}"),
+            title=ft.Text(f"Your agent asks to do this ({ask['by'].removeprefix('your agent ')})" if own else
+                          f"An agent asks to run this on {ask['device_name']}"),
             content=ft.Column([
                 t.muted(f"Why it's asking: {ask['reason']}", size=12.5),
                 t.muted(f"For your request: {ask['request'] or '(none given)'}", size=12.5),
@@ -191,6 +193,7 @@ class HandsUI:
                 t.muted("Unanswered in 10 minutes, it's a no.", size=11.5),
             ], tight=True, spacing=8, width=560),
             actions=[t.quiet_button("Don't run it", on_click=lambda _e: self.page.run_task(answer, "deny")),
-                     t.outline_button(f"Always allow {program} here", on_click=lambda _e: self.page.run_task(answer, "always")),
+                     t.outline_button(f"Always allow {program} in this chat" if own else f"Always allow {program} here",
+                                      on_click=lambda _e: self.page.run_task(answer, "always")),
                      t.primary_button("Run it once", on_click=lambda _e: self.page.run_task(answer, "once"))],
         ))

@@ -699,7 +699,7 @@ async def local(method: str, target: str, headers: list[tuple[str, str]], reader
                                          "developer": 1,
                                          "machine": MACHINE})
     if path.startswith("/nanoborealis/agent-hands"):
-        return await agent_hands(method, path, headers, reader, writer)
+        return await agent_hands(method, target, headers, reader, writer)  # with its query: the mode is per chat
     if (method, path) in ADMIN_ROUTES or (path.startswith(HALL_PREFIX) and method in ("GET", "POST", "DELETE")):
         return await admin(method, target, headers, reader, writer, address)
     owner = None
@@ -1899,13 +1899,86 @@ async def agent_token_keeper() -> None:
         await asyncio.sleep(300)
 
 
+# -- Permission modes for the agent's own tools -------------------------------------------------------
+# Like Claude Code's: per chat, the owner picks how freely the agent's own tools (shell commands and file edits
+# in its container) run: auto (everything; the container and snapshots are the safety net), accept-edits (file
+# edits run, other commands ask), manual (anything that changes something asks) or plan (nothing changes). The
+# modes live here, where the agent can't write them; its tools ask for them (nanoborealis_council/gate.py) and
+# put their questions to the owner the same way devices do (hands_ask).
+
+AGENT_MODES_FILE = STATE / "agent-modes.json"
+AGENT_MODES = ("auto", "accept-edits", "manual", "plan")
+
+
+def agent_modes() -> dict:
+    try:
+        data = json.loads(AGENT_MODES_FILE.read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def agent_mode(chat: str) -> str:
+    modes = agent_modes()
+    mode = modes.get(chat) or modes.get("default") or "auto"
+    return mode if mode in AGENT_MODES else "auto"
+
+
+async def set_agent_mode(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    chat, mode = str(data.get("chat") or "default")[:200], data.get("mode")
+    if mode not in AGENT_MODES:
+        return 400, {"error": f"The mode is one of {', '.join(AGENT_MODES)}."}
+    modes = agent_modes()
+    modes[chat] = mode
+    if len(modes) > 2000:  # old chats' modes go first
+        for old in list(modes)[:len(modes) - 2000]:
+            if old != "default":
+                modes.pop(old, None)
+    temporary = AGENT_MODES_FILE.with_suffix(".tmp")
+    temporary.write_text(json.dumps(modes))
+    os.replace(temporary, AGENT_MODES_FILE)
+    log(f"{owner} set the agent's mode for {chat} to {mode}")
+    return 200, {"chat": chat, "mode": mode}
+
+
+async def get_agent_mode(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    chat = str(query.get("chat") or "default")
+    return 200, {"chat": chat, "mode": agent_mode(chat)}
+
+
+async def agent_ask(data: dict) -> tuple[int, dict]:
+    """The agent's own tool asks the owner (a shell command or an edit in its container, in manual mode)."""
+    hands_asks_tidy()
+    ask = hands_asks.get(str(data.get("id") or ""))
+    if ask is None or ask.device != "agent":
+        chat = str(data.get("chat") or "")[:200]
+        ask = HandsAsk(secrets.token_hex(6), "agent", str(data.get("command") or "")[:8000], str(data.get("cwd") or "")[:1000],
+                       str(data.get("request") or "")[:2000], str(data.get("reason") or "")[:500], f"your agent (chat {chat})")
+        hands_asks[ask.id] = ask
+        log(f"the agent asks its owner about: {ask.command[:200]} ({ask.reason})")
+    if ask.answer is None:
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(ask.answered.wait(), HANDS_POLL_SECONDS)
+    if ask.answer is None:
+        if time.time() - ask.created > HANDS_ASK_MAX:
+            hands_asks.pop(ask.id, None)
+            return 200, {"id": ask.id, "answer": "deny", "why": "nobody answered in time"}
+        return 200, {"id": ask.id, "pending": True}
+    hands_asks.pop(ask.id, None)
+    return 200, {"id": ask.id, "answer": ask.answer}
+
+
 async def agent_hands(method: str, path: str, headers: list[tuple[str, str]], reader: asyncio.StreamReader,
                       writer: asyncio.StreamWriter) -> None:
     if not hmac.compare_digest(header(headers, AGENT_TOKEN_HEADER).encode(), agent_token().encode()):
         return await reply(writer, 401, {"error": "Not the agent's token."})
-    if method == "GET" and path == "/nanoborealis/agent-hands":
+    route, _, query_string = path.partition("?")
+    if method == "GET" and route == "/nanoborealis/agent-hands":
         return await reply(writer, 200, (await hands_list({}, {}, AGENT_USER, "agent"))[1])
-    if method != "POST" or path != "/nanoborealis/agent-hands/run":
+    if method == "GET" and route == "/nanoborealis/agent-hands/mode":
+        query = {k: v[-1] for k, v in urllib.parse.parse_qs(query_string).items()}
+        return await reply(writer, 200, {"mode": agent_mode(str(query.get("chat") or "default"))})
+    if method != "POST" or route not in ("/nanoborealis/agent-hands/run", "/nanoborealis/agent-hands/ask"):
         return await reply(writer, 404, {"error": "No such endpoint."})
     try:
         length = int(header(headers, "content-length") or 0)
@@ -1916,7 +1989,10 @@ async def agent_hands(method: str, path: str, headers: list[tuple[str, str]], re
             raise ValueError
     except (ValueError, asyncio.TimeoutError, asyncio.IncompleteReadError):
         return await reply(writer, 400, {"error": "Bad request."})
-    status, payload = await hands_run(data, {}, "the agent", "agent")
+    if route == "/nanoborealis/agent-hands/ask":
+        status, payload = await agent_ask(data)
+    else:
+        status, payload = await hands_run(data, {}, "the agent", "agent")
     await reply(writer, status, payload)
 
 
@@ -1945,6 +2021,8 @@ ADMIN_ROUTES = {
     ("POST", "/nanoborealis/hands/ask"): hands_ask,
     ("GET", "/nanoborealis/hands/asks"): hands_asks_list,
     ("POST", "/nanoborealis/hands/answer"): hands_answer,
+    ("GET", "/nanoborealis/agent/mode"): get_agent_mode,
+    ("POST", "/nanoborealis/agent/mode"): set_agent_mode,
     ("GET", "/nanoborealis/rigs"): rigs_overview,
     ("POST", "/nanoborealis/rigs/up"): rigs_up,
     ("GET", "/nanoborealis/agent"): agent_overview,

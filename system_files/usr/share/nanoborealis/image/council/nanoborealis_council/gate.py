@@ -1,0 +1,143 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+"""Permission modes for the agent's own tools, like Claude Code's.
+
+nanobot runs its shell and file tools without asking; this wraps them so each chat's mode decides:
+
+    auto          everything runs (the container and the hourly snapshots are the safety net); the default
+    accept-edits  file edits run; other shell commands that change something ask the owner
+    manual        anything that changes something asks the owner
+    plan          nothing changes: edits and changing commands are refused, reading runs
+
+The owner picks the mode in the app, per chat. It is kept by this computer's remote service, where the agent
+can't change it, and the questions go to the owner's apps (their phone too) the same way a device's do. This
+is how the owner stays in charge of the work; the hard boundary is still the container and the snapshots.
+
+Loaded by a .pth file in nanobot's environment (see the image's Containerfile): `install()` patches the tool
+classes once, and does nothing if nanobot's layout isn't what it expects.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+import ssl
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Any
+
+from .hands import TOKEN_FILE, URL
+
+READ_ONLY = re.compile(
+    r"^\s*(ls|cat|head|tail|less|wc|stat|file|find|tree|pwd|echo|grep|rg|which|whoami|id|uname|hostname|date|df|du|"
+    r"free|ps|env|printenv|git\s+(status|log|diff|show|branch|remote\s+-v|ls-files|blame)|python3?\s+--version|"
+    r"node\s+--version)\b(?![^|;&]*(>|\btee\b))")
+ASK_MAX = 600
+_installed = False
+
+
+def _call(method: str, path: str, body: dict | None = None, timeout: float = 60) -> dict:
+    token = TOKEN_FILE.read_text().strip()
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE  # this same computer, with its own certificate
+    request = urllib.request.Request(URL + path, method=method, data=json.dumps(body).encode() if body is not None else None,
+                                     headers={"X-NanoBorealis-Agent": token, "Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
+        return json.loads(response.read())
+
+
+def chat_now() -> str:
+    try:
+        from nanobot.agent.tools.context import current_request_context
+        ctx = current_request_context()
+        return str(ctx.chat_id) if ctx and ctx.chat_id else "default"
+    except Exception:
+        return "default"
+
+
+def mode_for(chat: str) -> str:
+    """The chat's mode; auto when the service can't be asked (no token yet, or tests), as before modes existed."""
+    try:
+        return str(_call("GET", "/nanoborealis/agent-hands/mode?" + urllib.parse.urlencode({"chat": chat}), timeout=10)["mode"])
+    except Exception:
+        return "auto"
+
+
+def ask_owner(chat: str, what: str, reason: str) -> str:
+    body: dict[str, Any] = {"chat": chat, "command": what, "reason": reason, "cwd": "the agent's computer"}
+    deadline = time.time() + ASK_MAX
+    while time.time() < deadline:
+        try:
+            answer = _call("POST", "/nanoborealis/agent-hands/ask", body, timeout=60)
+        except (urllib.error.URLError, OSError, ValueError):
+            time.sleep(5)
+            continue
+        if answer.get("answer") in ("once", "always", "deny"):
+            return answer["answer"]
+        body = {"id": answer.get("id")}
+    return "deny"
+
+
+def verdict(kind: str, what: str, mode: str) -> str:
+    """run, ask or refuse, for a shell command (kind "exec") or a file edit (kind "edit")."""
+    if mode == "auto":
+        return "run"
+    if kind == "exec" and READ_ONLY.match(what) and not re.search(r"[;&|]\s*\S", what.replace("||", "")):
+        return "run"
+    if mode == "plan":
+        return "refuse"
+    if mode == "accept-edits" and kind == "edit":
+        return "run"
+    return "ask"
+
+
+_always: dict[str, set[str]] = {}  # chat -> programs the owner said "always" to, for this gateway's life
+
+
+def wrap(cls: type, kind: str, describe) -> None:
+    original = cls.execute
+
+    async def execute(self, *args: Any, **kwargs: Any) -> Any:
+        what = describe(kwargs)
+        chat = chat_now()
+        mode = await asyncio.to_thread(mode_for, chat)
+        decision = verdict(kind, what, mode)
+        program = what.split()[0] if kind == "exec" and what.split() else kind
+        if decision == "ask" and program in _always.get(chat, set()):
+            decision = "run"
+        if decision == "refuse":
+            return f"Error: this chat is in plan mode, so nothing may change. Propose this instead: {what[:300]}"
+        if decision == "ask":
+            reason = "it changes something" if mode == "manual" else "a command that changes something"
+            answer = await asyncio.to_thread(ask_owner, chat, what, f"{mode} mode: {reason}")
+            if answer == "deny":
+                return f"Error: the owner didn't allow this: {what[:300]}. Ask them, or try something else."
+            if answer == "always":
+                _always.setdefault(chat, set()).add(program)
+        return await original(self, *args, **kwargs)
+    execute.__wrapped__ = original  # type: ignore[attr-defined]
+    cls.execute = execute
+
+
+def install() -> None:
+    global _installed
+    if _installed:
+        return
+    try:
+        from nanobot.agent.tools.apply_patch import ApplyPatchTool
+        from nanobot.agent.tools.filesystem import EditFileTool, WriteFileTool
+        from nanobot.agent.tools.shell import ExecTool
+    except Exception as e:  # a nanobot without these: leave it as it is
+        print(f"nanoborealis gate: not installed ({type(e).__name__})", file=sys.stderr)
+        return
+    wrap(ExecTool, "exec", lambda kw: str(kw.get("command") or kw.get("cmd") or ""))
+    wrap(WriteFileTool, "edit", lambda kw: f"write {kw.get('path') or '?'} ({len(str(kw.get('content') or ''))} characters)")
+    wrap(EditFileTool, "edit", lambda kw: f"edit {kw.get('path') or '?'}\n- {str(kw.get('old_text') or '')[:800]}\n"
+                                          f"+ {str(kw.get('new_text') or '')[:800]}")
+    wrap(ApplyPatchTool, "edit", lambda kw: "apply a patch:\n" + json.dumps(kw.get("edits") or [], default=str)[:2000])
+    _installed = True

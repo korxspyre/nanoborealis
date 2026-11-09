@@ -342,6 +342,21 @@ class AgentLink:
             raise LinkError(str(error.get("message") or f"The agent turned down {action}."))
         return answer.get("result")
 
+    async def fork_chat(self, source_chat_id: str, before_user_index: int, title: str | None = None) -> str:
+        """A new chat holding `source_chat_id`'s conversation up to (not including) its user message number
+        `before_user_index` (0 is the first): rewinding the conversation without losing the original, which stays."""
+        waiter: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        self._new_chat_waiters.append(waiter)
+        try:
+            await self._send({"type": "fork_chat", "source_chat_id": source_chat_id, "before_user_index": before_user_index,
+                              **({"title": title} if title else {})})
+            chat_id = await asyncio.wait_for(waiter, 20)
+        finally:
+            if waiter in self._new_chat_waiters:
+                self._new_chat_waiters.remove(waiter)
+        self.chat_id = chat_id
+        return chat_id
+
     async def new_temporary_chat(self) -> str:
         """A chat nothing is saved from (for checks), closed with discard_temporary_chat."""
         waiter: asyncio.Future[str] = asyncio.get_running_loop().create_future()

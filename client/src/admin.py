@@ -125,6 +125,15 @@ def pool_policy(machine: Machine, changes: dict[str, Any]) -> dict[str, Any]:
     return dict(_call(machine, "POST", "/nanoborealis/pool/policy", {"changes": changes})["policy"])
 
 
+def agent_mode(machine: Machine, chat: str) -> dict[str, Any]:
+    """{"mode": auto|accept-edits|manual|plan}: how freely the agent's own tools run in that chat."""
+    return _call(machine, "GET", "/nanoborealis/agent/mode?" + urllib.parse.urlencode({"chat": chat}))
+
+
+def set_agent_mode(machine: Machine, chat: str, mode: str) -> None:
+    _call(machine, "POST", "/nanoborealis/agent/mode", {"chat": chat, "mode": mode})
+
+
 def hands_asks(machine: Machine) -> list[dict[str, Any]]:
     """Jobs your devices are holding until you answer: an agent asked for something outside its request."""
     return list(_call(machine, "GET", "/nanoborealis/hands/asks")["asks"])

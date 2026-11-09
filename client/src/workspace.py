@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 import flet as ft
 
+import admin
 import agent_settings
 import codefeatures
 import codeui
@@ -33,6 +34,7 @@ import theme as t
 import transcript
 from agent_link import AuthError, LinkError
 from model_picker import ModelPicker
+from pairing import PairingError
 
 if TYPE_CHECKING:
     from main import NanoBorealisApp
@@ -188,6 +190,7 @@ class Workspace:
         self.council: Any = None
         # The coding-agent features (codefeatures.py): plan mode, the status bar, the crew strip, checkpoints.
         self.plan_mode = False
+        self.agent_mode = "auto"  # this chat's permission mode for the agent's own tools (gate.py on the computer)
         self.plan_turn = False  # the turn running now was sent as a plan request
         self.context_used: int | None = None
         self.lines_added = self.lines_removed = 0
@@ -644,6 +647,8 @@ class Workspace:
                                          style=ft.ButtonStyle(shape=ft.CircleBorder(), padding=8))
         self.plan_chip = ft.Container()
         self.paint_plan_chip()
+        self.mode_chip = ft.Container()
+        self.paint_mode_chip()
         self.crew_holder = ft.Container(visible=False, padding=ft.Padding.only(bottom=2))
         self.status_bar_holder = ft.Container()
         box = ft.Container(
@@ -656,7 +661,7 @@ class Workspace:
                     t.icon_button(ft.Icons.ADD_ROUNDED, "Attach files or images", on_click=self.attach, size=18),
                     t.icon_button(ft.Icons.ALTERNATE_EMAIL_ROUNDED, "Mention a file from your projects",
                                   on_click=lambda _e: self.page.run_task(self.open_panel, "files"), size=17),
-                    self.project_chip, self.plan_chip,
+                    self.project_chip, self.mode_chip, self.plan_chip,
                     self.context_meter, self.model_chip, self.send_button, self.stop_button,
                 ], spacing=2, run_spacing=2, wrap=True, alignment=ft.MainAxisAlignment.END,
                    vertical_alignment=ft.CrossAxisAlignment.CENTER),
@@ -970,6 +975,7 @@ class Workspace:
         self.plan_turn = False
         self.schedule_status()
         self.pending_preset = None
+        self.page.run_task(self.load_mode)
         row = next((c for c in self.chats if c.get("chat_id") == chat_id), None) if chat_id else None
         self.show_scope((row or {}).get("workspace_scope") if chat_id else self.scope)
         link = self.app.link
@@ -1452,6 +1458,8 @@ class Workspace:
             if self.pending_preset:
                 await self.run_command(f"/model {self.pending_preset}")
                 self.pending_preset = None
+            if self.agent_mode != "auto":  # the mode picked before the chat existed is this chat's
+                await self.save_mode(self.agent_mode)
         self.reset_turn()
         self.add(transcript.user_message(text, names))
         if not text.startswith("/"):
@@ -1485,6 +1493,52 @@ class Workspace:
         self.page.update()
 
     # -- Coding-agent features: plan first, checkpoints, the status bar, the crew (codefeatures.py) --------
+
+    # Permission modes for the agent's own tools, per chat (the image's gate.py; the computer keeps them).
+    MODES = [("auto", "Auto", ft.Icons.BOLT_ROUNDED, "Everything runs. The agent's container and hourly snapshots are the safety net."),
+             ("accept-edits", "Accept edits", ft.Icons.EDIT_NOTE_ROUNDED, "File edits run; other commands that change something ask you."),
+             ("manual", "Ask first", ft.Icons.FRONT_HAND_OUTLINED, "Anything that changes something asks you first, here or on your phone."),
+             ("plan", "Plan only", ft.Icons.LOCK_OUTLINE_ROUNDED, "Nothing changes: the agent reads and proposes.")]
+
+    def paint_mode_chip(self) -> None:
+        current = next(m for m in self.MODES if m[0] == self.agent_mode)
+        self.mode_chip.content = ft.PopupMenuButton(
+            content=t.chip(current[1], color=t.MUTED if current[0] == "auto" else t.ACCENT_HI, icon=current[2], size=12.5,
+                           bgcolor=ft.Colors.TRANSPARENT if current[0] == "auto" else t.ACCENT_SOFT),
+            tooltip=f"How freely the agent's tools run in this chat: {current[3]}",
+            items=[ft.PopupMenuItem(content=ft.Column([ft.Text(label, size=13.5, weight=ft.FontWeight.W_600),
+                                                       t.muted(about, size=11.5)], spacing=0, tight=True),
+                                    icon=icon, checked=key == self.agent_mode,
+                                    on_click=lambda _e, k=key: self.page.run_task(self.set_agent_mode, k))
+                   for key, label, icon, about in self.MODES])
+
+    async def load_mode(self) -> None:
+        mode = "auto"
+        if self.chat_id and self.app.machine is not None:
+            try:
+                mode = (await asyncio.to_thread(admin.agent_mode, self.app.machine, self.chat_id))["mode"]
+            except (PairingError, OSError, KeyError, ValueError):
+                mode = "auto"  # a computer from before modes: everything runs, as it always did
+        self.agent_mode = mode if any(m[0] == mode for m in self.MODES) else "auto"
+        self.paint_mode_chip()
+        try:
+            self.page.update()
+        except Exception:
+            pass
+
+    async def save_mode(self, mode: str) -> None:
+        if self.chat_id is None or self.app.machine is None:
+            return
+        try:
+            await asyncio.to_thread(admin.set_agent_mode, self.app.machine, self.chat_id, mode)
+        except PairingError as e:
+            self.toast(f"Couldn't set the mode: {e}")
+
+    async def set_agent_mode(self, mode: str) -> None:
+        self.agent_mode = mode
+        self.paint_mode_chip()
+        self.page.update()
+        await self.save_mode(mode)  # a chat that doesn't exist yet gets it when it's made
 
     def paint_plan_chip(self) -> None:
         on = self.plan_mode
@@ -1544,29 +1598,62 @@ class Workspace:
             pass  # a checkpoint that can't be made never holds a message back
 
     async def show_rewind(self) -> None:
+        link = self.app.link
+        if self.chat_id is None or link is None:
+            self.toast("Rewind works in a chat with messages in it.")
+            return
         points = self.checkpoints_for()
-        if points is None or self.chat_id is None:
-            self.toast("Rewind works on a chat that has a project folder: pick one with the folder chip, and send a message.")
-            return
-        try:
-            items = await asyncio.to_thread(points.list, self.chat_id)
-        except Exception as e:
-            self.toast(f"Couldn't read this chat's checkpoints: {e}")
-            return
-
-        async def restore(item: dict) -> None:
-            self.page.pop_dialog()
+        saved: list[dict] = []
+        if points is not None:
             try:
-                done = await asyncio.to_thread(points.restore, item["sha"])
+                saved = await asyncio.to_thread(points.list, self.chat_id)
             except Exception as e:
-                self.toast(f"Couldn't rewind: {e}")
-                return
-            self.toast(f"The project's files are back as they were before \"{(item['label'] or 'that message')[:40]}\" "
-                       f"({done['files']} files, {done['removed']} removed). /rewind again to undo it." if done.get("ok")
-                       else f"Couldn't rewind: {done.get('error')}")
+                self.toast(f"Couldn't read this chat's file checkpoints: {e}")
+        try:
+            thread = await link.load_thread(self.chat_id)
+        except (LinkError, AuthError, asyncio.TimeoutError):
+            thread = {}
+        # Each user message, with the file checkpoint saved just before it (matched by its text, newest first).
+        unmatched = list(reversed(saved))
+        items: list[dict] = []
+        users = [m for m in thread.get("messages") or [] if m.get("role") == "user"]
+        for index, m in enumerate(users):
+            text = m.get("content") if isinstance(m.get("content"), str) else ""
+            match = next((p for p in unmatched if (p.get("label") or "").strip() and text.strip().startswith(p["label"].strip()[:60])), None)
+            if match is not None:
+                unmatched.remove(match)
+            items.append({"label": text.strip().splitlines()[0][:120] if text.strip() else "(a message)", "user_index": index,
+                          "sha": match["sha"] if match else None, "at": match["at"] if match else None})
+        if not items:
+            items = saved  # no conversation to read: the file checkpoints alone, as before
 
-        self.page.show_dialog(codeui.rewind_dialog(items, lambda item: self.page.run_task(restore, item),
-                                                    lambda _e: self.page.pop_dialog()))
+        async def restore(item: dict, what: str) -> None:
+            self.page.pop_dialog()
+            said: list[str] = []
+            if what in ("files", "both") and item.get("sha") and points is not None:
+                try:
+                    done = await asyncio.to_thread(points.restore, item["sha"])
+                    said.append(f"files back as they were ({done['files']} files, {done['removed']} removed; /rewind again undoes it)"
+                                if done.get("ok") else f"files not restored: {done.get('error')}")
+                except Exception as e:
+                    said.append(f"files not restored: {e}")
+            if what in ("conversation", "both") and item.get("user_index") is not None:
+                source = self.chat_id
+                try:
+                    fork = await link.fork_chat(source, int(item["user_index"]), title=f"{self.title_text.value or 'Chat'} (rewound)")
+                except (LinkError, asyncio.TimeoutError) as e:
+                    said.append(f"conversation not rewound: {e}")
+                else:
+                    said.append("the conversation is back to just before that message, in a new chat (the original stays)")
+                    await self.refresh_chats()
+                    await self.open_chat(fork)
+                    self.composer.value = item["label"] if item["label"] != "(a message)" else ""
+                    self.page.update()
+            self.toast("Rewound: " + "; ".join(said) if said else "Nothing to rewind there.")
+
+        self.page.show_dialog(codeui.rewind_dialog(items, lambda item: self.page.run_task(restore, item, "files"),
+                                                    lambda _e: self.page.pop_dialog(),
+                                                    on_restore_as=lambda item, what: self.page.run_task(restore, item, what)))
 
     async def git_branch(self) -> str:
         folder, machine = self.host_folder(), self.app.machine
