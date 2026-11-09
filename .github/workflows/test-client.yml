@@ -160,6 +160,10 @@ jobs:
       - name: Hands permissions
         run: '"$RUNNER_TEMP/venv/bin/python" client/dev/permissions_check.py'
 
+      # Undo for agents' jobs on a lent device: a checkpoint before a change, and restore.
+      - name: Hands checkpoints
+        run: '"$RUNNER_TEMP/venv/bin/python" client/dev/checkpoints_check.py'
+
       # The screens for them, and the workspace around them, built without a window.
       - name: Coding-agent screens build
         run: '"$RUNNER_TEMP/venv/bin/python" client/dev/codeui_check.py'

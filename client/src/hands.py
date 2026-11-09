@@ -30,8 +30,9 @@ from pathlib import Path
 from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import checkpoints  # noqa: E402
 import pairing  # noqa: E402
-from permissions import Decision, Log, Policy, Task, decide  # noqa: E402
+from permissions import READ_ONLY, Decision, Log, Policy, Task, decide  # noqa: E402
 
 OUTPUT_LIMIT = 400_000  # the end of a job's output that's sent back
 ANDROID = "ANDROID_ROOT" in os.environ or hasattr(sys, "getandroidapilevel")
@@ -132,7 +133,20 @@ def handle(job: dict, policy: Policy, approve: Approver, log: Log) -> dict:
         return {"exit": None, "timed_out": False, "refused": True, "output": f"Not run on this device: {why}."}
     if not Path(cwd).is_dir():
         return {"exit": None, "timed_out": False, "output": f"No such folder here: {cwd}"}
-    return run_native(command, cwd, int(job.get("timeout") or 300))
+    # Undo: a job that may change something gets a checkpoint of its request's folders first (checkpoints.py).
+    note = ""
+    if task and task.folders and not READ_ONLY.match(command):
+        try:
+            point = checkpoints.take(task.folders, str(job.get("id") or ""), command)
+            note = f"[checkpoint {point['id']}: undo with the app's Lend hands page, or checkpoints.py restore]\n"
+            if point["skipped"]:
+                note += "".join(f"[not checkpointed: {f} ({why})]\n" for f, why in point["skipped"].items())
+            log.write(job=job.get("id"), checkpoint=point["id"], copied=point["folders"], skipped=point["skipped"])
+        except OSError as e:
+            note = f"[no checkpoint: {e}]\n"
+    result = run_native(command, cwd, int(job.get("timeout") or 300))
+    result["output"] = note + result["output"]
+    return result
 
 
 def describe(policy: Policy) -> dict:

@@ -13,11 +13,13 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
+import time
 from typing import TYPE_CHECKING, Any
 
 import flet as ft
 
 import admin
+import checkpoints
 import hands
 import theme as t
 from pairing import PairingError
@@ -113,14 +115,44 @@ class HandsUI:
                     "deleting your home, piping downloads into a shell).", size=13),
             t.muted(f"Every job and every answer is written to {hands.home() / 'hands.log'}.", size=12),
         ], spacing=8)
+        undo = self.undo_list()
         actions = [t.quiet_button("Cancel", on_click=lambda _e: self.page.pop_dialog())]
         if self.lending:
             actions.append(t.outline_button("Stop lending", on_click=lambda _e: self.page.run_task(save, False)))
         actions.append(t.primary_button("Save and lend" if not self.lending else "Save",
                                         on_click=lambda _e: self.page.run_task(save, True)))
         self.page.show_dialog(ft.AlertDialog(title=ft.Text("Lend this device's hands"),
-                                             content=ft.Column([bullets, folders, mode], tight=True, spacing=12, width=520),
+                                             content=ft.Column([bullets, folders, mode, undo], tight=True, spacing=12,
+                                                               width=520, scroll=ft.ScrollMode.AUTO),
                                              actions=actions))
+
+    def undo_list(self) -> ft.Control:
+        """The latest checkpoints agents' jobs took here, each with an Undo that puts its folders back."""
+        found = checkpoints.entries()[:8]
+        if not found:
+            return t.muted("Nothing to undo yet: before each job that may change something, its folders are copied, "
+                           "so it can be undone here.", size=12)
+
+        async def undo(entry: dict) -> None:
+            self.page.pop_dialog()
+            try:
+                done = await asyncio.to_thread(checkpoints.restore, entry["id"])
+            except (OSError, ValueError, KeyError) as e:
+                message = f"Couldn't undo it: {e}"
+            else:
+                message = (f"Put back as before: {', '.join(done)}. What was there is kept beside it (.before-undo)."
+                           if done else "Nothing was copied for that job, so there's nothing to put back.")
+            if self.app.workspace:
+                self.app.workspace.toast(message)
+        rows: list[ft.Control] = [t.muted("UNDO AN AGENT'S JOB", size=11)]
+        for entry in found:
+            when = time.strftime("%b %d %H:%M", time.localtime(entry.get("at") or 0))
+            rows.append(ft.Row([
+                ft.Column([t.mono(entry.get("command", "")[:70], size=12), t.muted(f"{when} · {', '.join(entry.get('copied') or []) or 'nothing copied'}",
+                                                                              size=11)], spacing=0, expand=True),
+                t.quiet_button("Undo", icon=ft.Icons.UNDO_ROUNDED, on_click=lambda _e, e=entry: self.page.run_task(undo, e)),
+            ]))
+        return ft.Column(rows, spacing=4)
 
     # -- Answering -----------------------------------------------------------------------------------
 
