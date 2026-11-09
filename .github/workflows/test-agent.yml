@@ -134,23 +134,33 @@ jobs:
           sudo bash system_files/usr/libexec/nanoborealis-firewall
           sudo nft list table inet nanoborealis
 
-      - name: The agent reaches the internet but not the local network
+      # The sandbox is minimal: by default the agent reaches the local network like any program the owner runs;
+      # `nanoborealis lan off` (the marker /etc/nanoborealis/agent-lan.off) closes it. Both are checked.
+      - name: The agent reaches the internet and, unless turned off, the local network
         run: |
           lan_ip="$(ip -4 route get 1.1.1.1 | awk '{for (i = 1; i <= NF; i++) if ($i == "src") print $(i + 1)}')"
           echo "runner address: $lan_ip"
           case "$lan_ip" in
             10.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|192.168.*) ;;
-            *) echo "runner address is not private; cannot test LAN blocking here"; exit 1 ;;
+            *) echo "runner address is not private; cannot test LAN access here"; exit 1 ;;
           esac
           python3 -m http.server 8080 --bind 0.0.0.0 >/dev/null 2>&1 &
           sleep 1
           curl -s -o /dev/null --max-time 5 "http://$lan_ip:8080/"
           echo "control: the runner's own user reaches $lan_ip:8080"
-          if sudo -u nanobot-agent curl -s -o /dev/null --max-time 5 "http://$lan_ip:8080/"; then
-            echo "FAIL: the agent reached the local network"
+          if ! sudo -u nanobot-agent curl -s -o /dev/null --max-time 5 "http://$lan_ip:8080/"; then
+            echo "FAIL: by default the agent should reach the local network"
+            sudo nft list table inet nanoborealis
             exit 1
           fi
-          echo "ok: the agent is blocked from $lan_ip"
+          echo "ok: by default the agent reaches $lan_ip"
+          sudo install -d /etc/nanoborealis && sudo touch /etc/nanoborealis/agent-lan.off
+          sudo systemctl restart nanoborealis-firewall.service
+          if sudo -u nanobot-agent curl -s -o /dev/null --max-time 5 "http://$lan_ip:8080/"; then
+            echo "FAIL: with lan off, the agent reached the local network"
+            exit 1
+          fi
+          echo "ok: with lan off, the agent is blocked from $lan_ip"
           sudo -u nanobot-agent curl -s -o /dev/null --max-time 20 -w 'ok: the agent reaches the internet (HTTP %{http_code})\n' https://openrouter.ai/api/v1/models
 
       - name: LAN devices can still reach a port the agent serves (nanoborealis remote on)
