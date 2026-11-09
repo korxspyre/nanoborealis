@@ -22,6 +22,7 @@ import flet as ft
 import host
 import theme as t
 import transcript
+import vt
 from pairing import Machine, PairingError
 from terminal import Terminal, plain, run_command
 
@@ -64,13 +65,20 @@ def human_size(size: int) -> str:
 
 class TerminalPanel:
     """A shell on the computer: output above, a line to type into below, and the keys a text box
-    can't send."""
+    can't send. Full screen mode is a real terminal (vt.py) for top, nano, less, vim: click the screen and
+    the keyboard goes to the program; click anywhere else to give it back."""
 
     def __init__(self, page: ft.Page, machine: Machine):
         self.page, self.machine = page, machine
         self.term: Terminal | None = None
         self.raw = ""
+        self.full = False
+        self.capturing = False
+        self.screen: vt.Screen | None = None
         self.output = ft.Text("", font_family=t.MONO, size=12.5, selectable=True, color=t.TEXT)
+        self.full_button = t.quiet_button("Full screen", icon=ft.Icons.FULLSCREEN_ROUNDED,
+                                          on_click=lambda _e: self.page.run_task(self.toggle_full))
+        self.hint = t.muted("", size=11.5)
         self.input = ft.TextField(
             hint_text="Type a command, then Enter", text_style=ft.TextStyle(font_family=t.MONO, size=13),
             on_submit=self.submit, expand=True, dense=True, border_radius=t.RADIUS, border_color=t.LINE_HI,
@@ -83,20 +91,59 @@ class TerminalPanel:
                          on_click=lambda _e, s=sequence: self.page.run_task(self.key, s))
             for label, sequence, tip in TERMINAL_KEYS
         ])
+        self.screen_box = ft.Container(ft.ListView([self.output], auto_scroll=True, padding=12, expand=True), expand=True,
+                                       bgcolor=t.SIDEBAR, border_radius=t.RADIUS, border=ft.Border.all(1, t.LINE),
+                                       on_click=lambda _e: self.grab())
+        self.line_row = ft.Row([self.input, t.icon_button(ft.Icons.PASSWORD_ROUNDED, "Hide what you type (for passwords)",
+                                                          on_click=self.toggle_hidden)], spacing=4)
+        # Holds the focus while a full-screen program has the keyboard, so typing doesn't also land in the chat box.
+        self.sink = ft.TextField(width=1, height=1, opacity=0, border=ft.InputBorder.NONE,
+                                 on_change=lambda e: setattr(e.control, "value", ""))
         self.view = ft.Column(expand=True, spacing=8, controls=[
-            ft.Container(ft.ListView([self.output], auto_scroll=True, padding=12, expand=True), expand=True,
-                         bgcolor=t.SIDEBAR, border_radius=t.RADIUS, border=ft.Border.all(1, t.LINE)),
-            ft.Row([self.input, t.icon_button(ft.Icons.PASSWORD_ROUNDED, "Hide what you type (for passwords)",
-                                              on_click=self.toggle_hidden)], spacing=4),
-            keys,
+            self.screen_box, self.line_row, keys, ft.Row([self.full_button, self.hint, self.sink], spacing=6),
         ])
+
+    async def toggle_full(self) -> None:
+        """Between the line-by-line console and a real terminal; either way a fresh shell."""
+        self.full = not self.full
+        self.capturing = False
+        self.full_button.content = "Line by line" if self.full else "Full screen"
+        self.full_button.icon = ft.Icons.FULLSCREEN_EXIT_ROUNDED if self.full else ft.Icons.FULLSCREEN_ROUNDED
+        self.line_row.visible = not self.full
+        self.hint.value = "Click the screen to type into it; click outside to stop." if self.full else ""
+        self.stop()
+        await self.start()
+
+    def grab(self) -> None:
+        if self.full and self.term is not None:
+            self.capturing = True
+            self.screen_box.border = ft.Border.all(1, t.ACCENT)
+            self.hint.value = "Typing goes to the terminal. Click outside it to stop."
+            self.page.update()
+            self.page.run_task(self.sink.focus)
+
+    def release(self) -> None:
+        if self.capturing:
+            self.capturing = False
+            self.screen_box.border = ft.Border.all(1, t.LINE)
+            self.hint.value = "Click the screen to type into it; click outside to stop."
+            self.page.update()
+
+    async def on_key(self, event: ft.KeyboardEvent) -> None:
+        if self.term is None:
+            return
+        data = vt.key_bytes(event.key or "", event.shift, event.ctrl, event.alt)
+        if data:
+            await self.term.send(data)
 
     async def start(self) -> None:
         if self.term is not None:
             return
         self.output.value = "Connecting..."
         self.page.update()
-        term = Terminal(self.machine, rows=40, cols=TERMINAL_COLS, console=True)
+        rows = 30 if self.full else 40
+        self.screen = vt.Screen(rows, TERMINAL_COLS) if self.full else None
+        term = Terminal(self.machine, rows=rows, cols=TERMINAL_COLS, console=not self.full)
         try:
             await term.open()
         except PairingError as e:
@@ -110,8 +157,12 @@ class TerminalPanel:
 
     async def pump(self, term: Terminal) -> None:
         while chunk := await term.read():
-            self.raw = (self.raw + chunk.decode(errors="replace"))[-200_000:]
-            self.output.value = plain(self.raw)
+            if self.screen is not None and self.term is term:
+                self.screen.feed(chunk)
+                self.output.value = self.screen.text_with_cursor()
+            else:
+                self.raw = (self.raw + chunk.decode(errors="replace"))[-200_000:]
+                self.output.value = plain(self.raw)
             self.page.update()
         if self.term is term:
             self.term = None
@@ -145,6 +196,7 @@ class TerminalPanel:
 
     def stop(self) -> None:
         term, self.term = self.term, None
+        self.capturing = False
         if term is not None:
             term.close()
 

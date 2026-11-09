@@ -624,7 +624,7 @@ class Workspace:
             shift_enter=True, border=ft.InputBorder.NONE, autofocus=True, text_size=14.5,
             hint_style=ft.TextStyle(color=t.FAINT, size=14.5), cursor_color=t.ACCENT,
             content_padding=ft.Padding.only(left=4, right=4, top=10, bottom=4), on_submit=self.on_send,
-            on_change=self.on_compose,
+            on_change=self.on_compose, on_focus=lambda _e: self.release_terminal(),
         )
         self.commands = ft.Container(visible=False, bgcolor=t.PANEL, border_radius=t.RADIUS,
                                      border=ft.Border.all(1, t.LINE_HI), padding=6)
@@ -1847,8 +1847,17 @@ class Workspace:
 
     # -- Keys and focus ------------------------------------------------------------------------------
 
+    def release_terminal(self) -> None:
+        term = self.panel_views.get("terminal")
+        if term is not None:
+            term.release()
+
     async def on_key(self, event: ft.KeyboardEvent) -> None:
         key = (event.key or "").lower()
+        term = self.panel_views.get("terminal")
+        if term is not None and self.panel.visible and self.panel_kind == "terminal" and term.capturing:
+            await term.on_key(event)  # a full-screen program has the keyboard until you click outside it
+            return
         if key == "escape" and self.busy:
             await self.on_stop()
         elif event.ctrl and key == "n":

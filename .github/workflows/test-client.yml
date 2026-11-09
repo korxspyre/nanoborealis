@@ -164,6 +164,10 @@ jobs:
       - name: Hands checkpoints
         run: '"$RUNNER_TEMP/venv/bin/python" client/dev/checkpoints_check.py'
 
+      # The terminal panel's full screen mode: the xterm screen full-screen programs draw on.
+      - name: Terminal screen
+        run: '"$RUNNER_TEMP/venv/bin/python" client/dev/vt_check.py'
+
       # The screens for them, and the workspace around them, built without a window.
       - name: Coding-agent screens build
         run: '"$RUNNER_TEMP/venv/bin/python" client/dev/codeui_check.py'
