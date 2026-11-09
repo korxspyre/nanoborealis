@@ -112,12 +112,12 @@ fi
 # fstab from the installer. Its root line can't apply on a composefs root (systemd-remount-fs failed on every
 # boot: "overlay: No changes allowed in reconfigure"; the kernel's root= mounts it anyway), and /home there is a
 # link to var/home, so the home subvolume belongs at /var/home. A copy of the old file stays beside it.
-if [ "$(findmnt -n -o FSTYPE /)" = "overlay" ] && grep -Eq '^[^#[:space:]]+[[:space:]]+/[[:space:]]+btrfs[[:space:]]' /etc/fstab; then
+if [ -f /etc/fstab ] && [ "$(findmnt -n -o FSTYPE / 2>/dev/null)" = "overlay" ] && grep -Eq '^[^#[:space:]]+[[:space:]]+/[[:space:]]+btrfs[[:space:]]' /etc/fstab; then
     cp -a /etc/fstab /etc/fstab.before-nanoborealis
     sed -i -E 's|^([^#[:space:]]+[[:space:]]+/[[:space:]]+btrfs[[:space:]].*)$|# composefs root, mounted by the kernel; remounting it failed every boot: \1|' /etc/fstab
     log "fstab: the root line no longer fails systemd-remount-fs at boot"
 fi
-if [ -L /home ] && grep -Eq '^[^#[:space:]]+[[:space:]]+/home[[:space:]]+btrfs[[:space:]]' /etc/fstab; then
+if [ -f /etc/fstab ] && [ -L /home ] && grep -Eq '^[^#[:space:]]+[[:space:]]+/home[[:space:]]+btrfs[[:space:]]' /etc/fstab; then
     [ -e /etc/fstab.before-nanoborealis ] || cp -a /etc/fstab /etc/fstab.before-nanoborealis
     sed -i -E 's|^([^#[:space:]]+[[:space:]]+)/home([[:space:]]+btrfs[[:space:]])|\1/var/home\2|' /etc/fstab
     log "fstab: the home subvolume is mounted at /var/home, where /home points"

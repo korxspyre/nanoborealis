@@ -155,7 +155,7 @@ jobs:
           fi
           echo "ok: by default the agent reaches $lan_ip"
           sudo install -d /etc/nanoborealis && sudo touch /etc/nanoborealis/agent-lan.off
-          sudo systemctl restart nanoborealis-firewall.service
+          sudo bash system_files/usr/libexec/nanoborealis-firewall
           if sudo -u nanobot-agent curl -s -o /dev/null --max-time 5 "http://$lan_ip:8080/"; then
             echo "FAIL: with lan off, the agent reached the local network"
             exit 1
