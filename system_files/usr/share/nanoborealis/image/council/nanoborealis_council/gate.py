@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import ssl
 import sys
@@ -28,6 +29,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 from .hands import TOKEN_FILE, URL
@@ -98,13 +100,69 @@ def verdict(kind: str, what: str, mode: str) -> str:
 
 _always: dict[str, set[str]] = {}  # chat -> programs the owner said "always" to, for this gateway's life
 
+# -- Hooks, in Claude Code's format ------------------------------------------------------------------------------
+# ~/.nanobot/workspace/.nanoborealis/hooks.json (the app's Hooks page edits it):
+#   {"hooks": {"PreToolUse": [{"matcher": "exec|write_file", "hooks": [{"type": "command", "command": "...",
+#                                                                       "timeout": 60}]}],
+#              "PostToolUse": [...]}}
+# A command gets the event as JSON on stdin (hook_event_name, tool_name, tool_input, chat_id, and for PostToolUse
+# tool_response). For PreToolUse, exit status 2 blocks the tool and its stderr is the reason the agent is given.
+# The matcher is a regular expression over the tool's name (exec, write_file, edit_file, apply_patch); empty or
+# "*" matches every one. Hooks run inside the agent's container, as the agent.
 
-def wrap(cls: type, kind: str, describe) -> None:
+HOOKS_FILE = Path(os.environ.get("NANOBOREALIS_HOOKS_FILE", str(Path.home() / ".nanobot/workspace/.nanoborealis/hooks.json")))
+
+
+def hooks_for(event: str, tool: str) -> list[dict]:
+    try:
+        data = json.loads(HOOKS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    found = []
+    for group in (data.get("hooks") or {}).get(event) or []:
+        matcher = str(group.get("matcher") or "*")
+        try:
+            hit = matcher in ("", "*") or re.fullmatch(matcher, tool) is not None
+        except re.error:
+            hit = False
+        if hit:
+            found += [h for h in group.get("hooks") or [] if h.get("type", "command") == "command" and h.get("command")]
+    return found
+
+
+async def run_hooks(event: str, tool: str, payload: dict) -> str | None:
+    """Run the event's hooks; for PreToolUse, the reason if one blocked the tool (exit status 2)."""
+    for hook in hooks_for(event, tool):
+        try:
+            process = await asyncio.create_subprocess_shell(
+                hook["command"], stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            _out, err = await asyncio.wait_for(process.communicate(json.dumps({"hook_event_name": event, **payload},
+                                                                                default=str).encode()),
+                                               float(hook.get("timeout") or 60))
+        except (OSError, asyncio.TimeoutError) as e:
+            print(f"nanoborealis hook {event} failed: {type(e).__name__}", file=sys.stderr)
+            continue
+        if event == "PreToolUse" and process.returncode == 2:
+            return err.decode(errors="replace").strip() or f"a {event} hook blocked it"
+    return None
+
+
+def wrap(cls: type, kind: str, describe, tool_name: str = "") -> None:
     original = cls.execute
+    tool_name = tool_name or kind
 
     async def execute(self, *args: Any, **kwargs: Any) -> Any:
         what = describe(kwargs)
         chat = chat_now()
+        blocked = await run_hooks("PreToolUse", tool_name, {"tool_name": tool_name, "tool_input": kwargs, "chat_id": chat})
+        if blocked:
+            return f"Error: blocked by a hook: {blocked}"
+        result = await guarded(self, args, kwargs, what, chat)
+        await run_hooks("PostToolUse", tool_name, {"tool_name": tool_name, "tool_input": kwargs, "chat_id": chat,
+                                                   "tool_response": str(result)[:20000]})
+        return result
+
+    async def guarded(self, args: tuple, kwargs: dict, what: str, chat: str) -> Any:
         mode = await asyncio.to_thread(mode_for, chat)
         decision = verdict(kind, what, mode)
         program = what.split()[0] if kind == "exec" and what.split() else kind
@@ -135,9 +193,11 @@ def install() -> None:
     except Exception as e:  # a nanobot without these: leave it as it is
         print(f"nanoborealis gate: not installed ({type(e).__name__})", file=sys.stderr)
         return
-    wrap(ExecTool, "exec", lambda kw: str(kw.get("command") or kw.get("cmd") or ""))
-    wrap(WriteFileTool, "edit", lambda kw: f"write {kw.get('path') or '?'} ({len(str(kw.get('content') or ''))} characters)")
+    wrap(ExecTool, "exec", lambda kw: str(kw.get("command") or kw.get("cmd") or ""), "exec")
+    wrap(WriteFileTool, "edit", lambda kw: f"write {kw.get('path') or '?'} ({len(str(kw.get('content') or ''))} characters)",
+         "write_file")
     wrap(EditFileTool, "edit", lambda kw: f"edit {kw.get('path') or '?'}\n- {str(kw.get('old_text') or '')[:800]}\n"
-                                          f"+ {str(kw.get('new_text') or '')[:800]}")
-    wrap(ApplyPatchTool, "edit", lambda kw: "apply a patch:\n" + json.dumps(kw.get("edits") or [], default=str)[:2000])
+                                          f"+ {str(kw.get('new_text') or '')[:800]}", "edit_file")
+    wrap(ApplyPatchTool, "edit", lambda kw: "apply a patch:\n" + json.dumps(kw.get("edits") or [], default=str)[:2000],
+         "apply_patch")
     _installed = True

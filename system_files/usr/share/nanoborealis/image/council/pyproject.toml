@@ -19,6 +19,7 @@ vote = "nanoborealis_council.tools:Vote"
 escalate = "nanoborealis_council.tools:Escalate"
 hands_devices = "nanoborealis_council.hands:HandsDevices"
 hands_run = "nanoborealis_council.hands:HandsRun"
+subagent = "nanoborealis_council.subagents:Subagent"
 
 [build-system]
 requires = ["setuptools>=68"]

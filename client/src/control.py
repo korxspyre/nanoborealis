@@ -11,6 +11,7 @@ service (admin.py).
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -141,6 +142,7 @@ class ControlCenter:
         builders: dict[str, Callable[[], Awaitable[ft.Control]]] = {
             "overview": self.overview, "models": self.models, "channels": self.channels,
             "schedules": self.schedules, "skills": self.skills, "memory": self.memory,
+            "mcp": self.mcp, "hooks": self.hooks, "subagents": self.subagents,
             "devices": self.devices, "pool": self.pool, "council": self.council, "logs": self.logs, "settings": self.settings_page,
         }
         try:
@@ -928,6 +930,198 @@ class ControlCenter:
             *[inputs[key] for key, _, _ in lists],
             ft.Row([t.primary_button("Save", on_click=save)]),
         ], spacing=10, horizontal_alignment=ft.CrossAxisAlignment.STRETCH))
+
+    # -- MCP servers -------------------------------------------------------------------------------
+    # nanobot's own MCP settings (its WebUI API): the presets it knows, and servers you add as JSON in the
+    # mcpServers format Claude Code and Cursor use. They run in the agent's container.
+
+    async def mcp_action(self, action: str, payload: dict[str, Any], done: str) -> None:
+        try:
+            answer = await self.app.link.request(action, payload, timeout=120)
+        except LinkError as e:
+            self.toast(str(e))
+            return
+        last = (answer or {}).get("last_action") if isinstance(answer, dict) else None
+        said = (last or {}).get("message") or done
+        restart = isinstance(answer, dict) and answer.get("requires_restart")
+        self.toast(f"{said} Restart the agent (Overview) to load it." if restart else said)
+        await self.reload("mcp")
+
+    def mcp_add_dialog(self) -> None:
+        box = ft.TextField(multiline=True, min_lines=10, max_lines=18, text_style=ft.TextStyle(font_family=t.MONO, size=12.5),
+                           value='{\n  "mcpServers": {\n    "filesystem": {\n      "command": "npx",\n'
+                                 '      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/nanobot/projects"]\n'
+                                 '    }\n  }\n}\n', border_radius=t.RADIUS, border_color=t.LINE_HI, focused_border_color=t.ACCENT)
+
+        async def add(_e=None) -> None:
+            self.page.pop_dialog()
+            await self.mcp_action("settings.mcp.import", {"config": box.value or ""}, "Added.")
+        self.page.show_dialog(ft.AlertDialog(
+            title=ft.Text("Add MCP servers"),
+            content=ft.Column([t.muted("Paste the mcpServers JSON a server's docs give for Claude Code or Cursor. "
+                                       "Servers run in the agent's container; a cloud one sees what the agent sends it.", size=12.5),
+                               box], tight=True, width=600, spacing=10),
+            actions=[t.quiet_button("Cancel", on_click=lambda _e: self.page.pop_dialog()), t.primary_button("Add", on_click=add)]))
+
+    def mcp_enable_dialog(self, preset: dict[str, Any]) -> None:
+        fields = {f["name"]: ft.TextField(label=f.get("label") or f["name"], password=bool(f.get("secret")),
+                                          hint_text=f.get("placeholder") or "", border_radius=t.RADIUS)
+                  for f in preset.get("required_fields") or []}
+
+        async def enable(_e=None) -> None:
+            self.page.pop_dialog()
+            await self.mcp_action("settings.mcp.enable", {"name": preset["name"], **{k: v.value or "" for k, v in fields.items()}},
+                                  f"{preset['display_name']} is on.")
+        if not fields:
+            self.page.run_task(enable)
+            return
+        self.page.show_dialog(ft.AlertDialog(
+            title=ft.Text(f"Turn on {preset['display_name']}"),
+            content=ft.Column([t.muted(preset.get("description") or "", size=12.5), *fields.values()], tight=True, width=480, spacing=10),
+            actions=[t.quiet_button("Cancel", on_click=lambda _e: self.page.pop_dialog()), t.primary_button("Turn on", on_click=enable)]))
+
+    async def mcp(self) -> ft.Control:
+        title, subtitle = "MCP servers", "Tools from other programs and services, for the agent: browsers, docs, GitHub, your own servers."
+        if self.app.link is None:
+            raise LinkError("Not connected to the agent.")
+        data = await self.app.link.api_get("/api/settings/mcp-presets")
+        presets = data.get("presets") or []
+        on = [p for p in presets if p.get("installed") or p.get("configured") or p.get("source") != "preset"]
+        off = [p for p in presets if p not in on]
+
+        def row(p: dict[str, Any], installed: bool) -> ft.Control:
+            actions: list[ft.Control] = []
+            if installed:
+                actions += [t.quiet_button("Test", on_click=lambda _e, n=p["name"]: self.page.run_task(
+                                self.mcp_action, "settings.mcp.test", {"name": n}, "Tested.")),
+                            t.quiet_button("Remove", on_click=lambda _e, n=p["name"]: self.page.run_task(
+                                self.mcp_action, "settings.mcp.remove", {"name": n}, "Removed."))]
+            else:
+                actions.append(t.outline_button("Turn on", on_click=lambda _e, pr=p: self.mcp_enable_dialog(pr)))
+            status = str(p.get("status") or "").replace("_", " ")
+            return t.card(ft.Row([
+                ft.Column([ft.Row([ft.Text(p.get("display_name") or p["name"], size=14, weight=ft.FontWeight.W_600),
+                                   t.muted(status, size=11.5)], spacing=8),
+                           t.muted(p.get("description") or p.get("connection_summary") or "", size=12)], spacing=2, expand=True),
+                *actions], spacing=8), padding=12)
+        body: list[ft.Control] = [t.muted(f"ON · {len(on)}", size=11), *[row(p, True) for p in on]]
+        if not on:
+            body.append(t.muted("None yet. Turn on one below, or add your own.", size=12.5))
+        body += [t.muted("AVAILABLE", size=11), *[row(p, False) for p in off]]
+        return self.frame(title, subtitle, body, actions=[t.outline_button("Add servers", icon=ft.Icons.ADD_ROUNDED,
+                                                                           on_click=lambda _e: self.mcp_add_dialog())])
+
+    # -- Hooks -------------------------------------------------------------------------------------
+    # Claude Code's format, run by the agent image's gate.py around the agent's shell and file tools.
+
+    HOOKS_PATH = f"{admin.WORKSPACE}/.nanoborealis/hooks.json"
+    HOOKS_EXAMPLE = ('{\n  "hooks": {\n    "PreToolUse": [\n      {"matcher": "exec", "hooks": [{"type": "command", '
+                     '"command": "python3 ~/hooks/check_command.py"}]}\n    ],\n    "PostToolUse": [\n      {"matcher": '
+                     '"write_file|edit_file|apply_patch", "hooks": [{"type": "command", "command": "cd ~/projects && '
+                     'git diff --stat"}]}\n    ]\n  }\n}\n')
+
+    async def hooks(self) -> ft.Control:
+        title, subtitle = "Hooks", ("Your own commands that run before or after the agent's shell commands and file edits, "
+                                    "in the same format as Claude Code's.")
+        try:
+            current = await asyncio.to_thread(admin.read_file, self.app.machine, self.HOOKS_PATH)
+        except PairingError:
+            current = ""
+        box = ft.TextField(value=current or self.HOOKS_EXAMPLE, multiline=True, min_lines=14, max_lines=28,
+                           text_style=ft.TextStyle(font_family=t.MONO, size=12.5), border_radius=t.RADIUS,
+                           border_color=t.LINE_HI, focused_border_color=t.ACCENT)
+        note = t.muted("" if current else "No hooks yet: this is an example. Save it, change it, or clear it.", size=12)
+
+        async def save(_e=None) -> None:
+            text = (box.value or "").strip()
+            try:
+                parsed = json.loads(text) if text else {"hooks": {}}
+                if not isinstance(parsed.get("hooks"), dict):
+                    raise ValueError('it needs a "hooks" object')
+            except (ValueError, AttributeError) as e:
+                note.value = f"That isn't valid: {e}"
+                self.page.update()
+                return
+            try:
+                await asyncio.to_thread(admin.write_file, self.app.machine, self.HOOKS_PATH, json.dumps(parsed, indent=2) + "\n")
+            except PairingError as e:
+                self.toast(str(e))
+                return
+            self.toast("Hooks saved. They apply from the agent's next tool call.")
+            await self.reload("hooks")
+        guide = t.card(ft.Column([
+            t.muted("Events: PreToolUse (before; exit status 2 blocks the tool, and what the command prints to stderr is the "
+                    "reason the agent is given) and PostToolUse (after). The matcher is a regular expression over the tool: "
+                    "exec, write_file, edit_file, apply_patch; empty or * matches all.", size=12.5),
+            t.muted("Each command gets the event as JSON on stdin: hook_event_name, tool_name, tool_input, chat_id, and "
+                    "tool_response after. Hooks run inside the agent's container, as the agent.", size=12.5),
+        ], spacing=6))
+        return self.frame(title, subtitle, [guide, box, note], actions=[t.primary_button("Save", on_click=save)])
+
+    # -- Subagents ----------------------------------------------------------------------------------
+    # Named specialists the agent hands tasks to with its `subagent` tool (the image's subagents.py).
+
+    AGENTS_DIR = f"{admin.WORKSPACE}/.nanoborealis/agents"
+
+    def subagent_dialog(self, path: str | None, text: str) -> None:
+        box = ft.TextField(value=text, multiline=True, min_lines=12, max_lines=22, text_style=ft.TextStyle(font_family=t.MONO, size=12.5),
+                           border_radius=t.RADIUS, border_color=t.LINE_HI, focused_border_color=t.ACCENT)
+
+        async def save(_e=None) -> None:
+            body = box.value or ""
+            name = next((line.split(":", 1)[1].strip() for line in body.splitlines() if line.lower().startswith("name:")), "")
+            name = re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-")[:40]
+            if not name:
+                self.toast("Give it a name: a line 'name: ...' between the --- lines.")
+                return
+            target = path or f"{self.AGENTS_DIR}/{name}.md"
+            self.page.pop_dialog()
+            try:
+                await asyncio.to_thread(admin.write_file, self.app.machine, target, body.rstrip() + "\n")
+            except PairingError as e:
+                self.toast(str(e))
+                return
+            self.toast(f"Saved {name}. The agent can hand it tasks from its next message.")
+            await self.reload("subagents")
+        self.page.show_dialog(ft.AlertDialog(title=ft.Text("Subagent"), content=ft.Container(box, width=620),
+                                             actions=[t.quiet_button("Cancel", on_click=lambda _e: self.page.pop_dialog()),
+                                                      t.primary_button("Save", on_click=save)]))
+
+    async def subagents(self) -> ft.Control:
+        title, subtitle = "Subagents", ("Specialists your agent can hand a task to, each with its own instructions: it works "
+                                        "on the side and reports back, like Claude Code's subagents.")
+        try:
+            files = [f for f in await asyncio.to_thread(admin.list_files, self.app.machine, self.AGENTS_DIR)
+                     if f["path"].endswith(".md")]
+        except PairingError:
+            files = []
+        rows: list[ft.Control] = []
+        for f in files:
+            try:
+                text = await asyncio.to_thread(admin.read_file, self.app.machine, f["path"])
+            except PairingError:
+                continue
+            meta = dict(line.split(":", 1) for line in text.split("---")[1].splitlines() if ":" in line) if text.startswith("---") else {}
+            name = (meta.get("name") or f["path"].rsplit("/", 1)[-1][:-3]).strip()
+
+            async def delete(_e=None, p=f["path"]) -> None:
+                try:
+                    await asyncio.to_thread(admin.delete_file, self.app.machine, p)
+                except PairingError as e:
+                    self.toast(str(e))
+                await self.reload("subagents")
+            rows.append(t.card(ft.Row([
+                ft.Icon(ft.Icons.CALL_SPLIT_ROUNDED, size=18, color=t.VIOLET),
+                ft.Column([ft.Text(name, size=14, weight=ft.FontWeight.W_600),
+                           t.muted((meta.get("description") or "").strip(), size=12)], spacing=2, expand=True),
+                t.quiet_button("Edit", on_click=lambda _e, p=f["path"], body=text: self.subagent_dialog(p, body)),
+                t.quiet_button("Delete", on_click=delete),
+            ], spacing=10), padding=12))
+        if not rows:
+            rows.append(t.muted("None yet. The agent uses one when a task fits it: add one with New.", size=12.5))
+        template = "---\nname: \ndescription: What it's for, and when the agent should use it.\n---\nYour instructions for it.\n"
+        return self.frame(title, subtitle, rows, actions=[t.outline_button("New", icon=ft.Icons.ADD_ROUNDED,
+                                                                           on_click=lambda _e: self.subagent_dialog(None, template))])
 
     # -- Rigs --------------------------------------------------------------------------------------
 

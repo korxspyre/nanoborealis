@@ -16,6 +16,12 @@ fi
 # Skills added in later NanoBorealis releases reach existing agents; ones the agent edited are left alone.
 mkdir -p "$state/workspace/skills"
 cp -Rn /opt/nanobot-seed/workspace/skills/. "$state/workspace/skills/" 2>/dev/null || true
+# The starter subagents (the `subagent` tool's definitions), once; ones the owner edited stay as they are.
+mkdir -p "$state/workspace/.nanoborealis/agents"
+if [ ! -e "$state/workspace/.nanoborealis/.agents-seeded" ]; then
+    cp -Rn /opt/nanobot-seed/workspace/.nanoborealis/agents/. "$state/workspace/.nanoborealis/agents/" 2>/dev/null || true
+    touch "$state/workspace/.nanoborealis/.agents-seeded"  # once: a subagent you deleted stays deleted
+fi
 
 # Free OpenRouter models whose free tier ended: an agent seeded with them would fall back to a model that only
 # answers 404. Each is swapped for a free model of the same use, in the config the agent already has.
