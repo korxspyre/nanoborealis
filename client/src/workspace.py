@@ -194,6 +194,9 @@ class Workspace:
         # The coding-agent features (codefeatures.py): plan mode, the status bar, the crew strip, checkpoints.
         self.plan_mode = False
         self.agent_mode = "auto"  # this chat's permission mode for the agent's own tools (gate.py on the computer)
+        self.skill_commands: dict[str, str] = {}  # "/code-review" -> the skill it runs
+        self.side_listeners: list[Any] = []  # /btw answers streaming in, from temporary chats
+        self.side_chats: set[str] = set()
         self.plan_turn = False  # the turn running now was sent as a plan request
         self.context_used: int | None = None
         self.lines_added = self.lines_removed = 0
@@ -1151,6 +1154,10 @@ class Workspace:
 
     async def on_event(self, event: dict[str, Any]) -> None:
         name = event["event"]
+        if self.side_listeners and event.get("chat_id") in self.side_chats:  # a /btw answer: never this chat's
+            for listener in list(self.side_listeners):
+                await listener(event)
+            return
         if name == "link_up":
             await self.on_link_up()
             return
@@ -1393,6 +1400,17 @@ class Workspace:
         rows = data.get("commands") if isinstance(data, dict) else []
         self.agent_commands = [(str(c.get("command")), str(c.get("description") or c.get("title") or ""))
                                for c in rows or [] if isinstance(c, dict) and str(c.get("command", "")).startswith("/")]
+        # Skills by name, as in Claude Code: /code-review asks the agent to use that skill.
+        try:
+            skills = await link.api_get("/api/webui/skills")
+        except (LinkError, AuthError):
+            skills = {}
+        taken = {c for c, _ in self.all_commands()}
+        self.skill_commands = {f"/{s['name']}": str(s["name"]) for s in (skills.get("skills") if isinstance(skills, dict) else []) or []
+                               if isinstance(s, dict) and s.get("name") and s.get("enabled", True) and f"/{s['name']}" not in taken}
+        self.agent_commands += [(c, "Skill: " + str(next((s.get("description") for s in skills.get("skills") or []
+                                                         if s.get("name") == n), "") or n)[:90])
+                                for c, n in self.skill_commands.items()]
 
     async def load_catalog(self) -> None:
         try:
@@ -1437,6 +1455,12 @@ class Workspace:
         if own is not None:  # the app's own commands (/plan, /rewind, /crew...) never go to the agent
             await self.client_command(*own)
             return
+        word, _, rest = text.partition(" ")
+        if word in self.skill_commands:  # /code-review ... : use that skill for this (nanobot's /skill only lists them)
+            skill = self.skill_commands[word]
+            self.composer.value = (f"Use your {skill} skill for this: {rest}" if rest.strip() else
+                                   f"Use your {skill} skill on what we're working on now.")
+            text = self.composer.value
         link = self.app.link
         if link is None or not link.connected:
             self.add(transcript.error("Not connected to the agent yet."))
@@ -1750,7 +1774,76 @@ class Workspace:
             await self.show_section("memory")
         elif name == "/agents":
             await self.show_section("council")
+        elif name == "/permissions":
+            modes = {k: label for k, label, _i, _a in self.MODES}
+            if rest.strip() in modes or rest.strip() in {v.lower(): k for k, v in modes.items()}:
+                key = rest.strip() if rest.strip() in modes else {v.lower(): k for k, v in modes.items()}[rest.strip()]
+                await self.set_agent_mode(key)
+                self.toast(f"This chat's mode: {modes[key]}.")
+            else:
+                self.toast(f"This chat's mode: {modes[self.agent_mode]}. Change it with the chip by the folder, or "
+                           f"/permissions {' | '.join(modes)}.")
+        elif name == "/btw":
+            await self.side_question(rest)
+        elif name in ("/mcp", "/hooks", "/subagents", "/skills"):
+            await self.show_section(name[1:])
+        elif name == "/hands":
+            await self.app.hands.open_dialog()
         self.page.update()
+
+    async def side_question(self, question: str) -> None:
+        """/btw: a question answered on the side, in a temporary chat that knows this chat's recent messages but
+        adds nothing to it and isn't saved (Claude Code's /btw)."""
+        link = self.app.link
+        if not question.strip() or link is None:
+            self.toast("Ask it after the command: /btw what does this error mean?")
+            return
+        recent: list[str] = []
+        if self.chat_id:
+            try:
+                thread = await link.load_thread(self.chat_id, limit=12)
+                recent = [f"{m.get('role')}: {str(m.get('content'))[:1500]}" for m in thread.get("messages") or []
+                          if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)]
+            except (LinkError, AuthError, asyncio.TimeoutError):
+                recent = []
+        context = ("Here is the end of a conversation I'm in, for context only:\n\n" + "\n\n".join(recent) + "\n\n---\n") if recent else ""
+        answer = transcript.Answer()
+        holder = t.card(ft.Column([t.muted("BY THE WAY · not part of this chat, not saved", size=11), answer.view], spacing=6))
+        self.add(holder)
+        self.page.update()
+        chunks: list[str] = []
+        done = asyncio.Event()
+        side: str | None = None
+
+        async def on_side(event: dict[str, Any]) -> None:
+            if event.get("chat_id") != side:
+                return
+            if event.get("event") == "delta" and isinstance(event.get("text"), str):
+                chunks.append(event["text"])
+                answer.set("".join(chunks))
+                self.page.update()
+            elif event.get("event") == "message" and isinstance(event.get("text"), str) and not chunks:
+                answer.set(event["text"])
+                self.page.update()
+            elif event.get("event") == "turn_end":
+                done.set()
+        self.side_listeners.append(on_side)
+        try:
+            side = await link.new_temporary_chat()
+            self.side_chats.add(side)
+            await link.send_message(side, f"{context}Answer briefly, on its own: {question.strip()}")
+            await asyncio.wait_for(done.wait(), 300)
+        except (LinkError, asyncio.TimeoutError) as e:
+            answer.set(f"(No answer: {e or 'it took too long'})")
+            self.page.update()
+        finally:
+            self.side_listeners.remove(on_side)
+            if side:
+                self.side_chats.discard(side)
+                try:
+                    await link.discard_temporary_chat(side)
+                except LinkError:
+                    pass
 
     # -- Keys and focus ------------------------------------------------------------------------------
 

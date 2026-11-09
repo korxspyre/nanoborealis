@@ -239,6 +239,13 @@ CLIENT_COMMANDS = [
     ("/privacy", "Where this chat's model runs and whether it is tokenized"),
     ("/memory", "Open what the agent remembers"),
     ("/agents", "Open your rigs"),
+    ("/permissions", "How freely the agent's tools run in this chat: auto, accept edits, ask first, plan only"),
+    ("/btw", "A side question that doesn't go into this chat: /btw what does this error mean?"),
+    ("/mcp", "Open the MCP servers"),
+    ("/hooks", "Open the hooks"),
+    ("/subagents", "Open the subagents"),
+    ("/skills", "Open the skills; /skill-name runs one"),
+    ("/hands", "Lend this device's hands, or undo an agent's job on it"),
 ]
 CLIENT_COMMAND_NAMES = {c for c, _ in CLIENT_COMMANDS}
 
