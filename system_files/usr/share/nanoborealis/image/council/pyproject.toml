@@ -17,6 +17,8 @@ task_submit = "nanoborealis_council.tools:TaskSubmit"
 task_review = "nanoborealis_council.tools:TaskReview"
 vote = "nanoborealis_council.tools:Vote"
 escalate = "nanoborealis_council.tools:Escalate"
+hands_devices = "nanoborealis_council.hands:HandsDevices"
+hands_run = "nanoborealis_council.hands:HandsRun"
 
 [build-system]
 requires = ["setuptools>=68"]

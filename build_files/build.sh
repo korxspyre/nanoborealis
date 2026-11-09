@@ -32,6 +32,10 @@ ln -sf /usr/share/nanoborealis/nanoborealis /usr/bin/nanobot-os
 
 systemctl enable nanoborealis-firewall.service nanoborealis-migrate.service nanoborealis-wifi-resume.service
 
+# Undo for what agents do: hourly read-only snapshots of the homes and the shared projects folder.
+chmod 0755 /usr/libexec/nanoborealis-snapshot
+systemctl enable nanoborealis-snapshot.timer
+
 # Remote access: the NanoBorealis app pairs with a PIN shown on this screen, then connects over TLS
 # with a password of its own (nanoborealis-remote). Avahi announces the computer so the app finds it.
 systemctl enable nanoborealis-remote.service

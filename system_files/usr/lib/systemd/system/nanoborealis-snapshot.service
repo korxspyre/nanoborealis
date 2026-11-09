@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+[Unit]
+Description=NanoBorealis snapshots (undo for what agents do to homes and projects)
+Documentation=file:///usr/share/nanoborealis/README.md
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/nanoborealis-snapshot take hourly
+Nice=10
+IOSchedulingClass=idle

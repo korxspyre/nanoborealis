@@ -23,8 +23,11 @@ Re-running is safe: it keeps the agent's OpenRouter key, WebUI password, and mem
 | It can | It can't |
 |---|---|
 | Use `sudo` inside its container: install packages, compile, run services | Change the host operating system, or touch your files outside the projects folder |
-| Keep tools it installs in its home; keep apt packages by listing them in `~/.config/nanoborealis/apt-packages` | Reach your local network. A root-owned firewall blocks it, though DNS still works |
-| Reach the internet: OpenRouter, package mirrors, git hosts | Turn that firewall off, because it has no root on the host |
+| Keep tools it installs in its home; keep apt packages by listing them in `~/.config/nanoborealis/apt-packages` | Undo its own snapshots: they are root's |
+| Reach the internet and your local network, like any program you run (`nanoborealis lan off` keeps it off the local network) | Turn the firewall off, because it has no root on the host |
+| Work in your own files and on your other devices through **hands**, one job at a time, each checked against what you asked for | Reach the pool node's API, which has no password |
+
+The sandbox is minimal on purpose. It is there so the agent can't damage the system, not to keep it from your files or your network: an agent that can't touch either can't help with real work. What makes that safe is undo, not walls. Every hour `nanoborealis-snapshot.timer` keeps a read-only copy of the homes and the projects folder (instant on btrfs; the last 24 hourly and 7 daily are kept). `nanoborealis snapshot list` shows them, and `nanoborealis snapshot restore <id> <path>` brings a file or folder back, keeping what is there now beside it.
 
 ## How it's contained
 
@@ -33,7 +36,8 @@ Re-running is safe: it keeps the agent's OpenRouter key, WebUI password, and mem
 | Dedicated `nanobot-agent` account | Owns nothing but the agent. Anything that escapes the container lands in an empty account, not yours |
 | Rootless Podman | Root inside the container is an unprivileged user on the host |
 | One shared folder | The only host path the agent sees is the projects folder |
-| Network guard | `nanoborealis-firewall.service` loads at boot, before any user services start, and drops the agent's traffic to private, link-local, and CGNAT addresses. The only exceptions are this computer's own pool relay, which offers chat only, and, with a council, its Hall |
+| Network guard | `nanoborealis-firewall.service` loads at boot, before any user services start. It always closes the pool node's API to the agent. With `nanoborealis lan off` it also drops the agent's traffic to private, link-local and CGNAT addresses, except this computer's own pool relay, which offers chat only, and the Hall |
+| Snapshots | Hourly read-only copies of the homes and the projects folder, owned by root, so anything an agent does can be undone |
 | SELinux | Enforcing, and the projects folder is labeled for container use |
 | Loopback-only WebUI | The agent's own page listens on this machine only. Other devices reach it only after pairing: `nanoborealis-remote` shows a 6-digit PIN on this screen, then lets that device in over TLS with a long password of its own |
 | Read-only OS | Aurora's system image can't be modified by anything the agent can reach |
@@ -41,7 +45,7 @@ Re-running is safe: it keeps the agent's OpenRouter key, WebUI password, and mem
 ## What it doesn't protect against
 
 - **The agent can read its own OpenRouter key.** nanobot has to hold the key to call the API, and the agent's shell inherits it. Use a dedicated key with a low credit limit.
-- **Internet access is unrestricted.** The firewall stops the local network, not the internet.
+- **Network access is open by default.** The agent reaches the internet and your local network. `nanoborealis lan off` closes the local network to it.
 - **Free providers may log prompts.** Keep personal files and logged-in accounts off this machine.
 - **Secrets aren't encrypted at rest.** Podman keeps them in a file only `nanobot-agent` and root can read.
 - **A paired device is trusted like you.** Anyone who picks up a paired, unlocked phone or PC can chat with your agent, and open a terminal here as the person who approved that device (`sudo` still asks for their password). `nanoborealis devices remove <id>` unpairs a lost one. Pairing itself needs the PIN shown on this screen, so it can't happen without someone at this computer.

@@ -22,6 +22,7 @@ import flet as ft
 
 import admin
 import discovery
+import handsui
 import host
 import models_catalog
 import pairing
@@ -93,6 +94,8 @@ class NanoBorealisApp:
         self.share_busy = False
         # Or lending this device to the pool: a pool node here (poolnode.py).
         self.node: poolnode.Node | None = None
+        # Lending this device's hands to the agents, and answering what they ask (handsui.py).
+        self.hands = handsui.HandsUI(self)
         self.url_launcher = ft.UrlLauncher()
         # A phone: it chats, pairs and manages the computer, but doesn't write install sticks, lend
         # its hardware, or run a pool node.
@@ -636,6 +639,8 @@ class NanoBorealisApp:
         self.page.run_task(self.keep_linked, link)
         if self.node is None:
             self.page.run_task(self.resume_sharing_on_start)
+        self.hands.stop()  # another computer, perhaps: its own questions, and lend to it if you were lending
+        self.page.run_task(self.hands.resume)
 
     async def keep_linked(self, link: AgentLink) -> None:
         try:
@@ -680,6 +685,7 @@ class NanoBorealisApp:
 
     async def disconnect(self) -> None:
         link, self.link = self.link, None
+        self.hands.stop()
         if link is not None:
             await link.close()
         if self.workspace is not None:

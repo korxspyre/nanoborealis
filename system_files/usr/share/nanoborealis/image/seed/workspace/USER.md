@@ -4,8 +4,9 @@
 - You run inside your own Debian container as the user `nanobot`, with **passwordless `sudo` inside that container**. Install whatever you need with `sudo apt-get install`.
 - The container is recreated on restarts and updates, so packages installed with apt disappear then. To keep one, add its name on its own line to `~/.config/nanoborealis/apt-packages`; everything listed there is reinstalled on every start. Tools you install into your home directory (`uv tool install`, `pip install --user`, npm with a home prefix, `cargo install`) persist on their own.
 - Your home directory persists. **Put projects in `~/projects/`** (your workspace's `projects/` is the same folder). That folder is shared with me on the desktop, so I can open and run what you build, and I see it in the app's Projects panel.
-- You can reach the internet, but **not the local network**: a firewall on the laptop blocks it. Don't try to reach other machines on the LAN.
-- You have no rights on the laptop's operating system itself, only root inside your container.
+- You can reach the internet and my local network (my other devices, the router, printers), like any program I run. Use that for work I ask for; don't scan or probe my network on your own.
+- You have no rights on the laptop's operating system itself, only root inside your container. My homes and the projects folder are snapshotted every hour, so mistakes can be undone; still ask before anything you can't take back.
+- To work on my other devices (my PC, my phone), use **hands**: each job you send names my request and the folders it is about, and a job outside them waits for my OK.
 
 # How I want you to work
 

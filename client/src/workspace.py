@@ -367,6 +367,11 @@ class Workspace:
                                      ft.Icons.MEMORY_ROUNDED, False, lambda _e: self.page.run_task(app.open_share_dialog)))
             rows.append(self.nav_row("Make an install stick", ft.Icons.USB_ROUNDED, False,
                                      lambda _e: self.page.run_task(app.open_stick_dialog)))
+        if app.machine is not None:
+            # Every device of yours, this computer too (that's how agents reach your own home folder here, as you,
+            # scoped to what you ask, instead of from their container): handsui.py.
+            rows.append(self.nav_row("Lending hands to agents" if app.hands.lending else "Lend hands to agents",
+                                     ft.Icons.FRONT_HAND_OUTLINED, False, lambda _e: self.page.run_task(app.hands.open_dialog)))
         if not host.comes_with_os():
             rows.append(self.nav_row(f"App updates ({app.version})", ft.Icons.SYSTEM_UPDATE_ALT_ROUNDED, False,
                                      lambda _e: self.page.run_task(app.check_for_update, False)))

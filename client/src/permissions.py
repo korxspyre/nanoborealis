@@ -48,6 +48,17 @@ NEVER = [
     (r"(curl|wget|iwr|Invoke-WebRequest)\b[^|]*\|\s*(ba)?sh\b|iex\s*\(", "runs code straight from the internet"),
 ]
 
+# Always asked about, in every mode and even inside the request's folders: what can't be taken back. Changes to
+# files can be undone (snapshots on NanoBorealis, git, the bin); these reach other people or destroy for good.
+IRREVERSIBLE = [
+    (r"\bgit\s+push\b|\bgit\s+reset\s+--hard\b|\bgit\s+clean\s+-[a-z]*f", "publishes or throws away git work"),
+    (r"\b(npm|pnpm|yarn)\s+publish\b|\btwine\s+upload\b|\bcargo\s+publish\b|\bgh\s+(release|pr|issue)\s+create\b",
+     "publishes"),
+    (r"\b(rm|del|erase|rmdir|rd)\b.*\s-[a-z]*r|\bRemove-Item\b.*-Recurse|\brm\s+-[a-z]*f", "deletes files for good"),
+    (r"\b(sendmail|mail|mutt|Send-MailMessage)\b|\bcurl\b.*\s-(X\s*POST|d|F|-data)\b", "sends something to someone"),
+    (r"\b(pip|npm|winget|choco|scoop|brew|apt(-get)?|dnf)\s+(uninstall|remove|purge)\b", "uninstalls software"),
+]
+
 # Commands that only look at things. Anything else counts as changing something.
 READ_ONLY = re.compile(
     r"^\s*(ls|dir|cat|type|head|tail|less|more|wc|stat|file|find|tree|pwd|echo|grep|rg|which|where|whoami|id|uname|"
@@ -152,6 +163,9 @@ def decide(command: str, cwd: str, task: Task | None, policy: Policy) -> Decisio
         return Decision("allow", "reading, in plan mode") if reads else Decision("deny", "plan mode: nothing may change")
     if reads:
         return Decision("allow", "only reads, inside the task's folders")
+    for pattern, why in IRREVERSIBLE:  # in every mode: what can't be taken back waits for you
+        if re.search(pattern, command, re.I):
+            return Decision("ask", f"it can't be undone: it {why}")
     if policy.mode == "trust":
         return Decision("allow", "trust mode")
     if policy.mode == "scoped":

@@ -39,4 +39,10 @@ check("npm test", PROJ, "allow", allow=["npm test"])
 check("ls", PROJ, "deny", t=None)  # no request, no scope
 check("ls", PROJ, "deny", roots=[OTHER])  # the task's folder isn't one the owner shares
 check("git push --force", PROJ, "deny", deny=[r"git\s+push\s+--force"], mode="trust")
+# What can't be undone waits for the owner even in trust mode and inside the request's folders.
+check("git push origin main", PROJ, "ask", mode="trust")
+check("rm -r build", PROJ, "ask", mode="scoped")
+check("npm publish", PROJ, "ask", mode="trust")
+check("pip uninstall requests", PROJ, "ask", mode="trust")
+check("git commit -m x", PROJ, "allow", mode="scoped")  # a commit can be undone
 print("permissions checks passed")

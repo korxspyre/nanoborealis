@@ -149,6 +149,53 @@ def coordinator(machine: Machine) -> None:
     check(True, "coordinator: a device can stop lending")
 
 
+def hands_flow(machine: Machine) -> None:
+    """Hands: this check lends its own hands, a job inside its request's folder runs, and one outside them waits
+    for the owner, who answers from the app (here: from another thread, as a phone would)."""
+    import tempfile
+    import threading
+    os.environ["LOCALAPPDATA"] = tempfile.mkdtemp()  # hands.py keeps its policy and log under here
+    import hands
+    from permissions import Policy
+    work, elsewhere = tempfile.mkdtemp(), tempfile.mkdtemp()
+    with open(os.path.join(work, "notes.txt"), "w") as f:
+        f.write("hello\n")
+    Policy(mode="scoped").save(hands.policy_path())
+    stop = threading.Event()
+    lender = threading.Thread(target=hands.serve, daemon=True,
+                              kwargs={"machine": machine, "approve": hands.ask_owner(machine, stop.is_set),
+                                      "stop": stop.is_set, "progress": lambda _line: None})
+    lender.start()
+    try:
+        for _ in range(50):
+            if admin.hands_devices(machine):
+                break
+            time.sleep(0.2)
+        check(any(d["id"] == machine.device_id for d in admin.hands_devices(machine)), "hands: a lending device is listed")
+        show = "type notes.txt" if os.name == "nt" else "cat notes.txt"
+        ran = admin.hands_run(machine, machine.device_id, show, "read my notes", [work], work)
+        check(ran.get("exit") == 0 and "hello" in ran.get("output", ""), "hands: a job inside its request's folder runs")
+
+        answers: list[str] = []
+
+        def owner_answers() -> None:
+            for _ in range(100):
+                asks = admin.hands_asks(machine)
+                if asks:
+                    answers.append(asks[0]["reason"])
+                    admin.hands_answer(machine, asks[0]["id"], "deny")
+                    return
+                time.sleep(0.2)
+        threading.Thread(target=owner_answers, daemon=True).start()
+        asked = admin.hands_run(machine, machine.device_id, show, "read my notes", [work], elsewhere)
+        check(bool(answers) and "out of scope" in answers[0], "hands: a job outside its folders asks the owner, in the app")
+        check(asked.get("refused") is True, "hands: ...and the owner's no means it doesn't run")
+        check("answer is once" in refused(admin.hands_answer, machine, "nope", "maybe") or
+              "already answered" in refused(admin.hands_answer, machine, "nope", "once"), "hands: a stale answer is refused")
+    finally:
+        stop.set()
+
+
 def main(address: str, pin_file: str, home: str) -> None:
     host, port = split_address(address)
     machine = pair(host, port, pin_file, "Control center check")
@@ -201,8 +248,11 @@ def main(address: str, pin_file: str, home: str) -> None:
           "pool: the pool's name, exo's exact version, and where its node bundles are")
     pool_page(machine)
     coordinator(machine)
-    check("no council yet" in refused(admin.hall, machine, "GET", "/rooms"),
-          "council: a computer without one says how to seat it")
+    check("no rig yet" in refused(admin.hall, machine, "GET", "/rooms"),
+          "rigs: a computer without one says how to bring one up")
+    rigs = admin.rigs(machine)
+    check(rigs["hall"] is False and rigs["rigs"] == [], "rigs: the page knows the Hall isn't running")
+    hands_flow(machine)
 
     listed = admin.devices(machine)
     check(any(d["this"] and d["id"] == machine.device_id for d in listed), "devices: this one is marked")

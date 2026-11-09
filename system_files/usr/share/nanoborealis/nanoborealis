@@ -36,8 +36,11 @@ Usage: $(basename "$0") <command>
   council ...       seat a council on the pool's loadout, one agent per model, meeting in the Hall:
                     apply, status, bench (the council's own benchmarks), seat ID [capability],
                     autonomy on-task|continuous, escalation on|off, remove
-  rig ...           teams of seats as a file: up SPEC.toml [--plan], ps [NAME], down NAME, snapshot NAME,
-                    restore NAME, send TO TEXT, inbox [SEAT], head
+  rig ...           teams of agents as a file: up SPEC.toml [--plan], ps [NAME], down NAME, snapshot NAME,
+                    restore NAME, send TO TEXT, inbox [SEAT], head, task TITLE [-- DETAIL], board [ID]
+  lan on|off        let the agent reach your local network (on by default), or keep it to the internet
+  snapshot ...      undo for agents' work: hourly copies of homes and projects. take [LABEL], list,
+                    restore ID PATH (what's there now is kept beside it)
   set-key           replace the OpenRouter API key
   privacy on|off|status   send the agent's cloud calls through a relay on this computer that swaps
                     emails, keys, numbers and addresses for placeholders and back (no images are sent)
@@ -622,6 +625,17 @@ print("Autonomy: %s. Escalation: %s." % (s["autonomy"], escalation))' ;;
                 hall_key ;;
         esac
         sudo python3 /usr/share/nanoborealis/rigctl.py "${@:2}" ;;
+    lan)
+        me="$(basename "$0")"
+        case "${2:-}" in
+            on) sudo rm -f /etc/nanoborealis/agent-lan.off ;;
+            off) sudo install -d -m 0755 /etc/nanoborealis && sudo touch /etc/nanoborealis/agent-lan.off ;;
+            *) echo "usage: $me lan on|off   (now: $([ -e /etc/nanoborealis/agent-lan.off ] && echo off || echo on))" >&2; exit 2 ;;
+        esac
+        sudo systemctl restart nanoborealis-firewall.service
+        sudo journalctl -u nanoborealis-firewall.service -n 1 -o cat --no-pager ;;
+    snapshot)
+        sudo /usr/libexec/nanoborealis-snapshot "${@:2}" ;;
     open)
         if [ "${2:-}" = "--web" ] || ! command -v nanoborealis-app >/dev/null; then
             xdg-open "$WEBUI_URL"

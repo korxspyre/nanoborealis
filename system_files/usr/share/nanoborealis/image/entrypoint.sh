@@ -79,6 +79,18 @@ if [ -f "$agents" ] && ! grep -q '^## Stay on the request' "$agents"; then
 - If a request is ambiguous about which project it means, ask instead of guessing from memory.
 EOF
 fi
+# What this computer lets you do: the sandbox is minimal (files, network), undo is snapshots, and other devices
+# are reached through hands. Added once to agents that predate it.
+if [ -f "$agents" ] && ! grep -q '^## What you can reach' "$agents"; then
+    cat >> "$agents" <<'EOF'
+
+## What you can reach
+
+- The internet and the owner's local network, like any program they run. Use the network for work they ask for; don't scan or probe it on your own.
+- The projects folder (`~/projects`), shared with the owner. Their homes and that folder are snapshotted every hour, so mistakes can be undone; still ask before anything that can't be taken back (sending, publishing, paying, deleting outside snapshots).
+- The owner's other devices, through **hands**: the `hands` tool sends one job at a time to a device that lends its hands, naming the request it serves and the folders it is about. Jobs inside those folders run; anything outside waits for the owner's OK.
+EOF
+fi
 
 pkgs="$HOME/.config/nanoborealis/apt-packages"
 if [ ! -e "$pkgs" ] && [ -s "$HOME/.config/nanoaurora/apt-packages" ]; then

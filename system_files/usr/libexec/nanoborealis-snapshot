@@ -1,0 +1,95 @@
+#!/usr/bin/bash
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+# Undo for what agents do to your files. Every hour (nanoborealis-snapshot.timer) this keeps a read-only copy of
+# the homes (/var/home, a btrfs subvolume: an instant snapshot) and of the projects folder the agent shares with
+# you (copied with reflinks: on btrfs it costs only what later changes). The copies cost almost nothing until
+# files change, and old ones are pruned: the last 24 hourly and the last 7 daily are kept.
+#
+#   nanoborealis-snapshot take [label]       take one now (agents' risky jobs call this first)
+#   nanoborealis-snapshot list
+#   nanoborealis-snapshot prune
+#   nanoborealis-snapshot restore <id> <path> copy <path> back as it was in snapshot <id>; what is there now
+#                                            is kept beside it as <path>.before-restore-<time>
+set -euo pipefail
+
+HOMES=/var/home
+HOME_SNAPS=/var/home/.snapshots
+PROJECTS=/var/srv/nanoborealis/projects
+PROJECT_SNAPS=/var/lib/nanoborealis/snapshots/projects
+KEEP_HOURLY=24
+KEEP_DAILY=7
+
+take() {
+    local id label
+    label="${1:-hourly}"
+    mkdir -p "$HOME_SNAPS" "$PROJECT_SNAPS"
+    id="$(date -u +%Y%m%dT%H%M%SZ)"
+    local n=1 base="$id"
+    while [ -e "$HOME_SNAPS/$id" ] || [ -e "$PROJECT_SNAPS/$id" ]; do  # two in one second: tell them apart
+        n=$((n + 1)); id="$base-$n"
+    done
+    chmod 0700 "$HOME_SNAPS" "$(dirname "$PROJECT_SNAPS")"
+    if btrfs subvolume show "$HOMES" >/dev/null 2>&1; then
+        btrfs subvolume snapshot -r "$HOMES" "$HOME_SNAPS/$id" >/dev/null
+    fi
+    if [ -d "$PROJECTS" ]; then
+        cp -a --reflink=auto "$PROJECTS" "$PROJECT_SNAPS/$id"
+    fi
+    echo "$label" > "$PROJECT_SNAPS/.$id.label"
+    echo "$id"
+}
+
+list() {
+    local id
+    for path in "$PROJECT_SNAPS"/*/ "$HOME_SNAPS"/*/; do
+        [ -d "$path" ] && basename "$path"
+    done 2>/dev/null | sort -u | while read -r id; do
+        printf '%s  %s\n' "$id" "$(cat "$PROJECT_SNAPS/.$id.label" 2>/dev/null || echo hourly)"
+    done
+}
+
+prune() {
+    # Keep the newest KEEP_HOURLY, plus the newest of each of the last KEEP_DAILY days; labelled ones (taken
+    # before an agent's job) are pruned like the rest, after a day.
+    local -a all keep
+    mapfile -t all < <(list | awk '{print $1}' | sort -r)
+    keep=("${all[@]:0:$KEEP_HOURLY}")
+    local day last="" days=0
+    for id in "${all[@]}"; do
+        day="${id:0:8}"
+        if [ "$day" != "$last" ] && [ $days -lt $KEEP_DAILY ]; then
+            keep+=("$id"); last="$day"; days=$((days + 1))
+        fi
+    done
+    for id in "${all[@]}"; do
+        case " ${keep[*]} " in *" $id "*) continue ;; esac
+        [ -d "$HOME_SNAPS/$id" ] && btrfs subvolume delete "$HOME_SNAPS/$id" >/dev/null
+        rm -rf "${PROJECT_SNAPS:?}/$id" "$PROJECT_SNAPS/.$id.label"
+    done
+}
+
+restore() {
+    local id="$1" target
+    target="$(realpath -m "$2")"
+    local source=""
+    case "$target" in
+        "$PROJECTS"|"$PROJECTS"/*) source="$PROJECT_SNAPS/$id${target#"$PROJECTS"}" ;;
+        "$HOMES"/*) source="$HOME_SNAPS/$id${target#"$HOMES"}" ;;
+        *) echo "only files under $HOMES or $PROJECTS have snapshots" >&2; exit 2 ;;
+    esac
+    [ -e "$source" ] || { echo "snapshot $id has no $target" >&2; exit 1; }
+    if [ -e "$target" ]; then
+        mv "$target" "$target.before-restore-$(date +%H%M%S)"
+    fi
+    cp -a --reflink=auto "$source" "$target"
+    echo "restored $target as it was in $id"
+}
+
+case "${1:-}" in
+    take) take "${2:-hourly}"; prune ;;
+    list) list ;;
+    prune) prune ;;
+    restore) [ $# -eq 3 ] || { echo "usage: $0 restore <id> <path>" >&2; exit 2; }; restore "$2" "$3" ;;
+    *) sed -n '4,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

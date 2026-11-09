@@ -125,6 +125,29 @@ def pool_policy(machine: Machine, changes: dict[str, Any]) -> dict[str, Any]:
     return dict(_call(machine, "POST", "/nanoborealis/pool/policy", {"changes": changes})["policy"])
 
 
+def hands_asks(machine: Machine) -> list[dict[str, Any]]:
+    """Jobs your devices are holding until you answer: an agent asked for something outside its request."""
+    return list(_call(machine, "GET", "/nanoborealis/hands/asks")["asks"])
+
+
+def hands_answer(machine: Machine, ask_id: str, answer: str) -> None:
+    """once, always (this program, inside the request's folders, from now on) or deny."""
+    _call(machine, "POST", "/nanoborealis/hands/answer", {"id": ask_id, "answer": answer})
+
+
+def hands_devices(machine: Machine) -> list[dict[str, Any]]:
+    return list(_call(machine, "GET", "/nanoborealis/hands")["devices"])
+
+
+def hands_run(machine: Machine, device: str, command: str, request: str, folders: list[str], cwd: str = "",
+              timeout: int = 300) -> dict[str, Any]:
+    """Give a lending device a job, for the request it serves and the folders that request is about."""
+    return _call(machine, "POST", "/nanoborealis/hands/run", {"device": device, "command": command, "cwd": cwd,
+                                                              "timeout": timeout,
+                                                              "task": {"request": request, "folders": folders}},
+                 timeout=timeout + 700)
+
+
 def rigs(machine: Machine) -> dict[str, Any]:
     """{"hall": running?, "rigs": [...], "specs": rigs that ship with the OS, "problem": why not running}."""
     return _call(machine, "GET", "/nanoborealis/rigs")

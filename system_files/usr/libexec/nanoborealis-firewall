@@ -1,10 +1,12 @@
 #!/usr/bin/bash
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (C) 2026 korxspyre
-# Keeps the NanoBorealis agent account off the local network. It can still reach DNS and
-# the internet (OpenRouter, package mirrors), but no private, link-local, or CGNAT address.
-# It may answer connections that LAN devices open to it (`nanoborealis remote on`), since
-# those packets travel in conntrack's reply direction; it can never start one itself.
+# The NanoBorealis agent account's network. The sandbox is minimal: it is there so the agent can't
+# damage the system, not to keep it from the owner's files or network. So by default the agent reaches
+# the internet and the local network, like any program the owner runs. `nanoborealis agent lan off`
+# (the marker /etc/nanoborealis/agent-lan.off) keeps it off private, link-local and CGNAT addresses
+# instead; it may still answer connections LAN devices open to it, which travel in conntrack's reply
+# direction. Either way the pool node's own API (no password) stays out of its reach.
 # Root loads this at boot, so the agent, which has no root on the host, can't undo it.
 # If this computer is in a pool, the agent may also use the pool relay (`nanoborealis pool`),
 # which offers chat only; the pool node's own API (no password) stays out of its reach.
@@ -27,6 +29,14 @@ if [ -f /etc/nanoborealis/council.env ]; then
     echo "council: the agent's seats may use this computer's Hall (port 11437)"
 fi
 
+lan_rules="        meta skuid $uid ip daddr @lan4 meta l4proto { tcp, udp } th dport 53 accept
+        meta skuid $uid ip6 daddr @lan6 meta l4proto { tcp, udp } th dport 53 accept
+        meta skuid $uid ip daddr @lan4 counter drop
+        meta skuid $uid ip6 daddr @lan6 counter drop"
+if [ ! -e /etc/nanoborealis/agent-lan.off ]; then
+    lan_rules="        # The local network is open to the agent (nanoborealis agent lan off closes it)."
+fi
+
 nft -f - <<EOF
 add table inet nanoaurora
 delete table inet nanoaurora
@@ -47,12 +57,11 @@ table inet nanoborealis {
         type filter hook output priority filter; policy accept;
         meta skuid $uid ct direction reply accept
         meta skuid $uid fib daddr type local tcp dport 52415 counter drop
+        # This computer's remote service, for the agent's hands tool (it needs the agent's own token).
+        meta skuid $uid fib daddr type local tcp dport 8766 accept
 $pool_rules
 $council_rules
-        meta skuid $uid ip daddr @lan4 meta l4proto { tcp, udp } th dport 53 accept
-        meta skuid $uid ip6 daddr @lan6 meta l4proto { tcp, udp } th dport 53 accept
-        meta skuid $uid ip daddr @lan4 counter drop
-        meta skuid $uid ip6 daddr @lan6 counter drop
+$lan_rules
     }
     chain input {
         type filter hook input priority filter; policy accept;
@@ -63,4 +72,8 @@ $council_rules
     }
 }
 EOF
-echo "local network blocked for nanobot-agent (uid $uid)"
+if [ -e /etc/nanoborealis/agent-lan.off ]; then
+    echo "local network blocked for nanobot-agent (uid $uid)"
+else
+    echo "local network open to nanobot-agent (uid $uid); the pool node's API stays closed"
+fi

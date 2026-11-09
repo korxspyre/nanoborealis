@@ -698,6 +698,8 @@ async def local(method: str, target: str, headers: list[tuple[str, str]], reader
         return await reply(writer, 200, {"service": "nanoborealis-remote", "pairing": 1, "terminal": 1, "admin": 1,
                                          "developer": 1,
                                          "machine": MACHINE})
+    if path.startswith("/nanoborealis/agent-hands"):
+        return await agent_hands(method, path, headers, reader, writer)
     if (method, path) in ADMIN_ROUTES or (path.startswith(HALL_PREFIX) and method in ("GET", "POST", "DELETE")):
         return await admin(method, target, headers, reader, writer, address)
     owner = None
@@ -873,7 +875,9 @@ elif op == "write":
     temporary = f"{path}.nanoborealis-tmp-{os.getpid()}"  # one name per writer: two at once shared one file
     with open(temporary, "w", encoding="utf-8") as f:
         f.write(data)
-    if os.path.exists(path):
+    if path.endswith(".token"):
+        os.chmod(temporary, 0o600)  # a credential: the agent's own, nobody else's
+    elif os.path.exists(path):
         os.chmod(temporary, os.stat(path).st_mode & 0o777)
     os.replace(temporary, path)
 elif op == "list":
@@ -1675,10 +1679,10 @@ async def pool_policy(data: dict, query: dict, owner: str, device_id: str) -> tu
 
 # -- Hands: the agents' work on the owner's other devices ------------------------------------------
 # A paired device can lend its "hands": the app on it keeps asking here for work (a phone or a PC
-# behind a router can't be called, but it can call), runs each job in a sandbox of its own (a WSL2
-# system that sees only the shared folders on Windows, bubblewrap on Linux) and answers with the
-# result. Jobs are handed in by administrators' devices and by this computer's own tools; nothing
-# runs on a device without its app lending, and the device decides what its sandbox can reach.
+# behind a router can't be called, but it can call), checks each job against the request it serves and
+# the owner's rules (client/src/permissions.py), runs what's allowed natively, as the owner, and answers
+# with the result. What it must ask about waits here for an answer from any of the owner's apps. Jobs come
+# from administrators' devices and from the agent's hands tool; nothing runs on a device that isn't lending.
 
 HANDS_POLL_SECONDS = 25
 HANDS_JOB_MAX = 3600
@@ -1723,7 +1727,7 @@ async def hands_poll(data: dict, query: dict, owner: str, device_id: str) -> tup
         log(f"{owner}'s device {device_id} lends its hands ({str(data.get('box', {}).get('kind', '?'))})")
     entry.last = time.time()
     if isinstance(data.get("box"), dict):
-        entry.box = {k: v for k, v in data["box"].items() if k in ("kind", "folders", "network", "os", "detail")}
+        entry.box = {k: v for k, v in data["box"].items() if k in ("kind", "folders", "network", "os", "detail", "mode", "shell")}
     if not entry.queue:
         entry.wake.clear()
         try:
@@ -1780,6 +1784,142 @@ async def hands_submit(device: str, command: str, timeout: int, by: str, task: d
     return 200, {"device": match[0], **(job.result or {})}
 
 
+# -- Asking the owner -------------------------------------------------------------------------------
+# A job outside its request's folders (or anything the device's rules say to ask about) waits for the owner. The
+# device posts the question here and waits; every app paired by an administrator (a phone too) shows it as a card,
+# and the first answer wins. Unanswered for HANDS_ASK_MAX, it counts as a no.
+
+HANDS_ASK_MAX = 600
+
+
+@dataclass
+class HandsAsk:
+    id: str
+    device: str
+    command: str
+    cwd: str
+    request: str
+    reason: str
+    by: str
+    created: float = field(default_factory=time.time)
+    answer: str | None = None
+    answered: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def public(self) -> dict:
+        devices.load()
+        return {"id": self.id, "device": self.device, "device_name": devices.by_id.get(self.device, {}).get("name", self.device),
+                "command": self.command, "cwd": self.cwd, "request": self.request, "reason": self.reason, "by": self.by,
+                "created": self.created, "expires": self.created + HANDS_ASK_MAX}
+
+
+hands_asks: dict[str, HandsAsk] = {}
+
+
+def hands_asks_tidy() -> None:
+    now = time.time()
+    for ask_id in [i for i, a in hands_asks.items() if now - a.created > HANDS_ASK_MAX + 60]:
+        hands_asks.pop(ask_id, None)
+
+
+async def hands_ask(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    """The device asks its owner about a job, then waits for the answer (call again with the id to keep waiting)."""
+    hands_asks_tidy()
+    ask = hands_asks.get(str(data.get("id") or ""))
+    if ask is None or ask.device != device_id:
+        entry = hands.get(device_id)
+        job = entry.running.get(str(data.get("job"))) if entry else None
+        ask = HandsAsk(secrets.token_hex(6), device_id, str(data.get("command") or "")[:4000], str(data.get("cwd") or "")[:1000],
+                       str(data.get("request") or "")[:2000], str(data.get("reason") or "")[:500], job.by if job else "an agent")
+        hands_asks[ask.id] = ask
+        log(f"device {device_id} asks its owner about: {ask.command[:200]} ({ask.reason})")
+    if ask.answer is None:
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(ask.answered.wait(), HANDS_POLL_SECONDS)
+    if ask.answer is None:
+        if time.time() - ask.created > HANDS_ASK_MAX:
+            hands_asks.pop(ask.id, None)
+            return 200, {"id": ask.id, "answer": "deny", "why": "nobody answered in time"}
+        return 200, {"id": ask.id, "pending": True}
+    hands_asks.pop(ask.id, None)
+    return 200, {"id": ask.id, "answer": ask.answer}
+
+
+async def hands_asks_list(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    """What the devices are waiting on the owner for: the app's approval cards."""
+    hands_asks_tidy()
+    return 200, {"asks": [a.public() for a in hands_asks.values() if a.answer is None]}
+
+
+async def hands_answer(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    ask = hands_asks.get(str(data.get("id") or ""))
+    if ask is None or ask.answer is not None:
+        return 404, {"error": "That question was already answered, or it ran out of time."}
+    answer = data.get("answer")
+    if answer not in ("once", "always", "deny"):
+        return 400, {"error": "The answer is once, always or deny."}
+    ask.answer = answer
+    ask.answered.set()
+    log(f"{owner} (device {device_id}) answered {answer} to: {ask.command[:200]}")
+    return 200, {"answered": answer}
+
+
+# -- The agent's own hands tool ---------------------------------------------------------------------
+# The agent reaches this service from its container (host.containers.internal) with a token of its own, kept in
+# its home: it can list the devices lending their hands and give one a job. It can't pair, manage devices or answer
+# its own questions; those stay with the owner's devices.
+
+AGENT_TOKEN_FILE = STATE / "agent-hands.token"
+AGENT_TOKEN_IN_HOME = ".config/nanoborealis/hands.token"
+AGENT_TOKEN_HEADER = "x-nanoborealis-agent"
+
+
+def agent_token() -> str:
+    try:
+        return AGENT_TOKEN_FILE.read_text().strip()
+    except OSError:
+        token = secrets.token_urlsafe(32)
+        AGENT_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(AGENT_TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(token)
+        return token
+
+
+async def agent_token_keeper() -> None:
+    """Keep the agent's copy of its token current (its container is remade on updates; its home stays)."""
+    while True:
+        try:
+            token = agent_token()
+            current = await asyncio.to_thread(agent_file, "read", AGENT_TOKEN_IN_HOME)
+            if current.strip() != token:
+                raise FileNotFoundError
+        except (RuntimeError, OSError, subprocess.SubprocessError):
+            with contextlib.suppress(RuntimeError, OSError, subprocess.SubprocessError):
+                await asyncio.to_thread(agent_file, "write", AGENT_TOKEN_IN_HOME, agent_token())
+        await asyncio.sleep(300)
+
+
+async def agent_hands(method: str, path: str, headers: list[tuple[str, str]], reader: asyncio.StreamReader,
+                      writer: asyncio.StreamWriter) -> None:
+    if not hmac.compare_digest(header(headers, AGENT_TOKEN_HEADER).encode(), agent_token().encode()):
+        return await reply(writer, 401, {"error": "Not the agent's token."})
+    if method == "GET" and path == "/nanoborealis/agent-hands":
+        return await reply(writer, 200, (await hands_list({}, {}, AGENT_USER, "agent"))[1])
+    if method != "POST" or path != "/nanoborealis/agent-hands/run":
+        return await reply(writer, 404, {"error": "No such endpoint."})
+    try:
+        length = int(header(headers, "content-length") or 0)
+        if not 0 <= length <= ADMIN_BODY_LIMIT:
+            raise ValueError
+        data = json.loads(await asyncio.wait_for(reader.readexactly(length), 30) if length else b"{}")
+        if not isinstance(data, dict):
+            raise ValueError
+    except (ValueError, asyncio.TimeoutError, asyncio.IncompleteReadError):
+        return await reply(writer, 400, {"error": "Bad request."})
+    status, payload = await hands_run(data, {}, "the agent", "agent")
+    await reply(writer, status, payload)
+
+
 async def hands_run(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
     command, device = data.get("command"), data.get("device")
     if not isinstance(command, str) or not command.strip() or not isinstance(device, str):
@@ -1802,6 +1942,9 @@ ADMIN_ROUTES = {
     ("POST", "/nanoborealis/hands/done"): hands_done,
     ("GET", "/nanoborealis/hands"): hands_list,
     ("POST", "/nanoborealis/hands/run"): hands_run,
+    ("POST", "/nanoborealis/hands/ask"): hands_ask,
+    ("GET", "/nanoborealis/hands/asks"): hands_asks_list,
+    ("POST", "/nanoborealis/hands/answer"): hands_answer,
     ("GET", "/nanoborealis/rigs"): rigs_overview,
     ("POST", "/nanoborealis/rigs/up"): rigs_up,
     ("GET", "/nanoborealis/agent"): agent_overview,
@@ -1955,8 +2098,12 @@ async def main() -> None:
     freeing = asyncio.create_task(keep_agent_free())
     zoning = asyncio.create_task(keep_agent_time_zone())
     pointing = asyncio.create_task(follow_pool_api())
+    # The agent's token for its hands tool, kept in its home (not in the tests' stand-in homes).
+    keeping = asyncio.create_task(agent_token_keeper()) if TEST_AGENT_HOME is None else None
     async with server:
         await server.serve_forever()
+    if keeping is not None:
+        keeping.cancel()
     expiring.cancel()
     freeing.cancel()
     zoning.cancel()

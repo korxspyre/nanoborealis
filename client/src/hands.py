@@ -34,6 +34,7 @@ import pairing  # noqa: E402
 from permissions import Decision, Log, Policy, Task, decide  # noqa: E402
 
 OUTPUT_LIMIT = 400_000  # the end of a job's output that's sent back
+ANDROID = "ANDROID_ROOT" in os.environ or hasattr(sys, "getandroidapilevel")
 
 
 def home() -> Path:
@@ -50,6 +51,8 @@ def run_native(command: str, cwd: str, timeout: int) -> dict:
     """The command in this device's own shell, as you: PowerShell on Windows, bash elsewhere."""
     if os.name == "nt":
         argv = ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command]
+    elif ANDROID:  # a phone: Android's own shell, inside this app's sandbox (its files, and what you shared with it)
+        argv = ["/system/bin/sh", "-c", command]
     else:
         argv = ["bash", "-lc", command]
     try:
@@ -63,10 +66,10 @@ def run_native(command: str, cwd: str, timeout: int) -> dict:
         return {"exit": None, "timed_out": False, "output": f"couldn't run it here: {e}"}
 
 
-Approver = Callable[[str, str, Task | None, Decision], str]  # -> "once" | "always" | "deny"
+Approver = Callable[[str, str, Task | None, Decision, str], str]  # (command, cwd, task, decision, job id) -> once|always|deny
 
 
-def ask_in_console(command: str, cwd: str, task: Task | None, decision: Decision) -> str:
+def ask_in_console(command: str, cwd: str, task: Task | None, decision: Decision, job_id: str = "") -> str:
     """The approval prompt when lending from a terminal. The app shows its own card."""
     if not sys.stdin or not sys.stdin.isatty():
         return "deny"
@@ -79,6 +82,34 @@ def ask_in_console(command: str, cwd: str, task: Task | None, decision: Decision
     return {"y": "once", "yes": "once", "a": "always", "always": "always"}.get(answer, "deny")
 
 
+ASK_MAX = 600  # seconds a question waits for the owner; unanswered, it's a no
+
+
+def ask_owner(machine: pairing.Machine, stop=lambda: False) -> Approver:
+    """The approval as a card in the app on every device the owner paired (their phone too): the question goes to
+    the NanoBorealis computer, which holds it until one of them answers. Unanswered in ASK_MAX seconds, it's a no."""
+    headers = {"X-NanoBorealis-Device": machine.password}
+
+    def approve(command: str, cwd: str, task: Task | None, decision: Decision, job_id: str = "") -> str:
+        body = {"job": job_id, "command": command, "cwd": cwd, "request": task.request if task else "",
+                "reason": decision.reason}
+        deadline = time.time() + ASK_MAX
+        while time.time() < deadline and not stop():
+            try:
+                status, answer, _ = pairing.call(machine.host, machine.port, "POST", "/nanoborealis/hands/ask",
+                                                 context=machine.context(), body=body, headers=headers, timeout=60)
+            except pairing.PairingError:
+                time.sleep(5)
+                continue
+            if status != 200:
+                return "deny"
+            if answer.get("answer") in ("once", "always", "deny"):
+                return answer["answer"]
+            body = {"id": answer.get("id")}  # still waiting: keep waiting on the same question
+        return "deny"
+    return approve
+
+
 def handle(job: dict, policy: Policy, approve: Approver, log: Log) -> dict:
     """Check one job, ask if needed, run it if allowed. Returns its result for the computer that sent it."""
     command = str(job.get("command") or "")
@@ -87,7 +118,7 @@ def handle(job: dict, policy: Policy, approve: Approver, log: Log) -> dict:
     decision = decide(command, cwd, task, policy)
     answer = "auto"
     if decision.verdict == "ask":
-        answer = approve(command, cwd, task, decision)
+        answer = approve(command, cwd, task, decision, str(job.get("id") or ""))
         if answer == "always" and command.split():
             policy.allow.append(command.split()[0])  # the program, from now on, inside scope
             policy.save(policy_path())
@@ -106,7 +137,7 @@ def handle(job: dict, policy: Policy, approve: Approver, log: Log) -> dict:
 
 def describe(policy: Policy) -> dict:
     return {"kind": "native", "os": sys.platform, "mode": policy.mode, "folders": policy.roots,
-            "shell": "powershell" if os.name == "nt" else "bash", "network": True}
+            "shell": "powershell" if os.name == "nt" else "sh" if ANDROID else "bash", "network": True}
 
 
 def serve(machine: pairing.Machine, approve: Approver = ask_in_console, stop=lambda: False, progress=print,
@@ -178,7 +209,10 @@ def main() -> int:
         print(f"{policy_path()}\n{policy}")
         return 0
     import devlink
-    serve(devlink.pick(args.machine), mode=args.mode)
+    machine = devlink.pick(args.machine)
+    # In a terminal you answer right there; otherwise the question goes to the app on your devices.
+    approve = ask_in_console if sys.stdin and sys.stdin.isatty() else ask_owner(machine)
+    serve(machine, approve=approve, mode=args.mode)
     return 0
 
 
