@@ -98,6 +98,14 @@ if [ -f "$agents" ] && ! grep -q '^## What you can reach' "$agents"; then
 EOF
 fi
 
+# Repositories in the shared projects folder are often the owner's (a separate copy the app makes, or one they
+# cloned), and git refuses to work in a repository someone else owns ("dubious ownership"). They are the owner's
+# work, shared with the agent on purpose, so its git trusts them. (A path pattern needs git 2.46; the container's
+# is older, so it is '*': in its own container, the agent's git trusts every repository it is given.)
+if ! git config --global --get-all safe.directory 2>/dev/null | grep -qx '\*'; then
+    git config --global --add safe.directory '*' 2>/dev/null || true
+fi
+
 pkgs="$HOME/.config/nanoborealis/apt-packages"
 if [ ! -e "$pkgs" ] && [ -s "$HOME/.config/nanoaurora/apt-packages" ]; then
     mkdir -p "$(dirname "$pkgs")"

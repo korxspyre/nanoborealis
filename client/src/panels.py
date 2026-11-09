@@ -337,8 +337,8 @@ class FilesPanel:
 CHANGES = r"""
 cd /srv/nanoborealis/projects 2>/dev/null || exit 0
 found=0
-for g in */.git */*/.git; do
-  [ -d "$g" ] || continue
+for g in */.git */*/.git .worktrees/*/.git; do
+  [ -e "$g" ] || continue  # a worktree's .git is a file
   found=1
   r=${g%/.git}
   echo "@@repo $r"

@@ -843,8 +843,15 @@ class Workspace:
                                 value=(self.scope or {}).get("access_mode") == "restricted" or not on_the_computer,
                                 disabled=not on_the_computer, active_color=t.ACCENT)
 
+        separate = ft.Checkbox(label="Work in a separate copy (git, on a branch of its own)", value=False,
+                               active_color=t.ACCENT)
+
         async def choose(folder: str | None) -> None:
             self.page.pop_dialog()
+            if folder and separate.value:
+                folder = await self.make_worktree(folder)
+                if folder is None:
+                    return
             wanted = project_scope(folder, bool(only_here.value), on_the_computer)
             scope = wanted if folder else None
             if self.chat_id is not None and self.app.link is not None:
@@ -875,8 +882,41 @@ class Workspace:
             title=ft.Text("Work in", size=18, weight=ft.FontWeight.W_600),
             content=ft.Container(width=420, height=min(420, (self.page.height or 800) - 260), content=ft.Column([
                 t.muted("The project this chat works in, from your projects folder.", size=13),
-                ft.ListView(rows, spacing=2, expand=True), only_here], spacing=10)),
+                ft.ListView(rows, spacing=2, expand=True), only_here, separate], spacing=10)),
             actions=[t.quiet_button("Cancel", on_click=lambda _e: self.page.pop_dialog())]))
+
+    async def make_worktree(self, folder: str) -> str | None:
+        """A separate copy of `folder` on a branch of its own, under the projects folder's .worktrees: this chat works
+        there, so its changes stay apart from the project until you merge the branch. It is a local clone (its files
+        hard-linked, so it costs little), not a `git worktree`: a worktree records an absolute path, which differs
+        between this computer and the agent's container, and the container's git is too old for relative ones.
+        Its origin is the project, by a relative path that works in both. Returns the folder to work in."""
+        from terminal import run_command
+        stamp = time.strftime("%m%d-%H%M%S")
+        name = f"{folder}-{stamp}"
+        branch = f"nanoborealis/{stamp}"
+        copy = f"{shlex.quote(HOST_PROJECTS)}/.worktrees/{shlex.quote(name)}"
+        script = (f"set -e; cd {shlex.quote(HOST_PROJECTS)}/{shlex.quote(folder)}; "
+                  f"git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {{ echo 'NOT_GIT'; exit 3; }}; "
+                  f"mkdir -p {shlex.quote(HOST_PROJECTS)}/.worktrees; "
+                  f"git clone -q --local . {copy} 2>&1; "
+                  f"git -C {copy} checkout -q -b {shlex.quote(branch)} 2>&1; "
+                  f"git -C {copy} remote set-url origin ../../{shlex.quote(folder)}; "
+                  f"echo MADE")
+        try:
+            status, output = await asyncio.to_thread(run_command, self.app.machine, script, 60)
+        except Exception as e:
+            self.toast(f"Couldn't make a separate copy: {e}")
+            return None
+        if "NOT_GIT" in output:
+            self.toast(f"{folder} isn't a git repository, so it can't have a separate copy. Ask the agent to run git init there.")
+            return None
+        if status != 0 or "MADE" not in output:
+            self.toast(f"Couldn't make a separate copy: {output.strip()[-200:]}")
+            return None
+        self.toast(f"This chat works in a copy of {folder} on the branch {branch}. To take its work: git -C {folder} "
+                   f"pull ../.worktrees/{name} {branch}")
+        return f".worktrees/{name}"
 
     # -- Models ------------------------------------------------------------------------------------
 
