@@ -102,10 +102,10 @@ class HandsUI:
                 if not self.watching:
                     self.watching = True
                     self.page.run_task(self.watch_asks)
-                self.app.workspace.toast("This device lends its hands while the app is open.") if self.app.workspace else None
+                self.app.workspace.toast("Agents can use this device while the app is open.") if self.app.workspace else None
             else:
                 self.stop()
-                self.app.workspace.toast("This device stopped lending its hands.") if self.app.workspace else None
+                self.app.workspace.toast("Agents can no longer use this device.") if self.app.workspace else None
             self.app.refresh_sidebar()
 
         bullets = ft.Column([
@@ -119,10 +119,10 @@ class HandsUI:
         undo = self.undo_list()
         actions = [t.quiet_button("Cancel", on_click=lambda _e: self.page.pop_dialog())]
         if self.lending:
-            actions.append(t.outline_button("Stop lending", on_click=lambda _e: self.page.run_task(save, False)))
-        actions.append(t.primary_button("Save and lend" if not self.lending else "Save",
+            actions.append(t.outline_button("Turn off", on_click=lambda _e: self.page.run_task(save, False)))
+        actions.append(t.primary_button("Turn on" if not self.lending else "Save",
                                         on_click=lambda _e: self.page.run_task(save, True)))
-        self.page.show_dialog(ft.AlertDialog(title=ft.Text("Lend this device's hands"),
+        self.page.show_dialog(ft.AlertDialog(title=ft.Text("Let agents use this device"),
                                              content=ft.Column([bullets, folders, mode, undo], tight=True, spacing=12,
                                                                width=520, scroll=ft.ScrollMode.AUTO),
                                              actions=actions))

@@ -533,7 +533,7 @@ class BackgroundPanel:
         except Exception:
             tasks = []
         board = [self.item(ft.Icons.ASSIGNMENT_OUTLINED, x["title"], f"{x['state']}" + (f" · {x['claimed_by']}" if x.get("claimed_by") else ""),
-                           on_click=lambda _e, tid=x["id"]: self.page.run_task(ws.show_section, f"council:task:{tid}"))
+                           on_click=lambda _e, tid=x["id"]: self.page.run_task(ws.show_section, f"colony:task:{tid}"))
                  for x in tasks[:12]]
         try:
             lending = await asyncio.to_thread(admin.hands_devices, self.machine)

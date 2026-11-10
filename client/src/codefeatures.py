@@ -192,7 +192,7 @@ def status_segments(*, model: str = "", provider: str = "", used: int | None = N
     if pool:
         segs.append({"key": "pool", "text": pool, "tone": "muted", "tip": "Your pool of computers"})
     if crew:
-        segs.append({"key": "crew", "text": crew, "tone": "muted", "tip": "Your rigs (/crew)"})
+        segs.append({"key": "crew", "text": crew, "tone": "muted", "tip": "Your crew (/crew)"})
     return segs
 
 
@@ -213,7 +213,7 @@ def count_changes(tool_cards: list[tuple[str, dict]]) -> tuple[int, int]:
 
 
 def crew_chips(seats: list[dict], head: str | None) -> list[dict]:
-    """The council's seats as chips: who they are, whether they are here, how far to trust them, who leads."""
+    """The colony's seats as chips: who they are, whether they are here, how far to trust them, who leads."""
     chips = []
     for seat in sorted(seats, key=lambda s: (s["id"] != head, -float(s.get("weight") or 0))):
         card = (seat.get("scorecard") or {}).get("overall")
@@ -231,7 +231,7 @@ def crew_summary(seats: list[dict], head: str | None) -> str:
     if not seats:
         return ""
     name = next((s.get("name") or s["id"] for s in seats if s["id"] == head), "")
-    return f"{len(seats)} seats" + (f" · {name} leads" if name else "")
+    return f"{len(seats)} crew" + (f" · {name} leads" if name else "")
 
 
 # -- The app's own slash commands ------------------------------------------------------------------------------
@@ -241,20 +241,20 @@ CLIENT_COMMANDS = [
     ("/rewind", "Put the project's files back as they were before an earlier message"),
     ("/checkpoint", "Save the project's files now, with a name"),
     ("/context", "How full this chat's context is, and what to do about it"),
-    ("/crew", "Show or hide your rigs' seats, who leads, and their benchmarks"),
+    ("/crew", "Show or hide your crew, who leads, and their benchmarks"),
     ("/head", "Who is the head agent now"),
     ("/cost", "What the cloud models have cost so far"),
     ("/diff", "Open the changes the agent has made"),
     ("/privacy", "Where this chat's model runs and whether it is tokenized"),
     ("/memory", "Open what the agent remembers"),
-    ("/agents", "Open your rigs"),
+    ("/agents", "Open your colony"),
     ("/permissions", "How freely the agent's tools run in this chat: auto, accept edits, ask first, plan only"),
     ("/btw", "A side question that doesn't go into this chat: /btw what does this error mean?"),
     ("/mcp", "Open the MCP servers"),
     ("/hooks", "Open the hooks"),
     ("/subagents", "Open the subagents"),
     ("/skills", "Open the skills; /skill-name runs one"),
-    ("/hands", "Lend this device's hands, or undo an agent's job on it"),
+    ("/hands", "Let agents use this device, or undo an agent's job on it"),
 ]
 CLIENT_COMMAND_NAMES = {c for c, _ in CLIENT_COMMANDS}
 

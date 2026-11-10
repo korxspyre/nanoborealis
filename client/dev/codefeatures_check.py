@@ -136,7 +136,7 @@ chips = cf.crew_chips(seats, "claude")
 check([c["id"] for c in chips][0] == "claude" and chips[0]["head"] and {c["id"]: c["state"] for c in chips} == {"claude": "here", "a": "ready", "far": "away", "chair": "chair"}
       and next(c for c in chips if c["id"] == "a")["benchmark"] == "83 (≥70)" and next(c for c in chips if c["id"] == "far")["benchmark"] == "not benchmarked",
       "the crew strip puts the head first and shows who is here, and each seat's benchmark")
-check(cf.crew_summary(seats, "claude") == "4 seats · Claude leads" and cf.crew_summary([], None) == "", "...with a summary for the status bar")
+check(cf.crew_summary(seats, "claude") == "4 crew · Claude leads" and cf.crew_summary([], None) == "", "...with a summary for the status bar")
 check(cf.parse_command("/rewind") == ("/rewind", "") and cf.parse_command("  /checkpoint before the refactor ") == ("/checkpoint", "before the refactor")
       and cf.parse_command("/compact") is None and cf.parse_command("hello /plan") is None, "the app's own slash commands are told from the agent's")
 check(all(c.startswith("/") and d for c, d in cf.CLIENT_COMMANDS) and len({c for c, _ in cf.CLIENT_COMMANDS}) == len(cf.CLIENT_COMMANDS), "every command has a description")

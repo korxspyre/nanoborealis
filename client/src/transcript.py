@@ -52,7 +52,20 @@ def markdown(text: str = "", on_tap_link: Callable | None = None) -> ft.Markdown
 # -- Messages -----------------------------------------------------------------------------------
 
 
-def user_message(text: str, attachments: list[str] | None = None) -> ft.Control:
+def action_row(actions: list[tuple[str, str, Callable[[], Any]]], end: bool = False) -> ft.Row:
+    """The small, quiet buttons under a message: (icon, what it does, handler) each."""
+    return ft.Row([t.icon_button(icon, tip, size=15, color=t.FAINT, on_click=lambda _e, f=run: f())
+                   for icon, tip, run in actions], spacing=0, height=30,
+                  alignment=ft.MainAxisAlignment.END if end else ft.MainAxisAlignment.START)
+
+
+def user_message(text: str, attachments: list[str] | None = None,
+                 actions: list[tuple[str, str, Callable[[], Any]]] | None = None) -> ft.Control:
+    bubble = user_bubble(text, attachments)
+    return ft.Column([bubble, action_row(actions, end=True)], spacing=0, tight=True) if actions else bubble
+
+
+def user_bubble(text: str, attachments: list[str] | None = None) -> ft.Control:
     body: list[ft.Control] = []
     for name in attachments or []:
         body.append(t.chip(name, icon=ft.Icons.ATTACH_FILE_ROUNDED, bgcolor=t.RAISED_HI))
@@ -113,13 +126,14 @@ class Answer:
     own header and copy button, and the whole answer can be copied from the row under it."""
 
     def __init__(self, text: str = "", on_copy: Callable[[str], Any] | None = None,
-                 on_tap_link: Callable | None = None):
+                 on_tap_link: Callable | None = None,
+                 actions: list[tuple[str, str, Callable[[], Any]]] | None = None):
         self.on_copy, self.on_tap_link = on_copy, on_tap_link
         self.md = markdown(text, on_tap_link)
         self.body = ft.Column([self.md], spacing=10)
         self.copy = t.icon_button(ft.Icons.CONTENT_COPY_ROUNDED, "Copy the answer", size=15,
                                   on_click=(lambda _e: on_copy(self.md.value or "")) if on_copy else None)
-        self.actions = ft.Row([self.copy], spacing=0, visible=bool(text), height=30)
+        self.actions = ft.Row([self.copy, *action_row(actions or []).controls], spacing=0, visible=bool(text), height=30)
         self.view = ft.Column([self.body, self.actions], spacing=2)
 
     def set(self, text: str) -> None:
@@ -241,7 +255,7 @@ def describe(name: str, args: dict[str, Any]) -> tuple[str, str, str]:
     if name == "hands_open":
         return f"Open on {_first(args, 'device')}", _first(args, "target"), ft.Icons.OPEN_IN_NEW_ROUNDED
     if name == "hands_devices":
-        return "Your devices", "who lends their hands", ft.Icons.DEVICES_OUTLINED
+        return "Your devices", "which ones agents can use", ft.Icons.DEVICES_OUTLINED
     if name == "cron":
         return "Schedule", _first(args, "message", "action", "cron_expr"), ft.Icons.SCHEDULE_ROUNDED
     if name == "message":

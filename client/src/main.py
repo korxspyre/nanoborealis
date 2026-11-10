@@ -698,10 +698,10 @@ class NanoBorealisApp:
 
     def share_summary(self) -> str:
         if self.node is not None and self.node.how is not None:
-            return "Lent to the pool"
+            return "Sharing GPU and CPU"
         if self.share.get("pool_consent"):
             return "Paused. Open to resume."
-        return "Lend this GPU and CPU to the pool"
+        return "Share this device's GPU and CPU"
 
 
     async def load_share(self) -> None:
@@ -809,17 +809,17 @@ class NanoBorealisApp:
         # Two consents, each for the whole of that part: the pool may use all of it, as hard as it likes.
         # Lend just the GPU on a computer whose processor you still need, and the other way round.
         gpu_switch = ft.Switch(value=bool(self.share.get("pool_gpu", True)) and (gpu or mac), disabled=not (gpu or mac),
-                               label=("Lend the GPU and its memory: all of it" if gpu else
-                                      "Lend this Mac: its GPU and memory, all of it" if mac else
-                                      "No GPU here the pool can use"))
+                               label=("Share the GPU and its memory: all of it" if gpu else
+                                      "Share this Mac: its GPU and memory, all of it" if mac else
+                                      "No GPU here that can be shared"))
         cpu_switch = ft.Switch(value=bool(self.share.get("pool_cpu", True)) and not mac, disabled=mac,
-                               label="Lend the processor and the computer's memory: all of it" if not mac else
-                                     "(a Mac's processor and GPU share one memory: lent together)")
+                               label="Share the processor and the computer's memory: all of it" if not mac else
+                                     "(a Mac's processor and GPU share one memory: shared together)")
         self.set_share_body([
-            ft.Text("Lend this device to your NanoBorealis pool, so the pool's models can be spread over its "
+            ft.Text("Share this device with your other NanoBorealis computers, so bigger models can be spread over its "
                     "memory" + (" and its GPU." if gpu or mac else "."), size=14),
             gpu_switch, cpu_switch,
-            self.bullet("What you lend, the pool uses fully: leave out the part this computer still needs for "
+            self.bullet("What you share is used fully: leave out the part this computer still needs for "
                         "its own work, like a processor serving your home while its GPU sits idle."),
             self.bullet(chosen.reason),
             self.bullet(f"It runs a pool node of the pool's own exo version ({info.ref}). The planner on your "
@@ -827,16 +827,16 @@ class NanoBorealisApp:
             self.bullet("The first start downloads the node" + (" (about 8 GB for the NVIDIA build)" if gpu else "")
                         + ", and later the parts of models placed here."),
             self.bullet(f"While this app is open the node uses ports {poolnode.PORTS} on your network; your system "
-                        "may ask to allow that. Only lend on networks you trust."),
+                        "may ask to allow that. Only share on networks you trust."),
             *([self.bullet("On Windows it runs in WSL2, as a Linux system of its own that can't see your drives or "
                            "start your programs. The first time, Windows asks for administrator rights once, to "
                            "install WSL if needed and let the pool's traffic reach it; installing WSL may need a "
                            "restart. WSL also restarts once to share the network, which stops any Linux you have "
                            "running in it.")] if chosen.how == "wsl" else []),
-            self.bullet("Stop lending at any time, and delete what it downloaded if you like."),
+            self.bullet("Stop sharing at any time, and delete what it downloaded if you like."),
         ], [
             ft.TextButton("Not now", on_click=on(self.close_share_dialog)),
-            ft.FilledButton("Lend to the pool", icon=ft.Icons.HUB_ROUNDED,
+            ft.FilledButton("Share", icon=ft.Icons.HUB_ROUNDED,
                             on_click=lambda _e: self.page.run_task(self.allow_pool, info, chosen,
                                                                     bool(gpu_switch.value), bool(cpu_switch.value))),
         ])
@@ -940,11 +940,11 @@ class NanoBorealisApp:
                     ft.Text("This device is in the pool.", size=14, expand=True)], spacing=10),
             ft.Text("Put models on it from your NanoBorealis computer: nanoborealis pool plan shows what would "
                     "run where, and nanoborealis pool apply starts it.", size=13),
-            ft.Text("It lends while this app is open, and again when you next open it.", size=12,
+            ft.Text("It shares while this app is open, and again when you next open it.", size=12,
                     color=ft.Colors.ON_SURFACE_VARIANT),
         ], [
             ft.TextButton("Stop and delete downloads", on_click=on(self.stop_pool, True)),
-            ft.TextButton("Stop lending", on_click=on(self.stop_pool, False)),
+            ft.TextButton("Turn off", on_click=on(self.stop_pool, False)),
             ft.FilledButton("Done", on_click=on(self.close_share_dialog)),
         ])
 

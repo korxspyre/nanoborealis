@@ -3,7 +3,7 @@
 """The control center: the agent's home screen, in the spirit of OpenClaw's dashboard.
 
 Overview (is it running, on which model, what has it cost), Models, Channels (Telegram, Discord and
-the rest), Schedules, Skills, Memory, Devices, Pool, Council, Logs and Settings. Most of it is nanobot's own
+the rest), Schedules, Skills, Memory, Devices, Pool, Colony, Logs and Settings. Most of it is nanobot's own
 settings (AgentLink.request); what nanobot can't do itself goes through the computer's pairing
 service (admin.py).
 """
@@ -143,7 +143,7 @@ class ControlCenter:
             "overview": self.overview, "models": self.models, "channels": self.channels,
             "schedules": self.schedules, "skills": self.skills, "memory": self.memory,
             "mcp": self.mcp, "hooks": self.hooks, "subagents": self.subagents,
-            "devices": self.devices, "pool": self.pool, "council": self.council, "logs": self.logs, "settings": self.settings_page,
+            "devices": self.devices, "pool": self.pool, "colony": self.colony, "logs": self.logs, "settings": self.settings_page,
         }
         try:
             return await builders[key]()
@@ -687,8 +687,32 @@ class ControlCenter:
                 ft.Container() if device.get("this") else t.quiet_button(
                     "Unpair", color=t.BAD, on_click=lambda _e, d=device: self.page.run_task(self.unpair, d)),
             ], spacing=12), padding=14))
-        return self.frame("Devices", "Phones and computers paired with this NanoBorealis computer.",
-                          [t.muted("To add one, open the NanoBorealis app on it and pick this computer; a PIN shows "
+        app = self.app
+
+        def action(icon: str, title: str, about: str, label: str, on_click, on: bool = False) -> ft.Control:
+            return ft.Row([ft.Icon(icon, size=18, color=t.GOOD if on else t.MUTED),
+                           ft.Column([ft.Text(title, size=13.5, weight=ft.FontWeight.W_600), t.muted(about, size=12)],
+                                     spacing=1, expand=True),
+                           t.outline_button(label, on_click=on_click)], spacing=12)
+        this: list[ft.Control] = [action(
+            ft.Icons.FRONT_HAND_OUTLINED, "Agents can use this device" if app.hands.lending else "Let agents use this device",
+            "They work here as you, in the folders you share. Anything outside those asks you first.",
+            "Change" if app.hands.lending else "Set up", lambda _e: self.page.run_task(app.hands.open_dialog), app.hands.lending)]
+        if not app.mobile:  # a phone neither shares its hardware nor writes install sticks
+            sharing = app.node is not None and app.node.how is not None
+            this.append(action(ft.Icons.MEMORY_ROUNDED, "Sharing GPU and CPU" if sharing else "Share this device's GPU and CPU",
+                               "Lets your other computers run bigger models with this one's memory.",
+                               "Change" if sharing else "Set up", lambda _e: self.page.run_task(app.open_share_dialog), sharing))
+            this.append(action(ft.Icons.USB_ROUNDED, "Make an install stick",
+                               "A USB stick that installs NanoBorealis on another computer.",
+                               "Make one", lambda _e: self.page.run_task(app.open_stick_dialog)))
+        if not host.comes_with_os():
+            this.append(action(ft.Icons.SYSTEM_UPDATE_ALT_ROUNDED, f"App updates ({app.version})",
+                               "Check for a newer version of this app.",
+                               "Check", lambda _e: self.page.run_task(app.check_for_update, False)))
+        return self.frame("Devices", "Your fleet: this device, and the phones and computers paired with your NanoBorealis computer.",
+                          [t.card(ft.Column([t.muted("THIS DEVICE", size=10.5, weight=ft.FontWeight.W_600), *this], spacing=12)),
+                           t.muted("To add a device, open the NanoBorealis app on it and pick this computer; a PIN shows "
                                    "up here to approve it."), *rows])
 
     async def unpair(self, device: dict[str, Any]) -> None:
@@ -702,15 +726,14 @@ class ControlCenter:
 
     async def pool(self, rebuild: bool = False) -> ft.Control:
         data = await asyncio.to_thread(admin.pool_overview, self.app.machine, rebuild)
-        title, subtitle = "Pool", "Your computers, and the council of models the planner runs on them."
+        title, subtitle = "Shared compute", "Your computers lending each other memory, so together they run models none could alone."
         if not data.get("in_pool"):
             return self.frame(title, subtitle, [t.card(ft.Column([
-                ft.Text("This computer isn't in a pool yet", size=15, weight=ft.FontWeight.W_600),
-                t.muted("A pool lends the memory of several computers to each other, so together they run models "
-                        "none could alone. Start one here in a terminal:"),
+                ft.Text("This computer isn't sharing compute yet", size=15, weight=ft.FontWeight.W_600),
+                t.muted("Start it here in a terminal:"),
                 t.mono("nanoborealis pool join", selectable=True),
-                t.muted("Other computers join the same way, or from the NanoBorealis app on them: \"Lend this "
-                        "computer to the pool\"."),
+                t.muted("Other computers join the same way, or from the NanoBorealis app on them: \"Share this "
+                        "device's GPU and CPU\"."),
             ], spacing=8))])
         job = data.get("job") or {}
         job_box = ft.Column(spacing=6)
@@ -1128,15 +1151,15 @@ class ControlCenter:
     # -- Rigs --------------------------------------------------------------------------------------
 
     async def rig_up(self, name: str = "", spec: str = "") -> None:
-        self.toast("Bringing the rig up...")
+        self.toast("Starting the colony...")
         try:
             answer = await asyncio.to_thread(admin.rig_up, self.app.machine, name, spec)
         except PairingError as e:
             self.toast(str(e))
         else:
             made = ", ".join(answer.get("plan", {}).get("create", [])) or "no new seats"
-            self.toast(f"Rig {answer.get('rig')} is up ({made}).")
-        await self.reload("council")
+            self.toast(f"The colony {answer.get('rig')} is up ({made}).")
+        await self.reload("colony")
 
     async def rig_down(self, name: str) -> None:
         try:
@@ -1145,18 +1168,18 @@ class ControlCenter:
             self.toast(str(e))
         else:
             self.toast(f"{name} is down; a snapshot keeps its work for bringing it back.")
-        await self.reload("council")
+        await self.reload("colony")
 
     def write_rig(self) -> None:
         """A rig written in the app: TOML, checked by the Hall before anything is made (the plan comes first)."""
         box = ft.TextField(multiline=True, min_lines=14, max_lines=22, text_style=ft.TextStyle(font_family=t.MONO, size=12.5),
-                           value='[rig]\nname = "my-rig"\nculture = "We stay on the request and check each other\'s work."\n\n'
+                           value='[rig]\nname = "my-colony"\nculture = "We stay on the request and check each other\'s work."\n\n'
                                  '[[seat]]\nid = "builder"\nkind = "cloud"\nmodel = "cohere/north-mini-code:free"\n\n'
                                  '[[seat]]\nid = "reviewer"\nkind = "cloud"\nmodel = "dots-studio/dots-3-note-preview:free"\nhead = 1\n\n'
                                  '[[edge]]\nfrom = "reviewer"\nto = "builder"\nkind = "reviews"\n',
                            border_radius=t.RADIUS, border_color=t.LINE_HI, focused_border_color=t.ACCENT)
-        note = t.muted("Seats are cloud (a free OpenRouter model), pool (a model your pool runs) or outside (an agent like "
-                       "Claude Code that joins with a token). Edges: reviews, delegates, reports_to.", size=12)
+        note = t.muted("Each [[seat]] is a crew member: its own agent with every tool, on a free OpenRouter model. [[pod]] is a "
+                       "sector. Edges: reviews, delegates_to, collaborates_with, can_observe, escalates_to.", size=12)
 
         async def plan(_e=None) -> None:
             try:
@@ -1171,13 +1194,13 @@ class ControlCenter:
         async def up(_e=None) -> None:
             self.page.pop_dialog()
             await self.rig_up(spec=box.value or "")
-        self.page.show_dialog(ft.AlertDialog(title=ft.Text("Write a rig"), content=ft.Column([box, note], tight=True, width=620),
+        self.page.show_dialog(ft.AlertDialog(title=ft.Text("Write a colony"), content=ft.Column([box, note], tight=True, width=620),
                                              actions=[t.quiet_button("Check the plan", on_click=plan),
                                                       t.primary_button("Bring it up", on_click=up)]))
 
-    async def council(self) -> ft.Control:
-        title, subtitle = "Rigs", ("Teams of agents written down as a file: who is on the team, how they work together, "
-                                   "and who reviews whom. They meet in the Hall, take work from its board and check each other.")
+    async def colony(self) -> ft.Control:
+        title, subtitle = "Crew", ("Your colony's agents: each is its own agent with every tool yours has. They take "
+                                   "tasks, talk things over, and check each other's work.")
         try:
             overview = await asyncio.to_thread(admin.rigs, self.app.machine)
         except PairingError as e:
@@ -1185,13 +1208,13 @@ class ControlCenter:
         starters = [t.card(ft.Row([
             ft.Icon(ft.Icons.GROUPS_OUTLINED, size=20, color=t.VIOLET),
             ft.Column([ft.Text(s["name"], size=14, weight=ft.FontWeight.W_600), t.muted(s["about"], size=12)], spacing=2, expand=True),
-            t.primary_button("Bring up", on_click=lambda _e, n=s["name"]: self.page.run_task(self.rig_up, n)),
+            t.primary_button("Start", on_click=lambda _e, n=s["name"]: self.page.run_task(self.rig_up, n)),
         ], spacing=12)) for s in overview["specs"] if s["name"] not in {r["name"] for r in overview["rigs"]}]
-        write = t.outline_button("Write a rig", icon=ft.Icons.EDIT_NOTE_ROUNDED, on_click=lambda _e: self.write_rig())
+        write = t.outline_button("Write a colony", icon=ft.Icons.EDIT_NOTE_ROUNDED, on_click=lambda _e: self.write_rig())
         if not overview["hall"]:
             return self.frame(title, subtitle, [
-                t.card(ft.Column([ft.Text("No rig on this computer yet", size=15, weight=ft.FontWeight.W_600),
-                                  t.muted("Bring one up: it needs no pool or GPU. Its seats are free OpenRouter models, "
+                t.card(ft.Column([ft.Text("No colony on this computer yet", size=15, weight=ft.FontWeight.W_600),
+                                  t.muted("Start one: it needs no GPU. Its crew run on free OpenRouter models, "
                                           "asked through the privacy filter with your agent's OpenRouter key.")], spacing=6)),
                 *starters], actions=[write])
         try:
@@ -1203,33 +1226,61 @@ class ControlCenter:
             return self.frame(title, subtitle, [t.card(t.muted(str(e)))])
         rig_cards: list[ft.Control] = []
         for rig in rigs_detail:
-            members = [ft.Row([ft.Icon(ft.Icons.CIRCLE, size=9, color=t.GOOD if s["here"] else t.FAINT),
-                               ft.Text(s["address"] or s["id"], size=13, weight=ft.FontWeight.W_600),
-                               t.muted(f"{s.get('role') or ''} · {s['model']}" + (f" · head #{s['head_rank']}" if s.get("head_rank") else ""),
-                                       size=12)], spacing=8) for s in rig["seats"]]
-            edges = [t.muted(f"{e['src']} {e['kind'].replace('_', ' ')} {e['dst']}", size=12) for e in rig["edges"]]
+            # One card per colony: its crew by sector, each a row (who, role, model, trust). The ties between them
+            # (who reviews or delegates to whom) are a line each, folded away.
+            sectors: dict[str, list[dict]] = {}
+            for s in rig["seats"]:
+                sectors.setdefault(s.get("pod") or "", []).append(s)
+            guidance = {p["id"]: p.get("guidance") or "" for p in rig.get("pods", [])}
+            blocks: list[ft.Control] = []
+            for sector, members in sectors.items():
+                if sector:
+                    blocks.append(ft.Container(t.muted(sector.upper(), size=10.5, weight=ft.FontWeight.W_600,
+                                                       tooltip=guidance.get(sector) or None), padding=ft.Padding.only(top=8)))
+                for s in members:
+                    name = (s["address"] or s["id"]).split("@")[0]
+                    trust = s.get("trust", 1)
+                    blocks.append(ft.Row([
+                        ft.Icon(ft.Icons.CIRCLE, size=9, color=t.GOOD if s["here"] else t.FAINT,
+                                tooltip="Here" if s["here"] else "Away"),
+                        ft.Text(name.capitalize(), size=13.5, weight=ft.FontWeight.W_600, width=110),
+                        *([t.badge("LEADS", t.ACCENT)] if s.get("head_rank") == 1 else []),
+                        t.muted((s.get("role") or "").split(":")[-1].strip().capitalize(), size=12.5, expand=True,
+                                no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS, tooltip=s.get("role") or None),
+                        t.muted(s["model"].split("/")[-1].removesuffix(":free"), size=12, width=210, no_wrap=True,
+                                overflow=ft.TextOverflow.ELLIPSIS, tooltip=s["model"]),
+                        ft.Text(f"trust {trust:g}", size=12, width=64, text_align=ft.TextAlign.RIGHT,
+                                color=t.GOOD if trust > 1 else t.BAD if trust < 1 else t.MUTED,
+                                tooltip="Rises with accepted work and your thumbs up; falls with rejected work"),
+                    ], spacing=10))
+            short = lambda seat_id: seat_id.split("-", 1)[-1].capitalize()  # noqa: E731
+            ties = ft.ExpansionTile(
+                title=t.muted(f"Who works with whom ({len(rig['edges'])})", size=12.5), dense=True,
+                tile_padding=ft.Padding.all(0), controls_padding=ft.Padding.only(bottom=6),
+                expanded_cross_axis_alignment=ft.CrossAxisAlignment.START,
+                controls=[t.muted(f"{short(e['src'])} {e['kind'].replace('_', ' ')} {short(e['dst'])}", size=12)
+                          for e in rig["edges"]]) if rig["edges"] else ft.Container()
             rig_cards.append(t.card(ft.Column([
-                ft.Row([ft.Text(rig["name"], size=15, weight=ft.FontWeight.W_600, expand=True),
-                        t.quiet_button("Take down", icon=ft.Icons.STOP_CIRCLE_OUTLINED,
-                                       on_click=lambda _e, n=rig["name"]: self.page.run_task(self.rig_down, n))]),
-                t.muted(rig["culture"] or "No culture written.", size=12.5), *members, *edges,
-                t.muted("Talk to it, or give it work, in the Civilization chat mode.", size=12),
+                ft.Row([ft.Text(rig["name"].capitalize(), size=16, weight=ft.FontWeight.W_600),
+                        t.muted(f"{len(rig['seats'])} crew", size=12.5, expand=True),
+                        t.quiet_button("Shut down", icon=ft.Icons.STOP_CIRCLE_OUTLINED,
+                                       on_click=lambda _e, n=rig["name"]: self.page.run_task(self.rig_down, n))], spacing=10),
+                t.muted(rig["culture"] or "", size=12.5, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS,
+                        tooltip=rig["culture"] or None),
+                *blocks, ties,
             ], spacing=6)))
+        mine = {s["id"] for rig in rigs_detail for s in rig["seats"]}
         rows: list[ft.Control] = []
         for seat in seats["seats"]:
+            if seat["id"] in mine:
+                continue  # shown in its colony's card
             rows.append(ft.Container(ft.Row([
                 ft.Icon(ft.Icons.STAR_ROUNDED if seat["chair"] else ft.Icons.SMART_TOY_OUTLINED, size=18,
                         color=t.ACCENT if seat["chair"] else t.VIOLET),
                 ft.Column([ft.Row([ft.Text(seat["name"], size=14, weight=ft.FontWeight.W_600),
-                                   t.badge("CHAIR", t.ACCENT) if seat["chair"] else ft.Container()], spacing=6),
-                           t.muted(f"{seat['model']} · capability {seat['capability']:g}", size=12)],
-                          spacing=2, expand=True),
-                ft.Column([t.muted("TRUST", size=10.5), ft.Text(f"{seat['trust']:g}", size=15,
-                                                                 color=t.GOOD if seat["trust"] > 1 else
-                                                                 t.BAD if seat["trust"] < 1 else t.TEXT)],
-                          spacing=0, horizontal_alignment=ft.CrossAxisAlignment.END),
-                ft.Column([t.muted("VOTE WEIGHT", size=10.5), ft.Text(f"{seat['weight']:g}", size=15)],
-                          spacing=0, horizontal_alignment=ft.CrossAxisAlignment.END),
+                                   t.badge("YOUR AGENT", t.ACCENT) if seat["chair"] else ft.Container()], spacing=6),
+                           t.muted(seat["model"], size=12)], spacing=2, expand=True),
+                t.muted(f"trust {seat['trust']:g}", size=12),
             ], spacing=16), padding=ft.Padding.symmetric(vertical=6)))
 
         async def change(changes: dict[str, Any], message: str) -> None:
@@ -1239,25 +1290,22 @@ class ControlCenter:
                 self.toast(str(e))
             else:
                 self.toast(message)
-            await self.reload("council")
+            await self.reload("colony")
 
         continuous = settings["autonomy"] == "continuous"
         body = [
             *rig_cards, *starters,
-            t.card(ft.Column([t.muted(f"SEATS · {len(seats['seats'])}", size=11), *rows,
-                              t.muted("A seat's vote counts by its model's capability times the trust it has earned: "
-                                      "accepted work and your thumbs up raise it, rejected work lowers it, and it "
-                                      "drifts back toward 1 over a month.", size=12)], spacing=4)),
+            *([t.card(ft.Column([t.muted("ALSO HERE", size=10.5, weight=ft.FontWeight.W_600), *rows], spacing=4))] if rows else []),
             t.card(ft.Row([ft.Column([ft.Text("Work continuously", size=15, weight=ft.FontWeight.W_600),
-                                      t.muted("Off: seats act when you give them a chat or a task. On: they also pick "
-                                              "up open tasks from the board by themselves, every few minutes, when "
-                                              "the council is idle.")], spacing=4, expand=True),
+                                      t.muted("Off: the crew acts when you give them a chat or a task. On: they also pick "
+                                              "up open tasks by themselves, every few minutes, when "
+                                              "the colony is idle.")], spacing=4, expand=True),
                            ft.Switch(value=continuous, active_color=t.ACCENT, on_change=lambda e: self.page.run_task(
                                change, {"autonomy": "continuous" if e.control.value else "on-task"},
-                               "The council works continuously." if e.control.value else
-                               "The council acts when given work."))])),
+                               "The colony works continuously." if e.control.value else
+                               "The colony acts when given work."))])),
             t.card(ft.Row([ft.Column([ft.Text("Ask for outside advice", size=15, weight=ft.FontWeight.W_600),
-                                      t.muted(f"When the council is stuck or split, it asks {settings['escalation_model']}"
+                                      t.muted(f"When the colony is stuck or split, it asks {settings['escalation_model']}"
                                               ", a free model on OpenRouter. Free models only: it never costs money.")],
                                      spacing=4, expand=True),
                            ft.Switch(value=bool(settings["escalation"]), active_color=t.ACCENT,

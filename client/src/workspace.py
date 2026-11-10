@@ -49,22 +49,24 @@ SUGGESTIONS = [
 ]
 # Commands the app handles itself; the agent's own come from /api/commands.
 APP_COMMANDS = [("/model", "Choose this chat's model"), ("/new", "Start a new chat")]
-CONTROL_PAGES = [
-    ("overview", "Overview", ft.Icons.SPACE_DASHBOARD_OUTLINED),
-    ("models", "Models", ft.Icons.AUTO_AWESOME_OUTLINED),
-    ("channels", "Channels", ft.Icons.FORUM_OUTLINED),
-    ("schedules", "Schedules", ft.Icons.SCHEDULE_OUTLINED),
-    ("skills", "Skills", ft.Icons.EXTENSION_OUTLINED),
-    ("mcp", "MCP servers", ft.Icons.CABLE_ROUNDED),
-    ("hooks", "Hooks", ft.Icons.WEBHOOK_ROUNDED),
-    ("subagents", "Subagents", ft.Icons.CALL_SPLIT_ROUNDED),
-    ("memory", "Memory", ft.Icons.PSYCHOLOGY_OUTLINED),
-    ("devices", "Devices", ft.Icons.DEVICES_OUTLINED),
-    ("pool", "Pool", ft.Icons.HUB_OUTLINED),
-    ("council", "Rigs", ft.Icons.GROUPS_OUTLINED),
-    ("logs", "Logs", ft.Icons.RECEIPT_LONG_OUTLINED),
-    ("settings", "Settings", ft.Icons.SETTINGS_OUTLINED),
+# Mission control, in groups: what your agent is, what runs by itself, your devices, and the system itself.
+CONTROL_GROUPS = [
+    ("Agent", [("models", "Models", ft.Icons.AUTO_AWESOME_OUTLINED),
+               ("skills", "Skills", ft.Icons.EXTENSION_OUTLINED),
+               ("subagents", "Subagents", ft.Icons.CALL_SPLIT_ROUNDED),
+               ("memory", "Memory", ft.Icons.PSYCHOLOGY_OUTLINED),
+               ("hooks", "Hooks", ft.Icons.WEBHOOK_ROUNDED),
+               ("mcp", "MCP servers", ft.Icons.CABLE_ROUNDED)]),
+    ("Colony", [("colony", "Crew", ft.Icons.GROUPS_OUTLINED)]),
+    ("Automation", [("schedules", "Schedules", ft.Icons.SCHEDULE_OUTLINED),
+                    ("channels", "Channels", ft.Icons.FORUM_OUTLINED)]),
+    ("Fleet", [("devices", "Devices", ft.Icons.DEVICES_OUTLINED),
+               ("pool", "Shared compute", ft.Icons.HUB_OUTLINED)]),
+    ("System", [("overview", "Overview", ft.Icons.SPACE_DASHBOARD_OUTLINED),
+                ("logs", "Logs", ft.Icons.RECEIPT_LONG_OUTLINED),
+                ("settings", "Settings", ft.Icons.SETTINGS_OUTLINED)]),
 ]
+CONTROL_PAGES = [page for _group, pages in CONTROL_GROUPS for page in pages]
 COMPOSER_HINT = "Ask NanoBorealis to build, fix or explain anything"
 SESSION = "websocket:"  # nanobot's key prefix for the app's chats
 # What the agent accepts as attachments (nanobot's attachment_ingress): code and other text go as plain text.
@@ -188,10 +190,10 @@ class Workspace:
         self.panel_kind: str | None = None
         self.panel_views: dict[str, Any] = {}
         self.control: Any = None
-        # The chat modes, like Chat / Cowork / Code: Agent (your agent, the chair, or one council seat),
-        # Hall (the whole council) and Task (the council's board). See council_view.py.
+        # The chat modes, like Chat / Cowork / Code: Agent (your agent, the chair, or one colony seat),
+        # Hall (the whole colony) and Task (the colony's board). See colony.py.
         self.mode = "agent"
-        self.council: Any = None
+        self.colony: Any = None
         # The coding-agent features (codefeatures.py): plan mode, the status bar, the crew strip, checkpoints.
         self.plan_mode = False
         self.agent_mode = "auto"  # this chat's permission mode for the agent's own tools (gate.py on the computer)
@@ -231,7 +233,7 @@ class Workspace:
                                     ("files", ft.Icons.FOLDER_OUTLINED, "Projects folder (Ctrl+E)"),
                                     ("changes", ft.Icons.DIFFERENCE_OUTLINED, "Changes"),
                                     ("background", ft.Icons.PENDING_ACTIONS_ROUNDED,
-                                     "Background: subagents, the rigs' board, jobs on your devices"))
+                                     "Background: subagents, the crew's tasks, jobs on your devices"))
         }
         header = ft.Container(
             height=50, padding=ft.Padding.only(left=10, right=12), bgcolor=t.BG,
@@ -313,16 +315,16 @@ class Workspace:
                                                         "Hide the sidebar (Ctrl+B)", on_click=self.toggle_sidebar),
         ], spacing=10))
         civ = self.mode == "civ"
-        in_mode = self.section == "chats" or self.section.startswith("council:")
+        in_mode = self.section == "chats" or self.section.startswith("colony:")
         nav = ft.Column(spacing=2, controls=[
             self.mode_switch(),
             self.nav_row("New chat", ft.Icons.EDIT_NOTE_ROUNDED, False,
                          lambda _e: self.page.run_task(self.new_in_mode), trailing=t.muted("Ctrl N", size=11)),
-            *([self.nav_row("Give them work", ft.Icons.ASSIGNMENT_OUTLINED, False,
-                            lambda _e: self.page.run_task(self.council_view().new_task))] if civ else []),
+            *([self.nav_row("New task", ft.Icons.ASSIGNMENT_OUTLINED, False,
+                            lambda _e: self.page.run_task(self.colony_view().new_task))] if civ else []),
             self.nav_row("Chats", ft.Icons.CHAT_BUBBLE_OUTLINE_ROUNDED, in_mode,
                          lambda _e: self.page.run_task(self.show_section, "chats")),
-            self.nav_row("Control center", ft.Icons.TUNE_ROUNDED, not in_mode,
+            self.nav_row("Mission control", ft.Icons.TUNE_ROUNDED, not in_mode,
                          lambda _e: self.page.run_task(self.show_section, "overview")),
         ])
         body: list[ft.Control] = []
@@ -337,7 +339,7 @@ class Workspace:
 
     def mode_switch(self) -> ft.Control:
         modes = [("agent", "Agent", "Just you and your agent"),
-                 ("civ", "Civilization", "Your agent civilization: every seat of your rigs talks it over, and takes on "
+                 ("civ", "Colony", "Your colony of agents: the whole crew talks it over, and takes on "
                                          "work you give them")]
         chips = [ft.Container(
             content=ft.Text(label, size=12.5, weight=ft.FontWeight.W_600,
@@ -348,24 +350,24 @@ class Workspace:
         return ft.Container(ft.Row(chips, spacing=2), bgcolor=t.RAISED, border_radius=10, padding=3,
                             margin=ft.Margin.only(bottom=6))
 
-    def council_view(self) -> Any:
-        if self.council is None:
-            import council_view
-            self.council = council_view.CouncilView(self.app, self)
-        return self.council
+    def colony_view(self) -> Any:
+        if self.colony is None:
+            import colony
+            self.colony = colony.ColonyView(self.app, self)
+        return self.colony
 
     async def set_mode(self, mode: str) -> None:
         """Switch mode: its list, or its own sidebar when a control center page is open."""
         self.mode = mode
-        await self.council_view().load()  # the Agent mode lists the council's seats too
-        if self.section == "chats" or self.section.startswith("council:"):
+        await self.colony_view().load()  # the Agent mode lists the colony's seats too
+        if self.section == "chats" or self.section.startswith("colony:"):
             await self.show_section("chats")
         else:
             self.refresh_sidebar()
 
     async def new_in_mode(self) -> None:
         if self.mode == "civ":
-            await self.council_view().new_hall_chat()
+            await self.colony_view().new_hall_chat()
         else:
             await self.open_chat(None)
 
@@ -375,20 +377,8 @@ class Workspace:
     def bottom_rows(self) -> list[ft.Control]:
         app = self.app
         rows: list[ft.Control] = []
-        if not app.mobile:  # a phone neither lends its hardware nor writes install sticks
-            sharing = app.node is not None and app.node.how is not None
-            rows.append(self.nav_row("Sharing this device" if sharing else "Share this device's hardware",
-                                     ft.Icons.MEMORY_ROUNDED, False, lambda _e: self.page.run_task(app.open_share_dialog)))
-            rows.append(self.nav_row("Make an install stick", ft.Icons.USB_ROUNDED, False,
-                                     lambda _e: self.page.run_task(app.open_stick_dialog)))
-        if app.machine is not None:
-            # Every device of yours, this computer too (that's how agents reach your own home folder here, as you,
-            # scoped to what you ask, instead of from their container): handsui.py.
-            rows.append(self.nav_row("Lending hands to agents" if app.hands.lending else "Lend hands to agents",
-                                     ft.Icons.FRONT_HAND_OUTLINED, False, lambda _e: self.page.run_task(app.hands.open_dialog)))
-        if not host.comes_with_os():
-            rows.append(self.nav_row(f"App updates ({app.version})", ft.Icons.SYSTEM_UPDATE_ALT_ROUNDED, False,
-                                     lambda _e: self.page.run_task(app.check_for_update, False)))
+        # What this device does for the colony (agents using it, sharing its GPU, install sticks, updates) lives in
+        # Mission control, Devices: the sidebar is for chats.
         machine = app.machine
         here = host.is_host() and machine is not None and machine.host == "127.0.0.1"
         where = ft.Row([
@@ -428,12 +418,17 @@ class Workspace:
         )
 
     def side_rows(self) -> list[ft.Control]:
-        if self.section != "chats" and not self.section.startswith("council:"):
-            return [self.nav_row(label, icon, key == self.section,
-                                 lambda _e, k=key: self.page.run_task(self.show_section, k))
-                    for key, label, icon in CONTROL_PAGES]
+        if self.section != "chats" and not self.section.startswith("colony:"):
+            rows: list[ft.Control] = []
+            for group, pages in CONTROL_GROUPS:
+                rows.append(ft.Container(t.muted(group.upper(), size=10.5, weight=ft.FontWeight.W_600),
+                                         padding=ft.Padding.only(left=12, top=12, bottom=2)))
+                rows += [self.nav_row(label, icon, key == self.section,
+                                      lambda _e, k=key: self.page.run_task(self.show_section, k))
+                         for key, label, icon in pages]
+            return rows
         if self.mode != "agent":
-            return self.council_view().side_rows(self.mode)
+            return self.colony_view().side_rows(self.mode)
         seats: list[ft.Control] = []  # Agent mode is just your agent; the seats are in Civilization
         query = (self.search.value or "").lower().strip()
         pinned_keys = set(self.sidebar_state.get("pinned_keys") or [])
@@ -475,10 +470,10 @@ class Workspace:
         if (self.page.width or 1200) < t.NARROW:
             await self.page.close_drawer()
         if section == "chats" and self.mode != "agent":
-            section = "council:list"  # a mode's own list: the Hall's chats, or the board
+            section = "colony:list"  # a mode's own list: the Hall's chats, or the board
         self.section = section
         in_chats = section == "chats"
-        in_council = section.startswith("council:")
+        in_colony = section.startswith("colony:")
         self.conversation.visible = in_chats
         self.control_host.visible = not in_chats
         for button in self.panel_buttons.values():
@@ -489,30 +484,30 @@ class Workspace:
         if in_chats:
             self.title_text.value = next((chat_title(c, self.sidebar_state.get("title_overrides"))
                                           for c in self.chats if c["chat_id"] == self.chat_id), "New chat")
-        elif in_council:
-            council = self.council_view()
+        elif in_colony:
+            colony = self.colony_view()
             self.control_host.content = ft.Container(ft.ProgressRing(width=22, height=22, stroke_width=2),
                                                      alignment=ft.Alignment.CENTER, expand=True)
             self.sidebar.content = self.sidebar_column()
             self.render_sidebar()
             self.page.update()
-            key = section.removeprefix("council:")
+            key = section.removeprefix("colony:")
             if key == "list":
-                council.showing = None
-                await council.load()
-                title = "Civilization"
+                colony.showing = None
+                await colony.load()
+                title = "Colony"
                 body = ft.Container(ft.Column([
                     ft.Text(title, size=20, weight=ft.FontWeight.W_600),
-                    t.muted(council.problem or ("Start a chat and every seat of your rigs reads it and answers in "
-                                                "turn. Or give them work: one takes it on, another reviews it, and "
-                                                "it shows on the board on the left until it's done.")),
-                    *([t.outline_button("Bring up a rig", icon=ft.Icons.GROUPS_OUTLINED,
-                                        on_click=lambda _e: self.page.run_task(self.show_section, "council"))]
-                      if council.problem else []),
+                    t.muted(colony.problem or ("Start a chat and the whole crew reads it and answers in "
+                                                "turn. Or give them a task: one takes it on, another reviews it, and "
+                                                "it shows under Tasks on the left until it's done.")),
+                    *([t.outline_button("Start a colony", icon=ft.Icons.GROUPS_OUTLINED,
+                                        on_click=lambda _e: self.page.run_task(self.show_section, "colony"))]
+                      if colony.problem else []),
                 ], spacing=8), padding=32)
             else:
-                title, body = await council.view(key)
-                await council.load()
+                title, body = await colony.view(key)
+                await colony.load()
             self.title_text.value = title
             self.control_host.content = body
             self.render_sidebar()
@@ -589,7 +584,7 @@ class Workspace:
                 return
             if isinstance(result, dict) and result.get("blocked_by_automations"):
                 self.page.show_dialog(ft.SnackBar(ft.Text("This chat has schedules. Delete them first "
-                                                          "(Control center, Schedules)."), duration=5000))
+                                                          "(Mission control, Schedules)."), duration=5000))
                 return
             if chat["chat_id"] == self.chat_id:
                 await self.open_chat(None)
@@ -1076,13 +1071,16 @@ class Workspace:
         self.scroll_to_end()
 
     def render_history(self, messages: list[dict[str, Any]]) -> None:
+        self.user_count = 0
         for m in messages:
             role = m.get("role")
             content = m.get("content")
             text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
             media = [x.get("name") or "attachment" for x in m.get("media") or [] if isinstance(x, dict)]
             if role == "user":
-                self.messages.controls.append(transcript.user_message(text, media))
+                self.messages.controls.append(transcript.user_message(text, media, self.user_actions(self.user_count, text)))
+                self.user_count += 1
+                self.last_user_text = text
             elif role == "assistant":
                 if m.get("kind") == "compaction":
                     self.messages.controls.append(transcript.note("Earlier messages were summarized to make room.",
@@ -1091,7 +1089,7 @@ class Workspace:
                 if isinstance(m.get("reasoning"), str) and m["reasoning"].strip():
                     self.messages.controls.append(transcript.Thinking(m["reasoning"], done=True).view)
                 if text.strip():
-                    answer = transcript.Answer(text, on_copy=self.copy_later)
+                    answer = transcript.Answer(text, on_copy=self.copy_later, actions=self.answer_actions())
                     answer.finish()
                     self.messages.controls.append(answer.view)
                 usage = m.get("usage") if isinstance(m.get("usage"), dict) else None
@@ -1151,6 +1149,45 @@ class Workspace:
                 pass
 
         self.scroll_task = asyncio.ensure_future(scroll())
+
+    # -- The actions under each message ---------------------------------------------------------------
+
+    def user_actions(self, index: int, text: str) -> list:
+        """Under your message: copy it, or edit it (the conversation branches from just before it; the original stays)."""
+        return [(ft.Icons.CONTENT_COPY_ROUNDED, "Copy", lambda: self.copy_later(text)),
+                (ft.Icons.EDIT_OUTLINED, "Edit and send again (in a new branch; this chat stays)",
+                 lambda: self.page.run_task(self.branch_at, index, text, False))]
+
+    def answer_actions(self) -> list:
+        """Under an answer: try again, branch off from here, or take the files back to before it."""
+        index, text = max(0, getattr(self, "user_count", 1) - 1), getattr(self, "last_user_text", "")
+        return [(ft.Icons.REFRESH_ROUNDED, "Try again (in a new branch; this chat stays)",
+                 lambda: self.page.run_task(self.branch_at, index, text, True)),
+                (ft.Icons.CALL_SPLIT_ROUNDED, "Branch: a new chat that continues from here",
+                 lambda: self.page.run_task(self.branch_at, index + 1, "", False)),
+                (ft.Icons.HISTORY_ROUNDED, "Rewind the files or the conversation (/rewind)",
+                 lambda: self.page.run_task(self.send_text, "/rewind"))]
+
+    async def branch_at(self, user_index: int, text: str, send: bool) -> None:
+        """A new chat with the conversation up to your message number `user_index`; `text` goes in the composer
+        (edit), or is sent again at once (try again)."""
+        link = self.app.link
+        if link is None or self.chat_id is None or self.busy:
+            self.toast("Wait for the answer to finish first." if self.busy else "Not connected.")
+            return
+        try:
+            fork = await link.fork_chat(self.chat_id, user_index, title=f"{self.title_text.value or 'Chat'} (branch)")
+        except (LinkError, asyncio.TimeoutError) as e:
+            self.toast(f"Couldn't branch: {e}")
+            return
+        await self.refresh_chats()
+        await self.open_chat(fork)
+        if send and text:
+            await self.send_text(text)
+        else:
+            self.composer.value = text
+            self.page.update()
+            await self.composer.focus()
 
     def copy_later(self, text: str) -> None:
         """For the transcript's copy buttons, whose handlers are plain callbacks."""
@@ -1322,7 +1359,7 @@ class Workspace:
             self.close_thinking()
             key = str(event.get("stream_id") or "")
             if key not in self.answers:
-                answer = transcript.Answer(on_copy=self.copy_later)
+                answer = transcript.Answer(on_copy=self.copy_later, actions=self.answer_actions())
                 self.answers[key] = (answer, [])
                 self.add(answer.view)
                 self.status_line.set_verb("Writing")
@@ -1436,7 +1473,7 @@ class Workspace:
             return
         if not text.strip() or text.strip() == self.last_answer.strip():
             return  # already shown by the stream
-        answer = transcript.Answer(text, on_copy=self.copy_later)
+        answer = transcript.Answer(text, on_copy=self.copy_later, actions=self.answer_actions())
         answer.finish()
         self.last_answer = text
         self.add(answer.view)
@@ -1572,7 +1609,11 @@ class Workspace:
             if self.agent_mode != "auto":  # the mode picked before the chat existed is this chat's
                 await self.save_mode(self.agent_mode)
         self.reset_turn()
-        self.add(transcript.user_message(text, names))
+        index = getattr(self, "user_count", 0)
+        slash = text.startswith("/")
+        self.add(transcript.user_message(text, names, None if slash else self.user_actions(index, text)))
+        if not slash:
+            self.user_count, self.last_user_text = index + 1, text
         if not text.startswith("/"):
             self.set_busy(True)  # while busy, a new message joins the running turn
         self.page.update()
@@ -1789,32 +1830,32 @@ class Workspace:
     async def refresh_status(self) -> None:
         """The bar under the composer: where this chat's model runs and whether it is tokenized, the context, the changes."""
         try:
-            council = self.council
+            colony = self.colony
             segments = codefeatures.status_segments(
                 model=self.model_id or "", provider=codefeatures.provider_of(self.settings, self.model_id),
                 used=self.context_used, window=self.context_window, added=self.lines_added, removed=self.lines_removed,
                 branch=await self.git_branch(), plan=self.plan_mode,
                 privacy_on=codefeatures.privacy_from_settings(self.settings) if self.settings else None,
-                crew=codefeatures.crew_summary(council.seats, self.head_id) if council is not None and council.seats else "")
+                crew=codefeatures.crew_summary(colony.seats, self.head_id) if colony is not None and colony.seats else "")
             self.status_bar_holder.content = codeui.status_bar(segments)
             self.status_bar_holder.update()
         except Exception:
             pass  # a status bar that can't draw is not worth a crash
 
     async def refresh_crew(self) -> None:
-        council = self.council_view()
-        await council.load()
-        if council.problem:
+        colony = self.colony_view()
+        await colony.load()
+        if colony.problem:
             self.crew_holder.visible = False
-            self.toast(f"No rig to show: {council.problem}")
+            self.toast(f"No colony to show: {colony.problem}")
             return
         try:
-            head = await council.call("GET", "/head")
+            head = await colony.call("GET", "/head")
         except Exception:
             head = {"head": None, "line": []}
         self.head_id = head.get("head")
         here = {e["seat"]: e["state"] == "ready" for e in head.get("line") or []}
-        seats = [{**s, "here": here.get(s["id"], True)} for s in council.seats]
+        seats = [{**s, "here": here.get(s["id"], True)} for s in colony.seats]
         chips = codefeatures.crew_chips(seats, self.head_id)
         self.crew_holder.content = codeui.crew_strip(chips, lambda chip: self.toast(
             f"{chip['name']}: {chip['state']}{' · head agent' if chip['head'] else ''} · trust {chip['trust']} · benchmark {chip['benchmark']}"))
@@ -1859,7 +1900,7 @@ class Workspace:
         elif name == "/memory":
             await self.show_section("memory")
         elif name == "/agents":
-            await self.show_section("council")
+            await self.show_section("colony")
         elif name == "/permissions":
             modes = {k: label for k, label, _i, _a in self.MODES}
             if rest.strip() in modes or rest.strip() in {v.lower(): k for k, v in modes.items()}:

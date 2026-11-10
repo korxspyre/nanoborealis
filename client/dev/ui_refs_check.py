@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[1] / "src"
-UI = ["workspace.py", "control.py", "council_view.py", "panels.py", "transcript.py", "model_picker.py"]
+UI = ["workspace.py", "control.py", "colony.py", "panels.py", "transcript.py", "model_picker.py"]
 
 
 def main() -> None:

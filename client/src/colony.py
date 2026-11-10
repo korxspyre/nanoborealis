@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (C) 2026 korxspyre
-"""The council in the app (docs/rigs/README.md): Hall chats, the task board, and one-on-one chats
-with a council seat. The chair, the agent you already have, keeps its own chats (workspace.py).
+"""The colony in the app (docs/rigs/README.md): Hall chats, the task board, and one-on-one chats
+with a colony seat. The chair, the agent you already have, keeps its own chats (workspace.py).
 
 Everything goes through the computer's pairing service to its Hall (admin.hall), where you speak
 as "you". A Hall room refreshes itself while it's open: the seats answer one after another, and
@@ -36,7 +36,7 @@ def stamp(at: Any) -> str:
     return when.strftime("%H:%M") if when.date() == datetime.now().date() else when.strftime("%b %d, %H:%M")
 
 
-class CouncilView:
+class ColonyView:
     def __init__(self, app: "NanoBorealisApp", workspace: "Workspace"):
         self.app = app
         self.workspace = workspace
@@ -44,7 +44,7 @@ class CouncilView:
         self.rooms: list[dict[str, Any]] = []
         self.tasks: list[dict[str, Any]] = []
         self.seats: list[dict[str, Any]] = []
-        self.problem: str | None = None  # why the council can't be shown (none on this computer, ...)
+        self.problem: str | None = None  # why the colony can't be shown (none on this computer, ...)
         self.showing: str | None = None  # the open room or task: "room:<id>" or "task:<id>"
         self.follower: object | None = None
 
@@ -52,7 +52,7 @@ class CouncilView:
         return await asyncio.to_thread(admin.hall, self.app.machine, method, path, body)
 
     async def load(self) -> None:
-        """The rooms, tasks and seats for the sidebar; a problem instead when there's no council."""
+        """The rooms, tasks and seats for the sidebar; a problem instead when there's no colony."""
         try:
             rooms, tasks, seats = await asyncio.gather(self.call("GET", "/rooms"), self.call("GET", "/tasks"),
                                                        self.call("GET", "/seats"))
@@ -68,7 +68,7 @@ class CouncilView:
         if seat_id == "advisor":
             return "Advisor"
         if seat_id == "hall":
-            return "Your civilization"
+            return "Your colony"
         return next((s["name"] for s in self.seats if s["id"] == seat_id), seat_id)
 
     # -- The sidebar -----------------------------------------------------------------------------------
@@ -82,7 +82,7 @@ class CouncilView:
                            spacing=8),
             padding=ft.Padding.only(left=12, right=8, top=6, bottom=6), border_radius=t.RADIUS, ink=True,
             bgcolor=t.RAISED if selected else None,
-            on_click=lambda _e, k=key: self.page.run_task(self.workspace.show_section, f"council:{k}"),
+            on_click=lambda _e, k=key: self.page.run_task(self.workspace.show_section, f"colony:{k}"),
         )
 
     def side_rows(self, mode: str) -> list[ft.Control]:
@@ -101,16 +101,16 @@ class CouncilView:
                      next((r for r in self.rooms if r["kind"] == "direct" and r.get("seat") == s["id"]), None)),
                      ft.Icons.SMART_TOY_OUTLINED, t.muted(f"trust {s['trust']:g}", size=11))
                  for s in self.seats if not s.get("chair")]
-        return [heading("Chats"), *(rooms or [empty("None yet. New chat: every seat reads it.")]),
-                heading("The board"), *(board or [empty("Nothing yet. Give them work above.")]),
-                *([heading("Talk to one seat"), *seats] if seats else [])]
+        return [heading("Chats"), *(rooms or [empty("None yet. New chat: the whole crew reads it.")]),
+                heading("Tasks"), *(board or [empty("Nothing yet. Give them work above.")]),
+                *([heading("Crew"), *seats] if seats else [])]
 
     def seat_rows(self) -> list[ft.Control]:
-        """For Agent mode: a one-on-one chat with each council seat, under the chair's own chats."""
+        """For Agent mode: a one-on-one chat with each colony seat, under the chair's own chats."""
         seats = [s for s in self.seats if not s.get("chair")]
         if self.problem or not seats:
             return []
-        rows: list[ft.Control] = [ft.Container(t.muted("Rig seats", size=11.5),
+        rows: list[ft.Control] = [ft.Container(t.muted("Crew", size=11.5),
                                                padding=ft.Padding.only(left=12, top=10, bottom=2))]
         for seat in seats:
             room = next((r for r in self.rooms if r["kind"] == "direct" and r.get("seat") == seat["id"]), None)
@@ -124,10 +124,10 @@ class CouncilView:
     async def new_hall_chat(self) -> None:
         """A new chat with every seat: an empty conversation with its composer, like a new chat with your agent.
         The first message makes it (and names it)."""
-        await self.workspace.show_section("council:new")
+        await self.workspace.show_section("colony:new")
 
     def new_view(self) -> tuple[str, ft.Control]:
-        box = t.field(hint="Ask your civilization anything: every seat of your rigs reads it and answers in turn",
+        box = t.field(hint="Ask your colony anything: the whole crew reads it and answers in turn",
                       multiline=True, autofocus=True)
 
         async def send(_event=None) -> None:
@@ -144,7 +144,7 @@ class CouncilView:
                 self.workspace.toast(str(e))
                 self.page.update()
                 return
-            await self.workspace.show_section(f"council:room:{room['id']}")
+            await self.workspace.show_section(f"colony:room:{room['id']}")
         box.on_submit = send
         box.shift_enter = True
         composer = ft.Row([ft.Container(box, expand=True),
@@ -152,9 +152,9 @@ class CouncilView:
                                          icon_color=t.ON_ACCENT, on_click=send)], spacing=8)
         hello = ft.Container(ft.Column([
             ft.Icon(ft.Icons.GROUPS_ROUNDED, size=40, color=t.ACCENT),
-            ft.Text("Talk to your civilization", size=22, weight=ft.FontWeight.W_600),
-            t.muted("Every seat of your rigs reads your message and answers in turn, or passes. To have them do "
-                    "something and check each other's work, use Give them work.", size=13),
+            ft.Text("Talk to your colony", size=22, weight=ft.FontWeight.W_600),
+            t.muted("The whole crew reads your message and answers in turn, or passes. To have them do "
+                    "something and check each other's work, use New task.", size=13),
         ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10), alignment=ft.Alignment.CENTER, padding=48)
         return "New chat", self.frame([hello], composer)
 
@@ -174,9 +174,9 @@ class CouncilView:
             except PairingError as e:
                 self.workspace.toast(str(e))
                 return
-            await self.workspace.show_section(f"council:task:{task['id']}")
+            await self.workspace.show_section(f"colony:task:{task['id']}")
 
-        self.dialog("Give them work", "Your rigs offer it to their seats: one takes it on, another reviews the result.",
+        self.dialog("New task", "The crew is offered it: one takes it on, another reviews the result.",
                     [title, detail], "Post it", post)
 
     def dialog(self, title: str, blurb: str, fields: list[ft.Control], action: str, on_click) -> None:
@@ -214,7 +214,7 @@ class CouncilView:
                 return await self.room_view(int(ident))
             return await self.task_view(int(ident))
         except (PairingError, ValueError) as e:
-            return "Rigs", self.frame([t.card(t.muted(str(e)))])
+            return "Colony", self.frame([t.card(t.muted(str(e)))])
 
     def frame(self, body: list[ft.Control], composer: ft.Control | None = None) -> ft.Control:
         column = ft.ListView(body, expand=True, spacing=10, padding=ft.Padding.symmetric(horizontal=24, vertical=16),
@@ -239,7 +239,7 @@ class CouncilView:
             controls.insert(1, t.muted("asks for outside advice", size=11.5))
         if not mine and author not in ("advisor", "hall"):
             controls.append(ft.Row([
-                t.icon_button(ft.Icons.THUMB_UP_OUTLINED, "Good answer: more trust for this seat", size=14,
+                t.icon_button(ft.Icons.THUMB_UP_OUTLINED, "Good answer: more trust for this crew member", size=14,
                               on_click=lambda _e, a=author: self.page.run_task(self.feedback, a, True)),
                 t.icon_button(ft.Icons.THUMB_DOWN_OUTLINED, "Poor answer: less trust", size=14,
                               on_click=lambda _e, a=author: self.page.run_task(self.feedback, a, False)),
@@ -285,7 +285,7 @@ class CouncilView:
         box.on_submit = send
         actions: list[ft.Control] = [ft.Container(box, expand=True), t.primary_button("Send", on_click=send)]
         if room["kind"] == "hall":
-            actions.insert(1, t.icon_button(ft.Icons.HOW_TO_VOTE_OUTLINED, "Ask the seats to vote",
+            actions.insert(1, t.icon_button(ft.Icons.HOW_TO_VOTE_OUTLINED, "Ask the crew to vote",
                                             on_click=lambda _e: self.page.run_task(self.new_vote, room_id, listing)))
         self.page.run_task(self.follow_room, room_id, listing, messages[-1]["id"] if messages else 0)
         title = room["title"] if room["kind"] == "hall" else self.seat_name(room.get("seat") or "")
@@ -301,7 +301,7 @@ class CouncilView:
         """New messages as the seats answer, while this room is the one open."""
         self.follower = follower = object()
         key = f"room:{room_id}"
-        while self.follower is follower and self.showing == key and self.workspace.section.startswith("council:"):
+        while self.follower is follower and self.showing == key and self.workspace.section.startswith("colony:"):
             await asyncio.sleep(POLL_SECONDS)
             try:
                 fresh = (await self.call("GET", f"/rooms/{room_id}/messages?after={last}"))["messages"]
@@ -336,7 +336,7 @@ class CouncilView:
                 return
             await self.refresh_room(room_id, listing)
 
-        self.dialog("Ask the seats to vote", "Each seat votes; ballots count by capability and earned trust. "
+        self.dialog("Ask the crew to vote", "Each crew member votes; ballots count by capability and earned trust. "
                     "A split vote goes to a free cloud model for advice.", [question, options], "Ask", ask)
 
     async def task_view(self, task_id: int) -> tuple[str, ft.Control]:
@@ -370,14 +370,14 @@ class CouncilView:
             actions.append(t.outline_button("Try again", icon=ft.Icons.REPLAY_ROUNDED,
                                             on_click=lambda _e: self.page.run_task(self.reopen, task_id)))
         elif state in ("open", "claimed"):
-            body.append(t.muted("The rig is on it. This page follows along.", size=12.5))
+            body.append(t.muted("The crew is on it. This page follows along.", size=12.5))
             self.page.run_task(self.follow_task, task_id, state, len(task.get("notes") or []))
         return task["title"], self.frame(body, ft.Row(actions, spacing=8) if actions else None)
 
     async def follow_task(self, task_id: int, state: str, notes: int) -> None:
         self.follower = follower = object()
         key = f"task:{task_id}"
-        while self.follower is follower and self.showing == key and self.workspace.section.startswith("council:"):
+        while self.follower is follower and self.showing == key and self.workspace.section.startswith("colony:"):
             await asyncio.sleep(POLL_SECONDS * 2)
             try:
                 task = await self.call("GET", f"/tasks/{task_id}")
@@ -385,19 +385,19 @@ class CouncilView:
                 continue
             if task["state"] != state or len(task.get("notes") or []) != notes:
                 if self.follower is follower and self.showing == key:
-                    await self.workspace.show_section(f"council:{key}")
+                    await self.workspace.show_section(f"colony:{key}")
                 return
 
     async def review(self, task_id: int, verdict: str, reason: str) -> None:
         if verdict == "reject" and not reason.strip():
-            self.workspace.toast("Say what's wrong, so the seat can fix it.")
+            self.workspace.toast("Say what's wrong, so they can fix it.")
             return
         try:
             await self.call("POST", f"/tasks/{task_id}/review", {"verdict": verdict, "text": reason.strip()})
         except PairingError as e:
             self.workspace.toast(str(e))
             return
-        await self.workspace.show_section(f"council:task:{task_id}")
+        await self.workspace.show_section(f"colony:task:{task_id}")
 
     async def reopen(self, task_id: int) -> None:
         try:
@@ -405,4 +405,4 @@ class CouncilView:
         except PairingError as e:
             self.workspace.toast(str(e))
             return
-        await self.workspace.show_section(f"council:task:{task_id}")
+        await self.workspace.show_section(f"colony:task:{task_id}")

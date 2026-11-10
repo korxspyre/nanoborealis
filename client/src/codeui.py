@@ -78,7 +78,7 @@ def rewind_dialog(items: list[dict], on_restore: Callable[[dict], None], on_clos
 
 
 def crew_strip(chips: list[dict], on_open: Callable[[dict], None]) -> ft.Control:
-    """The council's seats above the composer: who leads, who is here, how far each can be trusted by its benchmarks."""
+    """The colony's seats above the composer: who leads, who is here, how far each can be trusted by its benchmarks."""
     out: list[ft.Control] = []
     for chip in chips:
         lead = chip["head"]
