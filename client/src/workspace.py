@@ -481,6 +481,9 @@ class Workspace:
         self.control_host.visible = not in_chats
         for button in self.panel_buttons.values():
             button.visible = in_chats
+        # The side panel belongs to the chat: off the chat it hides (its buttons do too), and comes back with it.
+        self.panel.visible = in_chats and self.panel_kind is not None
+        self.apply_layout()
         if in_chats:
             self.title_text.value = next((chat_title(c, self.sidebar_state.get("title_overrides"))
                                           for c in self.chats if c["chat_id"] == self.chat_id), "New chat")

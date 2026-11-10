@@ -12,6 +12,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       build-essential ca-certificates curl file git jq less libmagic1 openssh-client \
       pkg-config procps ripgrep sudo tree unzip wget xz-utils zip \
+      nodejs npm \
  && rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --uid 1000 --shell /bin/bash nanobot \

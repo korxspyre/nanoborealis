@@ -1027,7 +1027,7 @@ class ControlCenter:
             current = await asyncio.to_thread(admin.read_file, self.app.machine, self.HOOKS_PATH)
         except PairingError:
             current = ""
-        box = ft.TextField(value=current or self.HOOKS_EXAMPLE, multiline=True, min_lines=14, max_lines=28,
+        box = ft.TextField(value=current or self.HOOKS_EXAMPLE, multiline=True, min_lines=14, max_lines=28, width=820,
                            text_style=ft.TextStyle(font_family=t.MONO, size=12.5), border_radius=t.RADIUS,
                            border_color=t.LINE_HI, focused_border_color=t.ACCENT)
         note = t.muted("" if current else "No hooks yet: this is an example. Save it, change it, or clear it.", size=12)
