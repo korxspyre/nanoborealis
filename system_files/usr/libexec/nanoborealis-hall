@@ -1084,6 +1084,8 @@ class Orchestrator:
 
     def ask(self, seat: dict, session: str, prompt: str) -> str:
         """One turn of the seat's agent, in its session for this room or task; "" if it didn't answer."""
+        # Models guess the date from their training and call true things "in the future": tell them.
+        prompt = f"Today is {time.strftime('%A, %B %d, %Y')}. Trust this date over your own sense of it.\n\n{prompt}"
         brief = self.briefing(seat)
         if seat.get("kind") == "cloud":
             return self.ask_cloud(seat, session, prompt, brief)
