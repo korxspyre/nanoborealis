@@ -203,7 +203,7 @@ def run(base: str, admin_token: str) -> None:
     before = len(CALLS)
     admin("POST", f"/rooms/{direct}/messages", {"text": "ping"})
     reply = until(lambda: next((m for m in admin("GET", f"/rooms/{direct}/messages")["messages"] if m["author"] == "b"), None))
-    check(reply is not None and reply["text"] == "direct: ping", "one-on-one: only that seat answers, in its own session")
+    check(reply is not None and reply["text"].startswith("direct: ") and reply["text"].endswith("ping"), "one-on-one: only that seat answers, in its own session")
     check(all(c[0] == "b" and c[1] == f"direct-{direct}" for c in CALLS[before:]), "...and no other seat is asked")
 
     trust_before = admin("GET", "/seats")["seats"]

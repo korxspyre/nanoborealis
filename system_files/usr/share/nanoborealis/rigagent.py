@@ -159,8 +159,11 @@ AGENT_USER = "nanobot-agent"
 def deploy(data: dict) -> list[str]:
     """As root: each agent seat's secrets, files and Quadlet unit, then (re)start it; seats in "remove" stop and go
     (their homes, their memory, stay). Returns what happened, a line per seat."""
-    import pwd
-    user = pwd.getpwnam(AGENT_USER)
+    try:
+        import pwd
+        user = pwd.getpwnam(AGENT_USER)
+    except (ImportError, KeyError):  # not a NanoBorealis computer (the tests, say): nothing to start or stop
+        return ["no agent account on this computer: the seats' containers were left alone"]
     home, uid = Path(user.pw_dir), user.pw_uid
     env = {"HOME": str(home), "XDG_RUNTIME_DIR": f"/run/user/{uid}", "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{uid}/bus",
            "PATH": "/usr/bin:/bin"}
