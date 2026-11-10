@@ -784,7 +784,7 @@ class Workspace:
             return
         view = self.panel_views.get(kind)
         if view is None:
-            view = {"terminal": lambda: panels.TerminalPanel(self.page, machine),
+            view = {"terminal": lambda: panels.TerminalTabs(self.page, machine),
                     "files": lambda: panels.FilesPanel(self.page, machine, self.mention),
                     "changes": lambda: panels.ChangesPanel(self.page, machine),
                     "background": lambda: panels.BackgroundPanel(self.page, machine, self)}[kind]()

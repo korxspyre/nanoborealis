@@ -33,6 +33,7 @@ PDF_PAGES = 12  # pages of a PDF the files panel draws
 # 7.5 px wide, less the panel's padding): told 110 columns, tables and progress bars wrapped in a
 # panel that holds about 56, and the welcome banner's table came out in pieces.
 TERMINAL_COLS = max(40, int((t.PANEL_WIDTH - 40) / 7.5))
+FULL_COLS = max(40, int((t.PANEL_WIDTH - 52) / 7.1))  # 11 px JetBrains Mono, for full screen programs
 TERMINAL_KEYS = [
     ("Ctrl+C", "\x03", "Stop what's running"),
     ("Tab", "\t", "Complete what you've typed"),
@@ -75,6 +76,7 @@ class TerminalPanel:
         self.raw = ""
         self.full = False
         self.capturing = False
+        self.sent = ""  # what of the key sink's text has gone to the terminal
         self.screen: vt.Screen | None = None
         self.output = ft.Text("", font_family=t.MONO, size=12.5, selectable=True, color=t.TEXT)
         self.full_button = t.quiet_button("Full screen", icon=ft.Icons.FULLSCREEN_ROUNDED,
@@ -92,14 +94,17 @@ class TerminalPanel:
                          on_click=lambda _e, s=sequence: self.page.run_task(self.key, s))
             for label, sequence, tip in TERMINAL_KEYS
         ])
-        self.screen_box = ft.Container(ft.ListView([self.output], auto_scroll=True, padding=12, expand=True), expand=True,
+        # The tap is caught around the list: the list itself swallowed the container's own click.
+        self.screen_box = ft.Container(ft.GestureDetector(ft.ListView([self.output], auto_scroll=True, padding=12, expand=True),
+                                                          on_tap=lambda _e: self.grab(), expand=True), expand=True,
                                        bgcolor=t.SIDEBAR, border_radius=t.RADIUS, border=ft.Border.all(1, t.LINE),
                                        on_click=lambda _e: self.grab())
         self.line_row = ft.Row([self.input, t.icon_button(ft.Icons.PASSWORD_ROUNDED, "Hide what you type (for passwords)",
                                                           on_click=self.toggle_hidden)], spacing=4)
         # Holds the focus while a full-screen program has the keyboard, so typing doesn't also land in the chat box.
-        self.sink = ft.TextField(width=1, height=1, opacity=0, border=ft.InputBorder.NONE,
-                                 on_change=lambda e: setattr(e.control, "value", ""))
+        # What you type arrives here as text (any keyboard layout, accents, pasting), and goes to the program;
+        # on_key sends only what text can't carry: Enter, arrows, Ctrl and Alt combinations.
+        self.sink = ft.TextField(width=1, height=1, opacity=0, border=ft.InputBorder.NONE, on_change=self.typed)
         self.view = ft.Column(expand=True, spacing=8, controls=[
             self.screen_box, self.line_row, keys, ft.Row([self.full_button, self.hint, self.sink], spacing=6),
         ])
@@ -130,10 +135,30 @@ class TerminalPanel:
             self.hint.value = "Click the screen to type into it; click outside to stop."
             self.page.update()
 
+    async def typed(self, event) -> None:
+        """Send what was added since last time. The field isn't cleared on every keystroke: a clear racing the next
+        key sent the first letter twice ("ttop"). It's cleared on Enter, when nothing is coming."""
+        value = event.control.value or ""
+        new = value[len(self.sent):] if value.startswith(self.sent) else value
+        self.sent = value
+        if new and self.term is not None:
+            await self.term.send(new)
+
+    def reset_sink(self) -> None:
+        self.sink.value, self.sent = "", ""
+        self.sink.update()
+
     async def on_key(self, event: ft.KeyboardEvent) -> None:
         if self.term is None:
             return
+        name = (event.key or "").lower()
+        if (len(name) == 1 or name == "space") and not event.ctrl and not event.alt:
+            return  # a character: it comes in as text, through typed()
         data = vt.key_bytes(event.key or "", event.shift, event.ctrl, event.alt)
+        if name == "backspace" and self.sent:
+            self.sent = self.sent[:-1]  # the field lost that character too; keep in step
+        if name in ("enter", "escape") or event.ctrl:
+            self.reset_sink()
         if data:
             await self.term.send(data)
 
@@ -142,9 +167,14 @@ class TerminalPanel:
             return
         self.output.value = "Connecting..."
         self.page.update()
-        rows = 30 if self.full else 40
-        self.screen = vt.Screen(rows, TERMINAL_COLS) if self.full else None
-        term = Terminal(self.machine, rows=rows, cols=TERMINAL_COLS, console=not self.full)
+        # Full screen: a smaller font, lines cut rather than wrapped, and as many columns as fit the pane, so
+        # programs that draw the whole screen (top, vim) line up.
+        rows, cols = (36, FULL_COLS) if self.full else (40, TERMINAL_COLS)
+        self.output.size = 11 if self.full else 12.5
+        self.output.no_wrap = self.full
+        self.output.selectable = not self.full  # selectable text takes the tap that hands the keyboard over
+        self.screen = vt.Screen(rows, cols) if self.full else None
+        term = Terminal(self.machine, rows=rows, cols=cols, console=not self.full)
         try:
             await term.open()
         except PairingError as e:
@@ -200,6 +230,85 @@ class TerminalPanel:
         self.capturing = False
         if term is not None:
             term.close()
+
+
+class TerminalTabs:
+    """Several terminals side by side in tabs, each its own shell on the computer: + opens another, x closes one.
+    Presents the same face as one TerminalPanel to the workspace (start, stop, keys)."""
+
+    def __init__(self, page: ft.Page, machine: Machine):
+        self.page, self.machine = page, machine
+        self.tabs: list[TerminalPanel] = []
+        self.active = 0
+        self.bar = ft.Row(spacing=4, scroll=ft.ScrollMode.AUTO)
+        self.body = ft.Container(expand=True)
+        self.view = ft.Column([self.bar, self.body], expand=True, spacing=6)
+        self.add(start=False)
+
+    @property
+    def current(self) -> TerminalPanel:
+        return self.tabs[self.active]
+
+    @property
+    def capturing(self) -> bool:
+        return self.current.capturing
+
+    def paint(self) -> None:
+        chips: list[ft.Control] = []
+        for i, _tab in enumerate(self.tabs):
+            on = i == self.active
+            chips.append(ft.Container(
+                ft.Row([ft.Icon(ft.Icons.TERMINAL_ROUNDED, size=13, color=t.ACCENT if on else t.FAINT),
+                        ft.Text(f"Shell {i + 1}", size=12, color=t.TEXT if on else t.MUTED),
+                        *([t.icon_button(ft.Icons.CLOSE_ROUNDED, "Close this shell", size=12,
+                                         on_click=lambda _e, k=i: self.page.run_task(self.close, k))]
+                          if len(self.tabs) > 1 else [])], spacing=4, tight=True),
+                padding=ft.Padding.only(left=8, right=2, top=3, bottom=3), border_radius=8, ink=True,
+                bgcolor=t.RAISED if on else None, border=ft.Border.all(1, t.ACCENT if on else t.LINE),
+                on_click=lambda _e, k=i: self.page.run_task(self.pick, k)))
+        chips.append(t.icon_button(ft.Icons.ADD_ROUNDED, "Another shell", size=15,
+                                   on_click=lambda _e: self.page.run_task(self.new_tab)))
+        self.bar.controls = chips
+        self.body.content = self.current.view
+
+    def add(self, start: bool = True) -> None:
+        self.tabs.append(TerminalPanel(self.page, self.machine))
+        self.active = len(self.tabs) - 1
+        self.paint()
+
+    async def new_tab(self) -> None:
+        self.current.release()
+        self.add()
+        self.page.update()
+        await self.current.start()
+
+    async def pick(self, index: int) -> None:
+        self.current.release()
+        self.active = index
+        self.paint()
+        self.page.update()
+        await self.current.start()  # a no-op for one already running
+
+    async def close(self, index: int) -> None:
+        tab = self.tabs.pop(index)
+        tab.stop()
+        self.active = min(self.active if index > self.active else max(0, self.active - 1), len(self.tabs) - 1)
+        self.paint()
+        self.page.update()
+
+    async def start(self) -> None:
+        self.paint()
+        await self.current.start()
+
+    def stop(self) -> None:
+        for tab in self.tabs:
+            tab.stop()
+
+    def release(self) -> None:
+        self.current.release()
+
+    async def on_key(self, event: ft.KeyboardEvent) -> None:
+        await self.current.on_key(event)
 
 
 class FilesPanel:
@@ -458,6 +567,7 @@ done
 if [ $found = 0 ]; then
   echo "@@recent"
   find . -type f -mmin -2880 -not -path '*/.git/*' -not -path '*/node_modules/*' -not -path '*/.venv/*' \
+    -not -path '*/__pycache__/*' -not -path '*/.pytest_cache/*' -not -path '*/.mypy_cache/*' -not -path './.worktrees/*' \
     -printf '%T@ %s %p\n' 2>/dev/null | sort -rn | head -60
 fi
 """
@@ -534,7 +644,9 @@ class ChangesPanel:
                                     ft.Text(path.removeprefix("./"), size=12.5, font_family=t.MONO, expand=True,
                                             no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS),
                                     t.muted(human_size(int(size)) if size.isdigit() else "", size=11.5)], spacing=8),
-                    padding=ft.Padding.symmetric(horizontal=10, vertical=5)))
+                    padding=ft.Padding.symmetric(horizontal=10, vertical=5), border_radius=8, ink=True,
+                    # No git, so no diff: the file as it is now.
+                    on_click=lambda _e, p=path.removeprefix("./"): self.page.run_task(self.show_diff, ".", "??", p)))
         flush()
         if "@@recent" in output:
             rows.insert(0, ft.Container(t.muted("No git repositories here, so these are the files changed in the "
