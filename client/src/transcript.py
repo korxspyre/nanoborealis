@@ -234,6 +234,14 @@ def describe(name: str, args: dict[str, Any]) -> tuple[str, str, str]:
         return "Fetch", _first(args, "url"), ft.Icons.LANGUAGE_ROUNDED
     if name == "spawn":
         return "Subagent", _first(args, "label", "task"), ft.Icons.CALL_SPLIT_ROUNDED
+    if name == "subagent":
+        return f"Subagent {_first(args, 'agent')}".strip(), _first(args, "task"), ft.Icons.CALL_SPLIT_ROUNDED
+    if name == "hands_run":
+        return f"Run on {_first(args, 'device')}", _first(args, "command"), ft.Icons.FRONT_HAND_OUTLINED
+    if name == "hands_open":
+        return f"Open on {_first(args, 'device')}", _first(args, "target"), ft.Icons.OPEN_IN_NEW_ROUNDED
+    if name == "hands_devices":
+        return "Your devices", "who lends their hands", ft.Icons.DEVICES_OUTLINED
     if name == "cron":
         return "Schedule", _first(args, "message", "action", "cron_expr"), ft.Icons.SCHEDULE_ROUNDED
     if name == "message":
