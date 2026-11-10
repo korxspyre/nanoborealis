@@ -1166,9 +1166,32 @@ class Orchestrator:
             recent = self.db(lambda h: h.messages(room_id))[-CONTEXT_MESSAGES:]
             lines = "\n".join(f"[{m['author']}{' · ' + m['card'] if m.get('card') else ''}] {m['text']}"
                               for m in recent if m["kind"] != "pass")
-            prompt = (f"The Hall, room {room_id}: {room['title']}\n\n{board}{lines}\n\nYou are {seat['id']}. Reply to the "
-                      "room in a few sentences if you add something new, or answer exactly PASS.")
-            self.say(room_id, seat["id"], self.ask(seat, f"hall-{room_id}", prompt))
+            # The work board, in every chat: the owner talks about "the task on the board", and seats that couldn't
+            # see it asked them to repeat it.
+            work = self.work_board()
+            take = ("\nTo take on an open task yourself, start your reply with CLAIM <its number> on its own line, "
+                    "then give the finished work." if seat.get("kind") == "cloud" and "[open]" in work else "")
+            prompt = (f"The Hall, room {room_id}: {room['title']}\n\n{board}{work}{lines}\n\nYou are {seat['id']}. Reply to "
+                      f"the room in a few sentences if you add something new, or answer exactly PASS.{take}")
+            answer = self.ask(seat, f"hall-{room_id}", prompt)
+            claimed = re.match(r"\s*CLAIM\s+#?(\d+)\s*\n(.*)", answer or "", re.S | re.I)
+            if claimed and seat.get("kind") == "cloud":
+                task_id, work_done = int(claimed.group(1)), claimed.group(2).strip()
+                try:
+                    self.db(lambda h: (h.claim(task_id, seat["id"]), h.submit(task_id, seat["id"], {"result": work_done or "(no result)"})))
+                    answer = f"I took task {task_id} and handed it in for review:\n\n{work_done}"
+                except Refused as e:
+                    answer = f"I tried to take task {task_id}, but {e}"
+            self.say(room_id, seat["id"], answer)
+
+    def work_board(self) -> str:
+        """The tasks not finished yet, for a seat's prompt: what the owner means by "the board"."""
+        tasks = [x for x in self.db(lambda h: h.tasks()) if x["state"] in ("open", "claimed", "review")]
+        if not tasks:
+            return "The work board is empty.\n\n"
+        rows = "\n".join(f"- task {x['id']} [{x['state']}{', ' + x['claimed_by'] if x.get('claimed_by') else ''}]: "
+                         f"{x['title']}" + (f" ({x['detail'][:300]})" if x.get("detail") else "") for x in tasks[:20])
+        return f"The work board (tasks not finished yet):\n{rows}\n\n"
 
     def scoreboard(self, seats: list[dict]) -> str:
         """The council's benchmarks, for a prompt: each seat's NanoBench scores, so a seat can weigh what the
