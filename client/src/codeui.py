@@ -61,7 +61,7 @@ def rewind_dialog(items: list[dict], on_restore: Callable[[dict], None], on_clos
             ft.Row([ft.Column([t.text(item["label"] or "(a message)", size=13.5, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
                                t.muted(when(item["at"]) if item.get("at") else "", size=11.5)], spacing=1, expand=True),
                     *buttons],
-                   vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=4, wrap=True),
+                   vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=4),  # wrap with an expanding child can't lay out
             padding=ft.Padding.symmetric(horizontal=8, vertical=8), border=ft.Border.only(bottom=ft.BorderSide(1, t.LINE))))
     if not rows:
         rows.append(ft.Container(t.muted(note or "No checkpoints in this chat yet. One is saved before each message you send "

@@ -1660,7 +1660,9 @@ class Workspace:
         return None
 
     def checkpoints_for(self) -> "codefeatures.Checkpoints | None":
-        folder, machine = self.host_folder(), self.app.machine
+        # A chat working in "all projects" checkpoints the whole projects folder, as Claude Code checkpoints its
+        # whole working directory; one that's too big to copy before every message is skipped (TOO_BIG).
+        folder, machine = self.host_folder() or HOST_PROJECTS, self.app.machine
         if not folder or machine is None:
             return None
         from terminal import run_command

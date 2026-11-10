@@ -23,6 +23,11 @@ from typing import Callable
 
 STATE = "${XDG_STATE_HOME:-$HOME/.local/state}/nanoborealis/checkpoints"
 TOO_BIG_KB = 1_500_000  # a folder over about 1.5 GB isn't copied before every message
+# Rebuilt anyway, and slow to copy before every message.
+SKIP = " ".join(f"':(exclude,glob)**/{d}/**'" for d in ("node_modules", ".venv", "venv", "__pycache__", ".pytest_cache",
+                                                            ".mypy_cache", ".next", "target", ".worktrees", ".git"))
+DU_SKIP = " ".join(f"--exclude={d}" for d in ("node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache",
+                                                   ".next", "target", ".worktrees", ".git"))
 IDENT = ("GIT_AUTHOR_NAME=NanoBorealis GIT_AUTHOR_EMAIL=checkpoint@nanoborealis.invalid "
          "GIT_COMMITTER_NAME=NanoBorealis GIT_COMMITTER_EMAIL=checkpoint@nanoborealis.invalid")
 Run = Callable[[str], "tuple[int | None, str]"]  # runs a shell command on the computer: (exit status, output)
@@ -45,8 +50,8 @@ def take_command(folder: str, chat: str, label: str) -> str:
     chat = re.sub(r"[^A-Za-z0-9_-]", "_", chat)[:60] or "chat"
     label = " ".join(label.split())[:160]
     return (_setup(folder)
-            + f"[ \"$(du -sk . 2>/dev/null | cut -f1)\" -le {TOO_BIG_KB} ] || {{ echo TOO_BIG; exit 0; }}; "
-            "export GIT_INDEX_FILE=\"$(mktemp -u)\"; git add -A -- . >/dev/null 2>&1; tree=$(git write-tree) || exit 1; "
+            + f"[ \"$(du -sk {DU_SKIP} . 2>/dev/null | cut -f1)\" -le {TOO_BIG_KB} ] || {{ echo TOO_BIG; exit 0; }}; "
+            "export GIT_INDEX_FILE=\"$(mktemp -u)\"; git add -A -- . " + SKIP + " >/dev/null 2>&1; tree=$(git write-tree) || exit 1; "
             f"parent=$(git rev-parse -q --verify \"refs/latest/{chat}\" || true); "
             f"commit=$(printf '%s\\n' {shlex.quote(label)} | env {IDENT} git commit-tree \"$tree\" ${{parent:+-p $parent}}) || exit 1; "
             f"git update-ref \"refs/checkpoints/{chat}/$(date +%s)-$(git for-each-ref refs/checkpoints/{chat}/ | wc -l | tr -d ' ')\" \"$commit\"; "
@@ -66,7 +71,7 @@ def restore_command(folder: str, sha: str) -> str:
     return (_setup(folder)
             + f"git cat-file -e {sha}^{{commit}} 2>/dev/null || {{ echo NO_SUCH_CHECKPOINT; exit 1; }}; "
             "tmp=$(mktemp -d); export GIT_INDEX_FILE=\"$tmp/index\"; export LC_ALL=C; "
-            "git add -A -- . >/dev/null 2>&1; git ls-files | sort > \"$tmp/now\"; rm -f \"$GIT_INDEX_FILE\"; "
+            "git add -A -- . " + SKIP + " >/dev/null 2>&1; git ls-files | sort > \"$tmp/now\"; rm -f \"$GIT_INDEX_FILE\"; "
             f"git read-tree {sha} || exit 1; git ls-files | sort > \"$tmp/then\"; git checkout-index -a -f || exit 1; "
             "comm -23 \"$tmp/now\" \"$tmp/then\" > \"$tmp/gone\"; removed=0; "
             "while IFS= read -r p; do rm -f -- \"$p\" && removed=$((removed + 1)); done < \"$tmp/gone\"; "
