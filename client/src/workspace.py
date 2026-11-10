@@ -1356,6 +1356,10 @@ class Workspace:
         elif name == "turn_end":
             self.close_thinking()
             self.set_busy(False)
+            for card in list(self.tools.values()):  # a stopped turn leaves its last call unfinished: say so
+                if card.running and card.name not in ("spawn", "subagent"):
+                    card.finish("Stopped before it finished.", True)
+                    self.mark_dirty(card.view)
             if self.command_done is not None and not self.command_done.done():
                 self.command_done.set_result(True)
             if event.get("outcome") == "failed":
