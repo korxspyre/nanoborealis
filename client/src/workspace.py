@@ -1068,7 +1068,7 @@ class Workspace:
             if thread.get("active_turn_id"):
                 self.set_busy(True)
         self.page.update()
-        self.scroll_to_end()
+        self.scroll_to_end(opened=True)
 
     def render_history(self, messages: list[dict[str, Any]]) -> None:
         self.user_count = 0
@@ -1136,17 +1136,22 @@ class Workspace:
         self.page.update()
         self.scroll_to_end()
 
-    def scroll_to_end(self) -> None:
-        """Follow the conversation as it grows (ListView.auto_scroll stops once the list moves)."""
+    def scroll_to_end(self, opened: bool = False) -> None:
+        """Follow the conversation as it grows (ListView.auto_scroll stops once the list moves). A chat just opened
+        jumps to its end, and again as its messages are laid out: the list only learns how tall they are as it
+        builds them, so one scroll lands partway up a long chat."""
         if self.scroll_task is not None and not self.scroll_task.done():
-            return
+            if not opened:
+                return
+            self.scroll_task.cancel()
 
         async def scroll() -> None:
-            await asyncio.sleep(0.05)
-            try:
-                await self.messages.scroll_to(offset=-1, duration=200)
-            except Exception:
-                pass
+            for wait in ((0.05, 0.25, 0.5, 1.0, 1.5) if opened else (0.05,)):
+                await asyncio.sleep(wait)
+                try:
+                    await self.messages.scroll_to(offset=-1, duration=0 if opened else 200)
+                except Exception:
+                    pass
 
         self.scroll_task = asyncio.ensure_future(scroll())
 
