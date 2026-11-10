@@ -196,6 +196,7 @@ class Workspace:
         self.agent_mode = "auto"  # this chat's permission mode for the agent's own tools (gate.py on the computer)
         self.skill_commands: dict[str, str] = {}  # "/code-review" -> the skill it runs
         self.background: dict[str, dict] = {}  # spawned subagents' task ids -> label, chat, when, done
+        self.todo_holder: ft.Container | None = None  # the agent's to-do list in this chat, updated in place
         self.side_listeners: list[Any] = []  # /btw answers streaming in, from temporary chats
         self.side_chats: set[str] = set()
         self.plan_turn = False  # the turn running now was sent as a plan request
@@ -1026,6 +1027,7 @@ class Workspace:
         self.reset_turn()
         self.set_busy(False)
         self.messages.controls.clear()
+        self.todo_holder = None
         self.welcome.visible = chat_id is None
         self.title_text.value = "New chat"
         self.context_meter.value = ""
@@ -1096,20 +1098,31 @@ class Workspace:
             elif role == "tool":
                 events = [e for e in (m.get("toolEvents") or []) if isinstance(e, dict)]
                 edits = [e for e in (m.get("fileEdits") or []) if isinstance(e, dict) and e.get("path")]
-                edits_by_call = {e.get("call_id"): e for e in edits}
+                edits_by_call: dict[Any, list[dict]] = {}  # a patch reports one edit per file, all on one call
+                for e in edits:
+                    edits_by_call.setdefault(e.get("call_id"), []).append(e)
                 for event in events:
+                    if event.get("name") == "todo" and isinstance(event.get("arguments"), dict):
+                        todo_list = transcript.todo_view(event["arguments"].get("todos") or [])
+                        if self.todo_holder is not None and self.todo_holder in self.messages.controls:
+                            self.todo_holder.content = todo_list
+                        else:
+                            self.todo_holder = ft.Container(todo_list)
+                            self.messages.controls.append(self.todo_holder)
+                        continue
                     card = transcript.ToolCard(str(event.get("name") or "tool"), event.get("arguments"))
                     result = event.get("error") or event.get("result") or ""
                     card.finish(result, bool(event.get("error")))
-                    if event.get("call_id") in edits_by_call:
-                        card.set_edit(edits_by_call.pop(event.get("call_id")))
+                    for edit in edits_by_call.pop(event.get("call_id"), []):
+                        card.set_edit(edit)
                     self.messages.controls.append(card.view)
-                for edit in edits_by_call.values():
-                    card = transcript.ToolCard(edit.get("tool") or "edit_file", {"path": edit["path"]})
-                    card.set_edit(edit)
-                    if not card.result:
-                        card.finish(f"{edit.get('status') or 'done'}: {edit['path']}", edit.get("status") == "error")
-                    self.messages.controls.append(card.view)
+                for group in edits_by_call.values():
+                    for edit in group:
+                        card = transcript.ToolCard(edit.get("tool") or "edit_file", {"path": edit["path"]})
+                        card.set_edit(edit)
+                        if not card.result:
+                            card.finish(f"{edit.get('status') or 'done'}: {edit['path']}", edit.get("status") == "error")
+                        self.messages.controls.append(card.view)
                 if not events and not edits and text.strip():
                     self.messages.controls.append(transcript.note(text.strip().splitlines()[0][:200],
                                                                   ft.Icons.BUILD_CIRCLE_OUTLINED))
@@ -1200,6 +1213,15 @@ class Workspace:
             card = transcript.ToolCard(name, args, hint)
             card.on_finish = self.note_background
             self.tools[call_id] = card
+            if name == "todo" and isinstance(args, dict):
+                # The agent's to-do list: one checklist in the chat, updated in place each time, as in Claude Code.
+                view = transcript.todo_view(args.get("todos") or [])
+                if self.todo_holder is not None and self.todo_holder in self.messages.controls:
+                    self.todo_holder.content = view
+                else:
+                    self.todo_holder = ft.Container(view)
+                    self.add(self.todo_holder)
+                return card
             self.add(card.view)
             verb, _target, _icon = transcript.describe(card.name, card.args)
             self.status_line.set_verb({"Run": "Running", "Read": "Reading", "Edit": "Editing",

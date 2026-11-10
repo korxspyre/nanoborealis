@@ -478,6 +478,28 @@ class ToolCard:
         return ft.Column(parts, spacing=6)
 
 
+def todo_view(todos: list[Any]) -> ft.Control:
+    """The agent's to-do list as a checklist: done ones ticked and struck through, the one it's on highlighted."""
+    rows: list[ft.Control] = []
+    items = [x for x in todos if isinstance(x, dict) and str(x.get("content") or "").strip()]
+    done = sum(1 for x in items if x.get("status") == "completed")
+    for item in items[:50]:
+        status = str(item.get("status") or "pending")
+        icon, color = {"completed": (ft.Icons.CHECK_BOX_ROUNDED, t.GOOD),
+                       "in_progress": (ft.Icons.PLAY_CIRCLE_OUTLINE_ROUNDED, t.ACCENT)}.get(
+            status, (ft.Icons.CHECK_BOX_OUTLINE_BLANK_ROUNDED, t.FAINT))
+        style = ft.TextStyle(decoration=ft.TextDecoration.LINE_THROUGH) if status == "completed" else None
+        rows.append(ft.Row([ft.Icon(icon, size=16, color=color),
+                            ft.Text(str(item["content"]).strip(), size=13, style=style, expand=True,
+                                    color=t.MUTED if status == "completed" else t.TEXT,
+                                    weight=ft.FontWeight.W_600 if status == "in_progress" else None)], spacing=8))
+    head = ft.Row([ft.Icon(ft.Icons.CHECKLIST_ROUNDED, size=15, color=t.MUTED),
+                   ft.Text("To-do", size=12.5, color=t.MUTED), t.muted(f"{done} of {len(items)} done", size=11.5)],
+                  spacing=6)
+    return ft.Container(ft.Column([head, *rows], spacing=4), padding=12, border_radius=t.RADIUS_LG, bgcolor=t.PANEL,
+                        border=ft.Border.all(1, t.LINE))
+
+
 def goal_card(state: dict[str, Any]) -> ft.Control:
     """The agent's goal for this chat (/goal, or one it set itself): what, and how it's going."""
     status = str(state.get("status") or ("active" if state.get("active") else "done"))
