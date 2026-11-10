@@ -164,6 +164,8 @@ class CouncilView:
 
         async def post(_event=None) -> None:
             if not (title.value or "").strip():
+                title.error_text = "Say what the work is"
+                self.page.update()
                 return
             self.page.pop_dialog()
             try:
@@ -292,6 +294,7 @@ class CouncilView:
     async def refresh_room(self, room_id: int, listing: ft.Column) -> None:
         messages = (await self.call("GET", f"/rooms/{room_id}/messages"))["messages"]
         listing.controls = [self.bubble(m) for m in messages]
+        listing.data = {m["id"] for m in messages}  # shown already: the follower doesn't add them again
         self.page.update()
 
     async def follow_room(self, room_id: int, listing: ft.Column, last: int) -> None:
@@ -305,10 +308,15 @@ class CouncilView:
             except PairingError:
                 continue
             if fresh and self.follower is follower and self.showing == key:
+                last = fresh[-1]["id"]
+                shown = listing.data if isinstance(listing.data, set) else set()
+                fresh = [m for m in fresh if m["id"] not in shown]  # your own message was shown when you sent it
+                if not fresh:
+                    continue
                 if listing.controls and isinstance(listing.controls[0], ft.Text):
                     listing.controls.clear()
                 listing.controls.extend(self.bubble(m) for m in fresh)
-                last = fresh[-1]["id"]
+                listing.data = shown | {m["id"] for m in fresh}
                 self.page.update()
 
     async def new_vote(self, room_id: int, listing: ft.Column) -> None:

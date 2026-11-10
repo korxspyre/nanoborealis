@@ -65,6 +65,7 @@ CONTROL_PAGES = [
     ("logs", "Logs", ft.Icons.RECEIPT_LONG_OUTLINED),
     ("settings", "Settings", ft.Icons.SETTINGS_OUTLINED),
 ]
+COMPOSER_HINT = "Ask NanoBorealis to build, fix or explain anything"
 SESSION = "websocket:"  # nanobot's key prefix for the app's chats
 # What the agent accepts as attachments (nanobot's attachment_ingress): code and other text go as plain text.
 ATTACH_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif", "application/pdf", "application/json",
@@ -527,8 +528,10 @@ class Workspace:
         self.render_sidebar()
         self.page.update()
         if not in_chats:
-            self.control_host.content = await self.control.page_view(section)
-            self.page.update()
+            view = await self.control.page_view(section)
+            if self.section == section:  # a slow page that finishes after you moved on mustn't replace the new one
+                self.control_host.content = view
+                self.page.update()
 
     # -- Chat housekeeping (the WebUI's sidebar state: pins, names, archive) -----------------------
 
@@ -629,7 +632,7 @@ class Workspace:
 
     def composer_view(self) -> ft.Control:
         self.composer = ft.TextField(
-            hint_text="Ask NanoBorealis to build, fix or explain anything", multiline=True, min_lines=1, max_lines=10,
+            hint_text=COMPOSER_HINT, multiline=True, min_lines=1, max_lines=10,
             shift_enter=True, border=ft.InputBorder.NONE, autofocus=True, text_size=14.5,
             hint_style=ft.TextStyle(color=t.FAINT, size=14.5), cursor_color=t.ACCENT,
             content_padding=ft.Padding.only(left=4, right=4, top=10, bottom=4), on_submit=self.on_send,
@@ -1552,6 +1555,7 @@ class Workspace:
             return
         names = [a["name"] for a in self.attachments]
         self.composer.value = ""
+        self.composer.hint_text = COMPOSER_HINT  # a one-off prompt ("What should it do instead?") is used up
         self.attachments = []
         self.render_attachments()
         if self.chat_id is None:

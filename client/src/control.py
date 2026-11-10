@@ -153,8 +153,10 @@ class ControlCenter:
     async def reload(self, key: str) -> None:
         if self.workspace.section != key:
             return
-        self.workspace.control_host.content = await self.page_view(key)
-        self.page.update()
+        view = await self.page_view(key)
+        if self.workspace.section == key:
+            self.workspace.control_host.content = view
+            self.page.update()
 
     async def load_settings(self) -> dict[str, Any]:
         if self.app.link is None:

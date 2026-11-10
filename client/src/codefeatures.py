@@ -70,12 +70,16 @@ def restore_command(folder: str, sha: str) -> str:
         raise ValueError("a checkpoint is named by a git object id")
     return (_setup(folder)
             + f"git cat-file -e {sha}^{{commit}} 2>/dev/null || {{ echo NO_SUCH_CHECKPOINT; exit 1; }}; "
+            # Only what differs is touched: rewriting every file of a big folder (all projects) hit files this
+            # account can't write ("unable to unlink ... Permission denied") in projects the rewind wasn't about.
             "tmp=$(mktemp -d); export GIT_INDEX_FILE=\"$tmp/index\"; export LC_ALL=C; "
-            "git add -A -- . " + SKIP + " >/dev/null 2>&1; git ls-files | sort > \"$tmp/now\"; rm -f \"$GIT_INDEX_FILE\"; "
-            f"git read-tree {sha} || exit 1; git ls-files | sort > \"$tmp/then\"; git checkout-index -a -f || exit 1; "
-            "comm -23 \"$tmp/now\" \"$tmp/then\" > \"$tmp/gone\"; removed=0; "
-            "while IFS= read -r p; do rm -f -- \"$p\" && removed=$((removed + 1)); done < \"$tmp/gone\"; "
-            "echo \"RESTORED $(wc -l < \"$tmp/then\" | tr -d ' ') $removed\"; rm -rf \"$tmp\"")
+            "git add -A -- . " + SKIP + " >/dev/null 2>&1; now=$(git write-tree) || exit 1; "
+            f"git diff-tree -r --name-only --no-renames --diff-filter=AMT \"$now\" {sha} > \"$tmp/back\"; "
+            f"git diff-tree -r --name-only --no-renames --diff-filter=D \"$now\" {sha} > \"$tmp/gone\"; "
+            f"git read-tree {sha} || exit 1; "
+            "[ -s \"$tmp/back\" ] && { tr '\\n' '\\0' < \"$tmp/back\" | xargs -0 git checkout-index -f -- || exit 1; }; "
+            "removed=0; while IFS= read -r p; do rm -f -- \"$p\" && removed=$((removed + 1)); done < \"$tmp/gone\"; "
+            "echo \"RESTORED $(wc -l < \"$tmp/back\" | tr -d ' ') $removed\"; rm -rf \"$tmp\"")
 
 
 class Checkpoints:
