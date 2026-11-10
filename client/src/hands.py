@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import time
@@ -32,7 +33,7 @@ from typing import Callable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import checkpoints  # noqa: E402
 import pairing  # noqa: E402
-from permissions import READ_ONLY, Decision, Log, Policy, Task, decide  # noqa: E402
+from permissions import READ_ONLY, Decision, Log, Policy, Task, decide, inside  # noqa: E402
 
 OUTPUT_LIMIT = 400_000  # the end of a job's output that's sent back
 ANDROID = "ANDROID_ROOT" in os.environ or hasattr(sys, "getandroidapilevel")
@@ -126,8 +127,59 @@ def ask_owner(machine: pairing.Machine, stop=lambda: False) -> Approver:
     return approve
 
 
+def open_native(target: str) -> dict:
+    """Open something the way you would by double-clicking it: a file or folder in its usual app, a web page in the
+    browser, or a program. It opens on this device's screen, in your session, and the job doesn't wait for it."""
+    try:
+        if os.name == "nt":
+            os.startfile(target)  # noqa: S606 - the owner allowed it, by the permission check above
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        elif ANDROID:
+            return {"exit": None, "timed_out": False, "output": "Opening things on a phone isn't supported yet."}
+        else:
+            subprocess.Popen(["xdg-open", target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError as e:
+        return {"exit": 1, "timed_out": False, "output": f"couldn't open {target}: {e}"}
+    return {"exit": 0, "timed_out": False, "output": f"opened {target}"}
+
+
+def handle_open(job: dict, policy: Policy, approve: Approver, log: Log) -> dict:
+    """A job that opens something on the screen. A file or folder inside the request's folders opens like a read
+    (it changes nothing); a web page, a program or anything elsewhere asks you first, except in trust mode."""
+    target = str(job.get("open") or "").strip()
+    task = Task.from_json(job.get("task"))
+    is_url = bool(re.match(r"^[a-z][a-z0-9+.-]*://", target, re.I))
+    local = not is_url and os.path.exists(os.path.expanduser(target))
+    scope = [f for f in (task.folders if task else []) if not policy.roots or inside(f, policy.roots)]
+    if task is None:
+        decision = Decision("deny", "the job came without a request it serves")
+    elif policy.mode == "plan":
+        decision = Decision("deny", "plan mode: nothing opens")
+    elif local and scope and inside(os.path.abspath(os.path.expanduser(target)), scope):
+        decision = Decision("allow", "opens a file inside the request's folders")
+    elif policy.mode == "trust":
+        decision = Decision("allow", "trust mode")
+    else:
+        decision = Decision("ask", "it opens " + ("a web page" if is_url else "a program or a file outside the request's folders"))
+    answer = "auto"
+    if decision.verdict == "ask":
+        answer = approve(f"open {target}", str(Path.home()), task, decision, str(job.get("id") or ""))
+        allowed = answer in ("once", "always")
+    else:
+        allowed = decision.verdict == "allow"
+    log.write(job=job.get("id"), request=task.request if task else None, open=target, verdict=decision.verdict,
+              reason=decision.reason, answer=answer, ran=allowed)
+    if not allowed:
+        why = decision.reason if decision.verdict == "deny" else f"the owner said no ({decision.reason})"
+        return {"exit": None, "timed_out": False, "refused": True, "output": f"Not opened on this device: {why}."}
+    return open_native(os.path.expanduser(target) if local else target)
+
+
 def handle(job: dict, policy: Policy, approve: Approver, log: Log) -> dict:
     """Check one job, ask if needed, run it if allowed. Returns its result for the computer that sent it."""
+    if job.get("open"):
+        return handle_open(job, policy, approve, log)
     command = str(job.get("command") or "")
     task = Task.from_json(job.get("task"))
     cwd = str(job.get("cwd") or (task.folders[0] if task and task.folders else Path.home()))

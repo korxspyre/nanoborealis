@@ -83,6 +83,41 @@ class HandsDevices(Tool):
         return "\n".join(lines)
 
 
+class HandsOpen(Tool):
+    name = "hands_open"
+    description = ("Open something on the screen of one of the owner's devices that lends its hands, the way they would "
+                   "by double-clicking it: a file or folder in its usual app, a web page in their browser, or a program "
+                   "(by name or path). Use it to show them what you made, or to bring up an app for them. A file inside "
+                   "the request's folders opens right away; a web page, a program or anything else waits for their OK.")
+    parameters = {
+        "type": "object",
+        "properties": {
+            "device": {"type": "string", "description": "The device's name, as hands_devices lists it."},
+            "target": {"type": "string", "description": "A path on that device, a URL, or a program."},
+            "request": {"type": "string", "description": "The owner's request this serves, in their words."},
+            "folders": {"type": "array", "items": {"type": "string"},
+                        "description": "Folders on that device the request is about (absolute paths)."},
+        },
+        "required": ["device", "target", "request"],
+        "additionalProperties": False,
+    }
+    _plugin_discoverable = True
+
+    @classmethod
+    def enabled(cls, ctx: Any) -> bool:
+        return TOKEN_FILE.exists()
+
+    async def execute(self, device: str, target: str, request: str, folders: list[str] | None = None, **kwargs: Any) -> Any:
+        body = {"device": device, "open": target, "timeout": 60, "task": {"request": request, "folders": folders or []}}
+        try:
+            answer = await asyncio.to_thread(call, "POST", "/nanoborealis/agent-hands/run", body, 760)
+        except HandsError as error:
+            return ToolResult.error(str(error))
+        if answer.get("refused"):
+            return ToolResult.error(str(answer.get("output") or "not opened"))
+        return f"[{device}] {answer.get('output') or 'opened'}"
+
+
 class HandsRun(Tool):
     name = "hands_run"
     description = ("Run one shell command on one of the owner's devices that lends its hands (see hands_devices). Windows "

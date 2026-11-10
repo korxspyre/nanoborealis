@@ -1703,6 +1703,7 @@ class HandsJob:
     timeout: int
     by: str
     task: dict = field(default_factory=dict)  # the request this job serves and its folders: the device holds it to them
+    open: str = ""  # a file, folder, web page or program to open on the device's screen, instead of a command
     cwd: str = ""
     created: float = field(default_factory=time.time)
     result: dict | None = None
@@ -1747,7 +1748,7 @@ async def hands_poll(data: dict, query: dict, owner: str, device_id: str) -> tup
     job: HandsJob = entry.queue.popleft()
     entry.running[job.id] = job
     return 200, {"job": {"id": job.id, "command": job.command, "timeout": job.timeout, "task": job.task,
-                         "cwd": job.cwd}}
+                         "cwd": job.cwd, **({"open": job.open} if job.open else {})}}
 
 
 async def hands_done(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
@@ -1770,7 +1771,7 @@ async def hands_list(data: dict, query: dict, owner: str, device_id: str) -> tup
                              for d, h in hands_lending().items()]}
 
 
-async def hands_submit(device: str, command: str, timeout: int, by: str, task: dict, cwd: str) -> tuple[int, dict]:
+async def hands_submit(device: str, command: str, timeout: int, by: str, task: dict, cwd: str, open_: str = "") -> tuple[int, dict]:
     devices.load()
 
     def names(d: str) -> set[str]:  # "gentop (Windows)" also answers to "gentop": agents drop the suffix
@@ -1781,7 +1782,7 @@ async def hands_submit(device: str, command: str, timeout: int, by: str, task: d
         names = ", ".join(devices.by_id.get(d, {}).get("name", d) for d in hands_lending()) or "none"
         return 404, {"error": f"{device} isn't lending its hands right now (lending: {names})."}
     entry = hands[match[0]]
-    job = HandsJob(secrets.token_hex(6), match[0], command, timeout, by, task, cwd)
+    job = HandsJob(secrets.token_hex(6), match[0], command, timeout, by, task, cwd, open=open_)
     entry.queue.append(job)
     entry.wake.set()
     log(f"{by} gave device {match[0]} a job: {command[:200]}")
@@ -2013,8 +2014,11 @@ async def agent_hands(method: str, path: str, headers: list[tuple[str, str]], re
 
 async def hands_run(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
     command, device = data.get("command"), data.get("device")
+    open_ = data.get("open") if isinstance(data.get("open"), str) else ""
+    if open_.strip():
+        command = f"open {open_.strip()}"
     if not isinstance(command, str) or not command.strip() or not isinstance(device, str):
-        return 400, {"error": "Give a device and a command."}
+        return 400, {"error": "Give a device and a command (or something to open)."}
     task = data.get("task")
     # Every job says which request it serves and which folders that request is about; the device
     # holds it to them, so work that drifts to another subject has to ask first.
@@ -2025,7 +2029,7 @@ async def hands_run(data: dict, query: dict, owner: str, device_id: str) -> tupl
             "id": str(task.get("id") or "")[:64]}
     cwd = data.get("cwd") if isinstance(data.get("cwd"), str) else ""
     return await hands_submit(device, command, clamp(data.get("timeout") or 300, 300, HANDS_JOB_MAX),
-                              f"{owner} (device {device_id})", task, cwd)
+                              f"{owner} (device {device_id})", task, cwd, open_.strip()[:4000])
 
 
 ADMIN_ROUTES = {

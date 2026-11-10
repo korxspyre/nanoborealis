@@ -172,6 +172,10 @@ jobs:
       - name: Background pane
         run: '"$RUNNER_TEMP/venv/bin/python" client/dev/background_check.py'
 
+      # Agents opening things on a lent device's screen: what opens at once, what asks first.
+      - name: Hands open
+        run: '"$RUNNER_TEMP/venv/bin/python" client/dev/hands_open_check.py'
+
       # The screens for them, and the workspace around them, built without a window.
       - name: Coding-agent screens build
         run: '"$RUNNER_TEMP/venv/bin/python" client/dev/codeui_check.py'
