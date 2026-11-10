@@ -55,6 +55,7 @@ CONTROL_GROUPS = [
                ("skills", "Skills", ft.Icons.EXTENSION_OUTLINED),
                ("subagents", "Subagents", ft.Icons.CALL_SPLIT_ROUNDED),
                ("memory", "Memory", ft.Icons.PSYCHOLOGY_OUTLINED),
+               ("permissions", "Permissions", ft.Icons.SHIELD_OUTLINED),
                ("hooks", "Hooks", ft.Icons.WEBHOOK_ROUNDED),
                ("mcp", "MCP servers", ft.Icons.CABLE_ROUNDED)]),
     ("Colony", [("colony", "Crew", ft.Icons.GROUPS_OUTLINED)]),
@@ -674,7 +675,7 @@ class Workspace:
                     t.icon_button(ft.Icons.ADD_ROUNDED, "Attach files or images", on_click=self.attach, size=18),
                     t.icon_button(ft.Icons.ALTERNATE_EMAIL_ROUNDED, "Mention a file from your projects",
                                   on_click=lambda _e: self.page.run_task(self.open_panel, "files"), size=17),
-                    self.project_chip, self.mode_chip, self.plan_chip,
+                    self.project_chip, self.mode_chip,
                     self.context_meter, self.model_chip, self.send_button, self.stop_button,
                 ], spacing=2, run_spacing=2, wrap=True, alignment=ft.MainAxisAlignment.END,
                    vertical_alignment=ft.CrossAxisAlignment.CENTER),
@@ -1652,17 +1653,18 @@ class Workspace:
     # -- Coding-agent features: plan first, checkpoints, the status bar, the crew (codefeatures.py) --------
 
     # Permission modes for the agent's own tools, per chat (the image's gate.py; the computer keeps them).
-    MODES = [("auto", "Auto", ft.Icons.BOLT_ROUNDED, "Everything runs. The agent's container and hourly snapshots are the safety net."),
-             ("accept-edits", "Accept edits", ft.Icons.EDIT_NOTE_ROUNDED, "File edits run; other commands that change something ask you."),
-             ("manual", "Ask first", ft.Icons.FRONT_HAND_OUTLINED, "Anything that changes something asks you first, here or on your phone."),
-             ("plan", "Plan only", ft.Icons.LOCK_OUTLINE_ROUNDED, "Nothing changes: the agent reads and proposes.")]
+    # The same four words everywhere (this chip, /permissions, the Permissions page, a device's own setting).
+    MODES = [("manual", "Ask", ft.Icons.FRONT_HAND_OUTLINED, "Asks you before anything that changes something."),
+             ("accept-edits", "Accept edits", ft.Icons.EDIT_NOTE_ROUNDED, "Edits files freely. Asks before commands that change something."),
+             ("plan", "Plan", ft.Icons.CHECKLIST_RTL_ROUNDED, "Changes nothing. Reads, then writes a plan for you to approve."),
+             ("auto", "Auto", ft.Icons.BOLT_ROUNDED, "Works without asking. Snapshots and /rewind can take anything back.")]
 
     def paint_mode_chip(self) -> None:
         current = next(m for m in self.MODES if m[0] == self.agent_mode)
         self.mode_chip.content = ft.PopupMenuButton(
             content=t.chip(current[1], color=t.MUTED if current[0] == "auto" else t.ACCENT_HI, icon=current[2], size=12.5,
                            bgcolor=ft.Colors.TRANSPARENT if current[0] == "auto" else t.ACCENT_SOFT),
-            tooltip=f"How freely the agent's tools run in this chat: {current[3]}",
+            tooltip=f"{current[1]}: {current[3]} (Shift+Tab changes it)",
             items=[ft.PopupMenuItem(content=ft.Column([ft.Text(label, size=13.5, weight=ft.FontWeight.W_600),
                                                        t.muted(about, size=11.5)], spacing=0, tight=True),
                                     icon=icon, checked=key == self.agent_mode,
@@ -1677,6 +1679,7 @@ class Workspace:
             except (PairingError, OSError, KeyError, ValueError):
                 mode = "auto"  # a computer from before modes: everything runs, as it always did
         self.agent_mode = mode if any(m[0] == mode for m in self.MODES) else "auto"
+        self.plan_mode = self.agent_mode == "plan"
         self.paint_mode_chip()
         try:
             self.page.update()
@@ -1692,7 +1695,10 @@ class Workspace:
             self.toast(f"Couldn't set the mode: {e}")
 
     async def set_agent_mode(self, mode: str) -> None:
+        if mode == "plan" and self.agent_mode != "plan":
+            self.mode_before_plan = self.agent_mode
         self.agent_mode = mode
+        self.plan_mode = mode == "plan"  # Plan is one thing: nothing may change, and the agent writes a plan
         self.paint_mode_chip()
         self.page.update()
         await self.save_mode(mode)  # a chat that doesn't exist yet gets it when it's made
@@ -1706,17 +1712,18 @@ class Workspace:
             if on else "Plan first: have the agent write a plan, and change nothing, before it does the work (/plan)")
 
     def toggle_plan(self, _event=None) -> None:
-        self.plan_mode = not self.plan_mode
-        self.paint_plan_chip()
-        try:
-            self.page.update()
-        except Exception:
-            pass
+        """/plan: into Plan mode, or back to the mode before it."""
+        self.page.run_task(self.set_agent_mode, getattr(self, "mode_before_plan", "auto") if self.plan_mode else "plan")
         self.schedule_status()
 
+    async def next_mode(self) -> None:
+        """Shift+Tab: the next mode, as in Claude Code."""
+        keys = [m[0] for m in self.MODES]
+        await self.set_agent_mode(keys[(keys.index(self.agent_mode) + 1) % len(keys)])
+        self.toast(next(f"{m[1]}: {m[3]}" for m in self.MODES if m[0] == self.agent_mode))
+
     async def approve_plan(self) -> None:
-        self.plan_mode = False
-        self.paint_plan_chip()
+        await self.set_agent_mode(getattr(self, "mode_before_plan", "auto"))
         await self.send_text(codefeatures.APPROVE)
 
     async def revise_plan(self) -> None:
@@ -2001,6 +2008,8 @@ class Workspace:
             return
         if key == "escape" and self.busy:
             await self.on_stop()
+        elif event.shift and key == "tab" and self.section == "chats" and self.mode == "agent":
+            await self.next_mode()
         elif event.ctrl and key == "n":
             await self.new_in_mode()
         elif event.ctrl and key == "b":

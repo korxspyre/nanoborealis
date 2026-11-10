@@ -143,7 +143,7 @@ class ControlCenter:
             "overview": self.overview, "models": self.models, "channels": self.channels,
             "schedules": self.schedules, "skills": self.skills, "memory": self.memory,
             "mcp": self.mcp, "hooks": self.hooks, "subagents": self.subagents,
-            "devices": self.devices, "pool": self.pool, "colony": self.colony, "logs": self.logs, "settings": self.settings_page,
+            "devices": self.devices, "pool": self.pool, "colony": self.colony, "permissions": self.permissions_page, "logs": self.logs, "settings": self.settings_page,
         }
         try:
             return await builders[key]()
@@ -1037,6 +1037,58 @@ class ControlCenter:
                                                                            on_click=lambda _e: self.mcp_add_dialog())])
 
     # -- Hooks -------------------------------------------------------------------------------------
+    # -- Permissions -------------------------------------------------------------------------------
+    # One page for what agents may do without asking: the four modes, what you've always allowed (and can take
+    # back), and what never runs. The rules file is the agent image's gate.py's.
+
+    RULES_PATH = f"{admin.WORKSPACE}/.nanoborealis/permissions.json"
+
+    async def permissions_page(self) -> ft.Control:
+        import permissions
+        from workspace import Workspace
+        try:
+            rules = json.loads(await asyncio.to_thread(admin.read_file, self.app.machine, self.RULES_PATH) or "{}")
+        except (PairingError, ValueError):
+            rules = {}
+        allow = sorted(x for x in (rules.get("allow") or []) if isinstance(x, str)) if isinstance(rules, dict) else []
+
+        async def remove(rule: str) -> None:
+            left = [x for x in allow if x != rule]
+            try:
+                await asyncio.to_thread(admin.write_file, self.app.machine, self.RULES_PATH,
+                                        json.dumps({**rules, "allow": left}, indent=2) + "\n")
+            except PairingError as e:
+                self.toast(str(e))
+                return
+            self.toast(f"The agent asks about {rule} again.")
+            await self.reload("permissions")
+
+        modes = [ft.Row([ft.Icon(icon, size=18, color=t.ACCENT), ft.Text(label, size=13.5, weight=ft.FontWeight.W_600, width=110),
+                         t.muted(about, size=12.5, expand=True)], spacing=12) for _k, label, icon, about in Workspace.MODES]
+        allowed = [ft.Row([ft.Icon(ft.Icons.CHECK_CIRCLE_OUTLINE_ROUNDED, size=16, color=t.GOOD),
+                           ft.Text("File edits" if rule == "edit" else rule, size=13.5, font_family=None if rule == "edit" else t.MONO,
+                                   expand=True),
+                           t.quiet_button("Ask again", on_click=lambda _e, x=rule: self.page.run_task(remove, x))], spacing=10)
+                   for rule in allow]
+        never = sorted({why for _pattern, why in permissions.NEVER})
+        return self.frame("Permissions", "What agents may do without asking you.", [
+            t.card(ft.Column([t.muted("MODES", size=10.5, weight=ft.FontWeight.W_600), *modes,
+                              t.muted("Each chat has its own mode: the chip under the message box, or Shift+Tab.", size=12)],
+                             spacing=10)),
+            t.card(ft.Column([t.muted("ALWAYS ALLOWED", size=10.5, weight=ft.FontWeight.W_600),
+                              *(allowed or [t.muted("Nothing yet. When the agent asks and you answer Always, it's listed here, "
+                                                    "and you can take it back.", size=12.5)])], spacing=8), width=float("inf")),
+            t.card(ft.Column([t.muted("NEVER, IN ANY MODE", size=10.5, weight=ft.FontWeight.W_600),
+                              t.muted("Refused on your devices, whatever the mode: anything that " + "; ".join(
+                                  w for w in never if w != "a fork bomb") + ".", size=12.5)],
+                             spacing=8)),
+            t.card(ft.Row([ft.Column([ft.Text("This device", size=13.5, weight=ft.FontWeight.W_600),
+                                      t.muted("Which folders agents may work in here, and in which mode.", size=12)],
+                                     spacing=1, expand=True),
+                           t.outline_button("Change" if self.app.hands.lending else "Set up",
+                                            on_click=lambda _e: self.page.run_task(self.app.hands.open_dialog))])),
+        ])
+
     # Claude Code's format, run by the agent image's gate.py around the agent's shell and file tools.
 
     HOOKS_PATH = f"{admin.WORKSPACE}/.nanoborealis/hooks.json"

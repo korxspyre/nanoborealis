@@ -248,7 +248,7 @@ CLIENT_COMMANDS = [
     ("/privacy", "Where this chat's model runs and whether it is tokenized"),
     ("/memory", "Open what the agent remembers"),
     ("/agents", "Open your colony"),
-    ("/permissions", "How freely the agent's tools run in this chat: auto, accept edits, ask first, plan only"),
+    ("/permissions", "This chat's permissions: ask, accept edits, plan or auto"),
     ("/btw", "A side question that doesn't go into this chat: /btw what does this error mean?"),
     ("/mcp", "Open the MCP servers"),
     ("/hooks", "Open the hooks"),

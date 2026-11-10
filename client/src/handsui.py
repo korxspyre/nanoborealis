@@ -31,10 +31,11 @@ if TYPE_CHECKING:
 
 PREF_HANDS = "nanoborealis.hands"  # "on" while you lend this device's hands
 ASK_EVERY = 4.0  # seconds between looks for questions from your devices
-MODES = [("scoped", "Scoped: works inside the request's folders; asks about anything else, or anything permanent"),
-         ("ask", "Ask: asks before anything that changes something"),
+# The same four words as a chat's modes; on a device they are about the folders you share with agents.
+MODES = [("ask", "Ask: asks before anything that changes something"),
+         ("scoped", "Accept edits: works freely inside the folders a request is about; asks about anything else"),
          ("plan", "Plan: only reads, nothing changes"),
-         ("trust", "Trust: works in what you share; asks only before what can't be undone")]
+         ("trust", "Auto: works freely in the folders you share; asks only before what can't be undone")]
 
 
 class HandsUI:
@@ -86,7 +87,7 @@ class HandsUI:
         folders = ft.TextField(value="\n".join(policy.roots), multiline=True, min_lines=2, max_lines=5,
                                hint_text=os.path.expanduser("~/projects"), label="Folders you share (one per line)",
                                border_radius=t.RADIUS, border_color=t.LINE_HI, focused_border_color=t.ACCENT)
-        mode = ft.Dropdown(value=policy.mode, options=[ft.dropdown.Option(k, text) for k, text in MODES], label="How freely",
+        mode = ft.Dropdown(value=policy.mode, options=[ft.dropdown.Option(k, text) for k, text in MODES], label="Permissions",
                            border_radius=t.RADIUS)
 
         async def save(on: bool) -> None:

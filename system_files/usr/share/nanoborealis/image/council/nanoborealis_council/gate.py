@@ -119,7 +119,35 @@ def verdict(kind: str, what: str, mode: str) -> str:
     return "ask"
 
 
-_always: dict[str, set[str]] = {}  # chat -> programs the owner said "always" to, for this gateway's life
+# What the owner said "always" to: kept in a file they can read and edit (the app's Permissions page), so it
+# outlives a restart and can be taken back. {"allow": ["git", "npm", "edit"]}: programs by name, "edit" for file edits.
+RULES_FILE = Path(os.environ.get("NANOBOREALIS_PERMISSIONS_FILE",
+                                 str(Path.home() / ".nanobot/workspace/.nanoborealis/permissions.json")))
+ONCE_SECONDS = 600
+_once: dict[tuple[str, str], float] = {}  # (chat, the exact action) -> when "yes" to it runs out: a retry doesn't ask again
+
+
+def allowed() -> set[str]:
+    try:
+        data = json.loads(RULES_FILE.read_text(encoding="utf-8"))
+        return {str(x) for x in data.get("allow") or [] if isinstance(x, str)}
+    except (OSError, ValueError, AttributeError):
+        return set()
+
+
+def allow_always(program: str) -> None:
+    try:
+        try:
+            data = json.loads(RULES_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        data["allow"] = sorted({*(x for x in data.get("allow") or [] if isinstance(x, str)), program})
+        RULES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        RULES_FILE.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    except OSError as e:
+        print(f"nanoborealis gate: couldn't save the rule ({type(e).__name__})", file=sys.stderr)
 
 # -- Hooks, in Claude Code's format ------------------------------------------------------------------------------
 # ~/.nanobot/workspace/.nanoborealis/hooks.json (the app's Hooks page edits it):
@@ -208,7 +236,8 @@ def wrap(cls: type, kind: str, describe, tool_name: str = "") -> None:
         mode = await asyncio.to_thread(mode_for, chat)
         decision = verdict(kind, what, mode)
         program = program_of(what) if kind == "exec" else kind
-        if decision == "ask" and program in _always.get(chat, set()):
+        now = time.time()
+        if decision == "ask" and (program in await asyncio.to_thread(allowed) or _once.get((chat, what), 0) > now):
             decision = "run"
         if decision == "refuse":
             return f"Error: this chat is in plan mode, so nothing may change. Propose this instead: {what[:300]}"
@@ -219,7 +248,10 @@ def wrap(cls: type, kind: str, describe, tool_name: str = "") -> None:
             if answer == "deny":
                 return f"Error: the owner didn't allow this: {what[:300]}. Ask them, or try something else."
             if answer == "always":
-                _always.setdefault(chat, set()).add(program)
+                await asyncio.to_thread(allow_always, program)
+            _once[(chat, what)] = now + ONCE_SECONDS
+            for key in [k for k, until in _once.items() if until < now]:
+                _once.pop(key, None)
         return await original(self, *args, **kwargs)
     execute.__wrapped__ = original  # type: ignore[attr-defined]
     cls.execute = execute
