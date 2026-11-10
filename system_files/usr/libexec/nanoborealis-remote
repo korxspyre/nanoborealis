@@ -1173,6 +1173,16 @@ async def rigs_overview(data: dict, query: dict, owner: str, device_id: str) -> 
                  "specs": rig_specs(), "problem": "" if status == 200 else rigs.get("error", "")}
 
 
+async def rig_deploy(answer: dict) -> None:
+    """A rig's agent seats, each its own container: (re)started or stopped, as root. Their keys go straight into
+    their containers' secrets, never over the network, so "deploy" leaves the answer."""
+    work = answer.pop("deploy", None) or {}
+    if work.get("agents") or work.get("remove"):
+        done = await asyncio.to_thread(subprocess.run, as_root("python3", "/usr/share/nanoborealis/rigagent.py", "deploy"),
+                                       input=json.dumps(work), capture_output=True, text=True, timeout=900)
+        answer["seats_started"] = done.stdout.strip().splitlines() or [done.stderr.strip()[-300:]]
+
+
 async def rigs_up(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
     """Bring up a rig, from a spec that ships with the OS (`name`) or one written in the app (`spec`, TOML).
     Starts the Hall first when it isn't running, and hands it the agent's OpenRouter key: a rig's cloud seats
@@ -1201,6 +1211,7 @@ async def rigs_up(data: dict, query: dict, owner: str, device_id: str) -> tuple[
     status, answer = await asyncio.to_thread(hall_proxy, "POST", "/rigs", "", {"spec": spec, "dry_run": bool(data.get("dry_run"))})
     if status == 200:
         answer.pop("tokens", None)  # outside seats' tokens are handed out on the computer itself, never over the network
+        await rig_deploy(answer)
         log(f"{owner} brought up the rig {answer.get('rig')}" + (" (plan only)" if data.get("dry_run") else ""))
     return status, answer
 
@@ -2101,6 +2112,9 @@ async def admin(method: str, target: str, headers: list[tuple[str, str]], reader
         else:
             status, payload = await asyncio.to_thread(hall_proxy, method, path[len(HALL_PREFIX) - 1:], query_string,
                                                       data if method == "POST" else None)
+            if isinstance(payload, dict) and payload.get("deploy"):  # a rig went down or came back: its agent seats too
+                payload.pop("tokens", None)
+                await rig_deploy(payload)
     except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as e:
         log(f"managing the agent failed ({path}): {e}")
         status, payload = 502, {"error": str(e) if isinstance(e, RuntimeError) else f"That didn't work: {e}"}

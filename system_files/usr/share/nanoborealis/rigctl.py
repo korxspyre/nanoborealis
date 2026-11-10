@@ -63,6 +63,17 @@ def keep_tokens(tokens: dict) -> list[str]:
     return kept
 
 
+def deploy(answer: dict) -> None:
+    """The agent seats' containers: (re)started, or stopped (rigagent.py, as root)."""
+    work = answer.get("deploy") or {}
+    if not (work.get("agents") or work.get("remove")):
+        return
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import rigagent
+    for line in rigagent.deploy(work):
+        print(f"  seat    {line}")
+
+
 def show_outcomes(outcomes: list[dict]) -> None:
     for o in outcomes:
         print(f"  {o['seat']:<24} {o['outcome']:<19} {o['note']}")
@@ -82,6 +93,7 @@ def main(argv: list[str]) -> None:
                 print(f"  {key:<7} {', '.join(plan[key])}")
         for line in keep_tokens(answer.get("tokens") or {}):
             print(f"  token   {line}")
+        deploy(answer)
         if not answer.get("dry_run") and "kind = \"pool\"" in spec.replace("'", '"'):
             print("Seats the pool runs need their agent started: nanoborealis council apply")
     elif action == "ps":
@@ -100,6 +112,7 @@ def main(argv: list[str]) -> None:
             print("\n".join(f"  {r['name']}: {r['seats']} seat(s)" for r in rigs) or "No rigs. Make one with: nanoborealis rig up spec.toml")
     elif action == "down" and args:
         answer = hall("DELETE", f"/rigs/{args[0]}", {"snapshot": False} if "--no-snapshot" in args else {})
+        deploy(answer)
         print(f"{args[0]} is down" + (f" (snapshot {answer['snapshot']}; bring it back with: rig restore {args[0]})" if answer["snapshot"] else ""))
     elif action == "snapshot" and args:
         answer = hall("POST", f"/rigs/{args[0]}/snapshot", {"label": " ".join(args[1:])})
@@ -118,6 +131,7 @@ def main(argv: list[str]) -> None:
         answer = hall("POST", f"/rigs/{args[0]}/restore", body)
         print(f"Restored {args[0]} from snapshot {answer['snapshot']}:")
         show_outcomes(answer["outcomes"])
+        deploy(answer)
         for line in keep_tokens(answer.get("tokens") or {}):
             print(f"  token   {line}")
         if answer["tasks_reopened"]:

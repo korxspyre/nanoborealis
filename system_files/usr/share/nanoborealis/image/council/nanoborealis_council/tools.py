@@ -252,3 +252,61 @@ class Escalate(CouncilTool):
 from . import gate as _gate  # noqa: E402
 
 _gate.install()
+
+
+# -- The rig: OpenRig's agent tools (rig_ps, rig_send, rig_inbox), on the Hall --------------------------------
+
+
+class RigPs(CouncilTool):
+    name = "rig_ps"
+    description = ("Your rig (or another, by name): its institutions (pods), every member with their role, model, "
+                   "whether they're here, mail waiting and trust, and the ties between them.")
+    parameters = schema({"rig": {"type": "string", "description": "A rig's name; yours if left out."}})
+    read_only = True
+
+    async def run(self, rig: str = "") -> str:
+        if not rig:
+            rig = (await self.call("GET", "/me")).get("rig") or ""
+        if not rig:
+            names = (await self.call("GET", "/rigs"))["rigs"]
+            return "Rigs: " + (", ".join(f"{r['name']} ({r['seats']} seats)" for r in names) or "none")
+        data = await self.call("GET", f"/rigs/{rig}")
+        lines = [f"{data['name']}: {data.get('culture') or ''}"]
+        lines += [f"Institution {p['id']}: {p.get('guidance') or ''}" for p in data.get("pods", [])]
+        for s in data["seats"]:
+            lines.append(f"  {s.get('address') or s['id']}: {s.get('role') or 'member'}, pod {s.get('pod') or '-'}, "
+                         f"{s['model']}, {'here' if s.get('here') else 'away'}, mail {s.get('mail_waiting', 0)}, "
+                         f"trust {s.get('trust')}" + (f", head #{s['head_rank']}" if s.get("head_rank") else ""))
+        lines += [f"  tie: {e['src']} {e['kind']} {e['dst']}" for e in data.get("edges", [])]
+        return "\n".join(lines)
+
+
+class RigSend(CouncilTool):
+    name = "rig_send"
+    description = ("Mail another member directly: one seat (its id or name@rig), a whole institution "
+                   "(\"pod:rig/pod\"), the whole rig (\"rig:name\", a broadcast), the head agent (\"head\"), or the "
+                   "owner (\"you\"). It waits in their inbox until they deal with it.")
+    parameters = schema({"to": {"type": "string"}, "text": {"type": "string"},
+                         "kind": {"type": "string", "enum": ["message", "task", "nudge", "reply"]},
+                         "reply_to": {"type": "integer", "description": "The mail you answer, if any."}}, ["to", "text"])
+
+    async def run(self, to: str, text: str, kind: str = "message", reply_to: int | None = None) -> str:
+        body: dict = {"to": to, "text": text, "kind": kind}
+        if reply_to is not None:
+            body["reply_to"] = reply_to
+        sent = await self.call("POST", "/inbox", body)
+        return f"sent: {json.dumps(sent)[:300]}"
+
+
+class RigInbox(CouncilTool):
+    name = "rig_inbox"
+    description = "Your mail from other members and the owner. Mark an item done with `done` once you've dealt with it."
+    parameters = schema({"done": {"type": "integer", "description": "A mail item's number to mark done."}})
+
+    async def run(self, done: int | None = None) -> str:
+        if done is not None:
+            await self.call("POST", f"/inbox/{int(done)}/ack", {"state": "done"})
+            return f"mail {done} done"
+        items = (await self.call("GET", "/inbox"))["mail"]
+        items = [m for m in items if m.get("state") != "done"]
+        return "\n".join(f"[{m['id']}] {m['kind']} from {m['sender']}: {m['text'][:600]}" for m in items) or "No mail."

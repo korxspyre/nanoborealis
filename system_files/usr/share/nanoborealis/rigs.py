@@ -43,11 +43,16 @@ import tomllib
 
 NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,19}")
 POLICIES = ("floor", "inherit", "full_bypass")  # what a seat may do on its own: only the floor, what its rig allows, anything
-EDGE_KINDS = ("reviews", "delegates", "reports_to")
+# OpenRig's edge kinds, and ours from before (reviews, delegates, reports_to)
+EDGE_KINDS = ("reviews", "delegates", "reports_to", "delegates_to", "spawned_by", "can_observe", "collaborates_with",
+              "escalates_to")
 # pool: its own agent on the pool; outside: joins over the API (Claude Code); cloud: a free OpenRouter model the Hall
 # asks itself, through the tokenizer, so a rig runs on a computer without a pool or a GPU.
-KINDS = ("pool", "outside", "cloud")
+# agent: its own full agent in its own container (rigagent.py), every tool the owner's agent has, on a free
+# OpenRouter model: what a seat is in OpenRig. The default.
+KINDS = ("agent", "pool", "outside", "cloud")
 MAX_SEATS = 32
+MAX_AGENT_SEATS = 10  # each is a container with its own memory
 FRESH = 120.0  # seconds a heartbeat counts as being there
 
 
@@ -96,14 +101,14 @@ def validate(data: dict) -> dict:
             errors.append(f"seat {local!r}: an id of lowercase letters, digits and dashes, used once")
             continue
         seen.add(local)
-        kind = str(seat.get("kind") or "pool")
+        kind = str(seat.get("kind") or "agent")
         if kind not in KINDS:
             errors.append(f"seat {local}: kind is one of {', '.join(KINDS)}")
         model = str(seat.get("model") or ("an outside agent" if kind == "outside" else ""))
         if kind == "pool" and not model:
             errors.append(f"seat {local}: a pool seat names its model")
-        if kind == "cloud" and not model.endswith(":free"):
-            errors.append(f"seat {local}: a cloud seat names a free OpenRouter model (its id ends in :free)")
+        if kind in ("cloud", "agent") and not model.endswith(":free"):
+            errors.append(f"seat {local}: a {kind} seat names a free OpenRouter model (its id ends in :free)")
         capability = seat.get("capability", 50)
         if isinstance(capability, bool) or not isinstance(capability, (int, float)) or not 0 <= capability <= 100:
             errors.append(f"seat {local}: capability is 0 to 100")
@@ -123,6 +128,8 @@ def validate(data: dict) -> dict:
                       "policy": policy, "head_rank": head, "guidance": str(seat.get("guidance") or "")[:2000]})
     if len(seats) > MAX_SEATS:
         errors.append(f"a rig has {MAX_SEATS} seats at most")
+    if sum(s["kind"] == "agent" for s in seats) > MAX_AGENT_SEATS:
+        errors.append(f"a rig has {MAX_AGENT_SEATS} agent seats at most: each is a container with its own memory")
     edges = []
     for edge in data.get("edge") or []:
         if not isinstance(edge, dict):

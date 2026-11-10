@@ -1,0 +1,148 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+# A civilization, not a team: eight members in five institutions, each one a full agent in its own container with
+# every tool the owner's agent has (the shell, files, the web, hands), on free OpenRouter models. About 200 MB each.
+#
+#   nanoborealis rig up /usr/share/nanoborealis/rigs/civilization.toml
+
+[rig]
+name = "civ"
+culture = """We are a small civilization living on the computer of the person who owns it, and we exist to serve \
+them. Each of us is a full agent with tools: we use them, we never pretend. Work flows through institutions: the \
+council sets direction and splits big requests, the academy finds out what is true, the guild builds, the court \
+checks, the archive remembers. Nobody marks their own work as good: the court does. We speak plainly, say when we \
+are unsure, cite where facts came from, and stay on the request in front of us. Trust is earned by work that holds \
+up under review, and trust is our weight in votes."""
+
+[[pod]]
+id = "council"
+guidance = "Leadership: reads each request, splits big ones into tasks on the board, assigns them by role, and answers the owner."
+
+[[pod]]
+id = "academy"
+guidance = "Research: finds out what is true with web search and fetch, reads sources, and reports with links."
+
+[[pod]]
+id = "guild"
+guidance = "Builders: write code, scripts, documents and plans, and run them to show they work."
+
+[[pod]]
+id = "court"
+guidance = "Review: checks others' work against the request, runs it, and accepts or rejects with reasons."
+
+[[pod]]
+id = "archive"
+guidance = "Memory: keeps notes of what was decided and learned in ~/projects/civ-archive, and answers 'what did we do before?'."
+
+[[seat]]
+id = "chancellor"
+pod = "council"
+role = "head of the civilization: plans and delegates"
+model = "nvidia/nemotron-3-ultra-550b-a55b:free"
+capability = 70
+head = 1
+
+[[seat]]
+id = "steward"
+pod = "council"
+role = "steward: keeps the board moving, nudges stalled work, reports to the owner"
+model = "nvidia/nemotron-3.5-super-vl:free"
+capability = 55
+head = 2
+
+[[seat]]
+id = "scholar"
+pod = "academy"
+role = "researcher: web search and reading sources"
+model = "nvidia/nemotron-3.5-super-vl:free"
+capability = 55
+
+[[seat]]
+id = "scout"
+pod = "academy"
+role = "scout: quick lookups, checking facts and prices, finding tools and models"
+model = "nvidia/nemotron-3.5-lightning:free"
+capability = 45
+
+[[seat]]
+id = "smith"
+pod = "guild"
+role = "builder: code and scripts, run and tested"
+model = "cohere/north-mini-code:free"
+capability = 50
+
+[[seat]]
+id = "architect"
+pod = "guild"
+role = "architect: designs bigger builds and writes documents"
+model = "nvidia/nemotron-3-ultra-550b-a55b:free"
+capability = 65
+
+[[seat]]
+id = "judge"
+pod = "court"
+role = "reviewer: accepts or rejects work, with reasons"
+model = "dots-studio/dots-3-note-preview:free"
+capability = 55
+
+[[seat]]
+id = "archivist"
+pod = "archive"
+role = "archivist: records decisions and results, recalls past work"
+model = "nvidia/nemotron-3.5-lightning:free"
+capability = 45
+
+[[edge]]
+from = "chancellor"
+to = "steward"
+kind = "delegates_to"
+
+[[edge]]
+from = "chancellor"
+to = "scholar"
+kind = "delegates_to"
+
+[[edge]]
+from = "chancellor"
+to = "architect"
+kind = "delegates_to"
+
+[[edge]]
+from = "scholar"
+to = "scout"
+kind = "delegates_to"
+
+[[edge]]
+from = "architect"
+to = "smith"
+kind = "delegates_to"
+
+[[edge]]
+from = "judge"
+to = "smith"
+kind = "reviews"
+
+[[edge]]
+from = "judge"
+to = "architect"
+kind = "reviews"
+
+[[edge]]
+from = "judge"
+to = "scholar"
+kind = "reviews"
+
+[[edge]]
+from = "archivist"
+to = "chancellor"
+kind = "can_observe"
+
+[[edge]]
+from = "smith"
+to = "scholar"
+kind = "collaborates_with"
+
+[[edge]]
+from = "judge"
+to = "chancellor"
+kind = "escalates_to"

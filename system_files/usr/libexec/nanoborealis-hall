@@ -363,9 +363,9 @@ class Hall:
                 raise Refused(400, "An outside seat has no API of its own and isn't the chair.")
             self.db.execute("UPDATE seats SET external = ? WHERE id = ?", (int(bool(data["external"])), seat_id))
         if "kind" in data:
-            if data["kind"] not in ("pool", "outside", "cloud", None):
-                raise Refused(400, "kind is pool, outside or cloud.")
-            if data["kind"] == "cloud" and not model.endswith(":free"):
+            if data["kind"] not in ("agent", "pool", "outside", "cloud", None):
+                raise Refused(400, "kind is agent, pool, outside or cloud.")
+            if data["kind"] in ("cloud", "agent") and not model.endswith(":free"):
                 raise Refused(400, "A cloud seat runs a free OpenRouter model (its id ends in :free).")
             self.db.execute("UPDATE seats SET kind = ? WHERE id = ?", (data["kind"], seat_id))
         for column in ("rig", "pod", "role", "policy", "address", "guidance"):  # where it sits in a rig; left out: unchanged
@@ -449,34 +449,53 @@ class Hall:
         for edge in spec["edges"]:
             self.db.execute("INSERT INTO edges (rig, src, dst, kind) VALUES (?, ?, ?, ?)", (name, edge["src"], edge["dst"], edge["kind"]))
         tokens = self.rig_seats(spec)
+        agents = tokens.pop("agents", [])
         wanted = {s["id"] for s in spec["seats"]}
-        for old in [r["id"] for r in self.db.execute("SELECT id FROM seats WHERE rig = ?", (name,)) if r["id"] not in wanted]:
+        gone = [r["id"] for r in self.db.execute("SELECT id FROM seats WHERE rig = ?", (name,)) if r["id"] not in wanted]
+        for old in gone:
             self.remove_seat(old)
-        return {"rig": name, "plan": plan, "tokens": tokens}
+        # For `rig up` to do on the system: the agent seats' containers to (re)start, and the ones to stop.
+        deploy = {"rig": spec, "agents": agents, "remove": gone}
+        return {"rig": name, "plan": plan, "tokens": tokens, "deploy": deploy}
 
     def rig_seats(self, spec: dict) -> dict:
-        """Make or update the spec's seats. Returns the tokens of the outside seats made new: shown once."""
-        tokens = {}
+        """Make or update the spec's seats. Returns the tokens of the outside seats made new: shown once. An agent
+        seat (its own container, rigagent.py) gets a port and new keys on every `rig up`; they're returned under
+        "agents" for `rig up` to put in the seat's container, which it (re)starts."""
+        tokens: dict = {}
+        agents = []
+        used = {r["port"] for r in self.db.execute("SELECT port FROM seats WHERE port IS NOT NULL")}
         for s in spec["seats"]:
-            made = self.put_seat({"id": s["id"], "name": s["address"], "model": s["model"], "capability": s["capability"],
+            extra: dict = {}
+            if s["kind"] == "agent":
+                row = self.db.execute("SELECT port FROM seats WHERE id = ?", (s["id"],)).fetchone()
+                port = row["port"] if row and row["port"] else next(p for p in range(8800, 9000) if p not in used)
+                used.add(port)
+                extra = {"port": port, "rotate": True}
+            made = self.put_seat(extra | {"id": s["id"], "name": s["address"], "model": s["model"], "capability": s["capability"],
                                   "family": s["kind"] if s["kind"] != "pool" else "", "external": s["kind"] == "outside",
                                   "kind": s["kind"],
                                   "rig": spec["name"], "pod": s["pod"], "role": s["role"], "policy": s["policy"],
                                   "address": s["address"], "guidance": s["guidance"], "head_rank": s["head_rank"]})
-            if "token" in made:
+            if s["kind"] == "agent":
+                agents.append(s | {"rig": spec["name"], "port": made["port"], "token": made["token"], "api_key": made["api_key"]})
+            elif "token" in made:
                 tokens[s["address"]] = made["token"]
+        if agents:
+            tokens["agents"] = agents
         return tokens
 
     def rig_down(self, name: str, snapshot: bool = True) -> dict:
         """`rig down`: its seats, pods and edges go, after a snapshot by default. Mail and tasks stay, for `rig restore`."""
         self.rig(name)
         snap = self.rig_snapshot(name, "taken down") if snapshot else None
-        for r in list(self.db.execute("SELECT id FROM seats WHERE rig = ?", (name,))):
-            self.remove_seat(r["id"])
+        gone = [r["id"] for r in self.db.execute("SELECT id FROM seats WHERE rig = ?", (name,))]
+        for seat_id in gone:
+            self.remove_seat(seat_id)
         for table in ("pods", "edges"):
             self.db.execute(f"DELETE FROM {table} WHERE rig = ?", (name,))
         self.db.execute("DELETE FROM rigs WHERE name = ?", (name,))
-        return {"down": name, "snapshot": snap["id"] if snap else None}
+        return {"down": name, "snapshot": snap["id"] if snap else None, "deploy": {"remove": gone}}
 
     def rig_snapshot(self, name: str, label: str = "") -> dict:
         """Everything that makes the rig what it is, and the work in flight, to bring it back from."""
@@ -485,7 +504,7 @@ class Hall:
                 "head_rank", "port")
         mine = {s["id"] for s in rig["seats"]}
         data = {"rig": {"name": name, "culture": rig["culture"]}, "pods": rig["pods"], "edges": rig["edges"],
-                "seats": [{**{k: s.get(k) for k in keep}, "kind": "outside" if s["external"] else "pool"} for s in rig["seats"]],
+                "seats": [{**{k: s.get(k) for k in keep}, "kind": s.get("kind") or ("outside" if s["external"] else "pool")} for s in rig["seats"]],
                 "tasks": [t for t in self.tasks() if t["state"] in ("open", "claimed", "review") and (t["claimed_by"] in mine or not t["claimed_by"])],
                 "mail": [dict(r) for r in self.db.execute("SELECT * FROM inbox WHERE rig = ? AND state != 'done'", (name,))]}
         cur = self.db.execute("INSERT INTO snapshots (rig, label, data, at) VALUES (?, ?, ?, ?)",
@@ -512,12 +531,18 @@ class Hall:
             self.db.execute("INSERT OR REPLACE INTO pods (rig, id, guidance) VALUES (?, ?, ?)", (name, pod["id"], pod["guidance"]))
         self.db.execute("DELETE FROM edges WHERE rig = ?", (name,))
         tokens = {}
+        agents = []
         for seat in snap["seats"]:
             if (seat["address"] or seat["id"]) in waiting or seat["id"] in current:
                 continue  # waiting for a decision, or never left
+            agent = seat.get("kind") == "agent"
             made = self.put_seat({k: seat[k] for k in ("id", "name", "model", "family", "capability", "rig", "pod", "role", "policy",
-                                                       "address", "guidance", "head_rank")} | {"external": seat["kind"] == "outside"})
-            if "token" in made:
+                                                       "address", "guidance", "head_rank")} | {"external": seat["kind"] == "outside",
+                                                                                              "kind": seat.get("kind")}
+                                 | ({"port": seat.get("port") or 8800 + len(current) + len(agents), "rotate": True} if agent else {}))
+            if agent:
+                agents.append(seat | {"port": made["port"], "token": made["token"], "api_key": made["api_key"]})
+            elif "token" in made:
                 tokens[seat["address"] or seat["id"]] = made["token"]
         for edge in snap["edges"]:
             self.db.execute("INSERT INTO edges (rig, src, dst, kind) VALUES (?, ?, ?, ?)", (name, edge["src"], edge["dst"], edge["kind"]))
@@ -532,7 +557,10 @@ class Hall:
             if any((s["address"] or s["id"]) in waiting and s["id"] == task.get("claimed_by") for s in snap["seats"]):
                 self.reopen(task["id"])
                 freed.append(task["id"])
-        return {"snapshot": row["id"], "outcomes": outcomes, "tokens": tokens, "tasks_reopened": freed}
+        rig = {"name": name, "culture": snap["rig"].get("culture"), "pods": snap["pods"], "edges": snap["edges"],
+               "seats": snap["seats"]}
+        return {"snapshot": row["id"], "outcomes": outcomes, "tokens": tokens, "tasks_reopened": freed,
+                "deploy": {"rig": rig, "agents": agents, "remove": []}}
 
     # -- Mail: a durable inbox for every seat ---------------------------------------------------------
 
