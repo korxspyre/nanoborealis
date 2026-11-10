@@ -1813,6 +1813,8 @@ class HandsAsk:
     reason: str
     by: str
     created: float = field(default_factory=time.time)
+    chat: str = ""  # the agent's own tools: which chat asks
+    detail: dict = field(default_factory=dict)  # what to show: a command, or each file's change
     answer: str | None = None
     answered: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -1820,6 +1822,7 @@ class HandsAsk:
         devices.load()
         return {"id": self.id, "device": self.device, "device_name": devices.by_id.get(self.device, {}).get("name", self.device),
                 "command": self.command, "cwd": self.cwd, "request": self.request, "reason": self.reason, "by": self.by,
+                "chat": self.chat, "detail": self.detail,
                 "created": self.created, "expires": self.created + HANDS_ASK_MAX}
 
 
@@ -1964,7 +1967,8 @@ async def agent_ask(data: dict) -> tuple[int, dict]:
     if ask is None or ask.device != "agent":
         chat = str(data.get("chat") or "")[:200]
         ask = HandsAsk(secrets.token_hex(6), "agent", str(data.get("command") or "")[:8000], str(data.get("cwd") or "")[:1000],
-                       str(data.get("request") or "")[:2000], str(data.get("reason") or "")[:500], f"your agent (chat {chat})")
+                       str(data.get("request") or "")[:2000], str(data.get("reason") or "")[:500], "your agent", chat=chat,
+                       detail=data.get("detail") if isinstance(data.get("detail"), dict) else {})
         hands_asks[ask.id] = ask
         log(f"the agent asks its owner about: {ask.command[:200]} ({ask.reason})")
     if ask.answer is None:

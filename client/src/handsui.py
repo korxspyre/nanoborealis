@@ -22,6 +22,7 @@ import admin
 import checkpoints
 import hands
 import theme as t
+import transcript
 from pairing import PairingError
 from permissions import Policy
 
@@ -169,31 +170,72 @@ class HandsUI:
                     self.show_ask(ask)
             await asyncio.sleep(ASK_EVERY)
 
+    def ask_parts(self, ask: dict[str, Any]) -> tuple[str, list[ft.Control], str, str]:
+        """(title, what to show, the "always" label, the "yes" label) for a question."""
+        own = ask.get("device") == "agent"  # the agent's own tools, in a chat's Ask first or Accept edits mode
+        detail = ask.get("detail") or {}
+        if own and detail.get("kind") == "edit" and detail.get("edits"):
+            edits = detail["edits"]
+            names = ", ".join(str(e.get("path", "")).rsplit("/", 1)[-1] for e in edits)
+            body: list[ft.Control] = []
+            for e in edits:
+                body.append(t.mono(str(e.get("path", "")), size=12, color=t.MUTED))
+                body.append(transcript.diff_view(str(e.get("old") or ""), str(e.get("new") or "")))
+            return f"Make this edit to {names}?", body, "Always allow edits in this chat", "Yes, edit"
+        program = (detail.get("program") or (ask["command"].split()[0] if ask["command"].split() else "it"))
+        body = [ft.Container(t.mono(ask["command"], selectable=True, size=12.5), padding=10, bgcolor=t.SIDEBAR,
+                             border_radius=t.RADIUS)]
+        if own:
+            return "Run this command?", body, f"Always allow {program} in this chat", "Yes, run it"
+        return f"Run this on {ask['device_name']}?", body, f"Always allow {program} there", "Yes, run it"
+
     def show_ask(self, ask: dict[str, Any]) -> None:
+        """In the chat it belongs to, when that chat is open (as Claude Code asks, in place); else as a dialog."""
+        ws = self.app.workspace
+        title, body, always, yes = self.ask_parts(ask)
+        why = [t.muted(f"Why: {ask['reason']}", size=12)]
+        if ask.get("request"):
+            why.append(t.muted(f"For: {ask['request'][:200]}", size=12))
+        if ask.get("device") != "agent":
+            why.append(t.muted(f"In: {ask['cwd']}", size=12))
+        inline = (ask.get("device") == "agent" and ws is not None and ask.get("chat") and ask.get("chat") == ws.chat_id
+                  and ws.section == "chats")
+        card: ft.Container | None = None
+
         async def answer(choice: str) -> None:
-            self.page.pop_dialog()
+            if inline and card is not None:
+                said = {"once": "Allowed once", "always": "Allowed from now on in this chat", "deny": "Not allowed"}[choice]
+                card.content = ft.Row([ft.Icon(ft.Icons.CHECK_ROUNDED if choice != "deny" else ft.Icons.BLOCK_ROUNDED,
+                                               size=15, color=t.GOOD if choice != "deny" else t.BAD),
+                                       t.muted(f"{title} {said}.", size=12.5)], spacing=8)
+                self.page.update()
+            else:
+                self.page.pop_dialog()
             try:
                 await asyncio.to_thread(admin.hands_answer, self.app.machine, ask["id"], choice)
             except PairingError as e:  # someone answered first, or it ran out of time
-                if self.app.workspace:
-                    self.app.workspace.toast(str(e))
+                if ws:
+                    ws.toast(str(e))
+            if inline and choice == "deny" and ws is not None:
+                ws.composer.hint_text = "What should it do instead?"
+                self.page.update()
+                await ws.composer.focus()
 
-        program = ask["command"].split()[0] if ask["command"].split() else "it"
-        own = ask.get("device") == "agent"  # the agent's own tools, in a chat's Ask first or Accept edits mode
+        buttons = [t.primary_button(yes, on_click=lambda _e: self.page.run_task(answer, "once")),
+                   t.outline_button(always, on_click=lambda _e: self.page.run_task(answer, "always")),
+                   t.quiet_button("No, and tell it what to do differently" if inline else "No",
+                                  on_click=lambda _e: self.page.run_task(answer, "deny"))]
+        if inline:
+            card = ft.Container(ft.Column([ft.Text(title, size=14.5, weight=ft.FontWeight.W_600), *body, *why,
+                                           ft.Row(buttons, spacing=6, wrap=True)], spacing=8),
+                                padding=14, border_radius=t.RADIUS_LG, bgcolor=t.PANEL,
+                                border=ft.Border.all(1, t.ACCENT))
+            ws.add(card)
+            ws.page.update()
+            ws.scroll_to_end()
+            return
         self.page.show_dialog(ft.AlertDialog(
-            modal=True,
-            title=ft.Text(f"Your agent asks to do this ({ask['by'].removeprefix('your agent ')})" if own else
-                          f"An agent asks to run this on {ask['device_name']}"),
-            content=ft.Column([
-                t.muted(f"Why it's asking: {ask['reason']}", size=12.5),
-                t.muted(f"For your request: {ask['request'] or '(none given)'}", size=12.5),
-                t.muted(f"In: {ask['cwd']}", size=12.5),
-                ft.Container(t.mono(ask["command"], selectable=True, size=12.5), padding=10, bgcolor=t.SIDEBAR,
-                             border_radius=t.RADIUS),
-                t.muted("Unanswered in 10 minutes, it's a no.", size=11.5),
-            ], tight=True, spacing=8, width=560),
-            actions=[t.quiet_button("Don't run it", on_click=lambda _e: self.page.run_task(answer, "deny")),
-                     t.outline_button(f"Always allow {program} in this chat" if own else f"Always allow {program} here",
-                                      on_click=lambda _e: self.page.run_task(answer, "always")),
-                     t.primary_button("Run it once", on_click=lambda _e: self.page.run_task(answer, "once"))],
-        ))
+            modal=True, title=ft.Text(title),
+            content=ft.Column([*body, *why, t.muted("Unanswered in 10 minutes, it's a no.", size=11.5)],
+                              tight=True, spacing=8, width=620, scroll=ft.ScrollMode.AUTO),
+            actions=list(reversed(buttons))))

@@ -1211,7 +1211,7 @@ class ControlCenter:
                         t.quiet_button("Take down", icon=ft.Icons.STOP_CIRCLE_OUTLINED,
                                        on_click=lambda _e, n=rig["name"]: self.page.run_task(self.rig_down, n))]),
                 t.muted(rig["culture"] or "No culture written.", size=12.5), *members, *edges,
-                t.muted("Give it work from a Task chat, or talk to it in a Hall chat.", size=12),
+                t.muted("Talk to it, or give it work, in the Civilization chat mode.", size=12),
             ], spacing=6)))
         rows: list[ft.Control] = []
         for seat in seats["seats"]:

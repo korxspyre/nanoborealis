@@ -14,6 +14,7 @@ import asyncio
 import difflib
 import json
 import random
+import re
 import time
 from typing import Any, Callable
 
@@ -216,7 +217,10 @@ def describe(name: str, args: dict[str, Any]) -> tuple[str, str, str]:
         return "Read", path, ft.Icons.DESCRIPTION_OUTLINED
     if name == "write_file":
         return "Write", path, ft.Icons.NOTE_ADD_OUTLINED
-    if name in ("edit_file", "edit", "apply_patch"):
+    if name == "apply_patch":
+        files = patch_paths(args)
+        return "Edit", (", ".join(p.rsplit("/", 1)[-1] for p in files) if files else path), ft.Icons.EDIT_OUTLINED
+    if name in ("edit_file", "edit"):
         return "Edit", path, ft.Icons.EDIT_OUTLINED
     if name == "list_dir":
         return "List", path or ".", ft.Icons.FOLDER_OPEN_OUTLINED
@@ -244,6 +248,21 @@ def _compact(args: Any) -> str:
         return ", ".join(f"{k}={v if isinstance(v, (int, float)) else json.dumps(v, ensure_ascii=False)}"
                          for k, v in args.items())
     return "" if args is None else str(args)
+
+
+def patch_paths(args: dict[str, Any]) -> list[str]:
+    """The files an apply_patch call touches: nanobot's `edits` list, or the paths in a raw patch."""
+    found: list[str] = []
+    for edit in args.get("edits") or []:
+        if isinstance(edit, dict):
+            p = _first(edit, "path", "file_path", "file")
+            if p and p not in found:
+                found.append(p)
+    raw = _first(args, "patch", "input")
+    for m in re.finditer(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", raw or "", re.M):
+        if m.group(1).strip() not in found:
+            found.append(m.group(1).strip())
+    return found
 
 
 def edit_texts(args: dict[str, Any]) -> tuple[str, str] | None:
@@ -349,6 +368,8 @@ class ToolCard:
         self.ended: float | None = None
         self.on_finish: Callable[["ToolCard"], None] | None = None  # the Background pane follows spawned subagents
         self.diff_text: str | None = None  # nanobot's own unified diff of the edit, when it sent one
+        self.diffs: dict[str, str] = {}  # path -> its diff, for a patch over several files
+        self.counts: dict[str, tuple[int, int]] = {}  # path -> (added, deleted)
         self.status = ft.Container(ft.ProgressRing(width=12, height=12, stroke_width=1.6, color=t.ACCENT),
                                    width=18, height=18, alignment=ft.Alignment.CENTER)
         self.meta = ft.Row(spacing=6, tight=True)
@@ -377,11 +398,15 @@ class ToolCard:
         """nanobot's file_edit report for this call: its line counts and, once done, its diff."""
         added, deleted = edit.get("added"), edit.get("deleted")
         if isinstance(added, int) and isinstance(deleted, int):
+            self.counts[str(edit.get("path") or "")] = (added, deleted)  # per file; the card shows the sum
+            added, deleted = sum(a for a, _ in self.counts.values()), sum(d for _, d in self.counts.values())
             self.meta.controls = [ft.Text(f"+{added}", size=11.5, color=t.ADDED_FG, font_family=t.MONO),
                                   ft.Text(f"−{deleted}", size=11.5, color=t.REMOVED_FG, font_family=t.MONO)]
         diff = edit.get("diff")
         if isinstance(diff, dict) and isinstance(diff.get("text"), str) and diff["text"].strip():
-            self.diff_text = diff["text"]
+            # One report per file: a patch over several files keeps every file's diff, in order.
+            self.diffs[str(edit.get("path") or len(self.diffs))] = diff["text"]
+            self.diff_text = "\n".join(self.diffs.values())
             self.details.content = None  # rebuilt with the diff next time it's opened
         if edit.get("status") == "error":
             self.finish(str(edit.get("error") or "The edit failed."), True)

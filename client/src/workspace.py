@@ -310,14 +310,15 @@ class Workspace:
             ft.Container() if drawer else t.icon_button(ft.Icons.KEYBOARD_DOUBLE_ARROW_LEFT_ROUNDED,
                                                         "Hide the sidebar (Ctrl+B)", on_click=self.toggle_sidebar),
         ], spacing=10))
-        new_label = {"agent": "New chat", "hall": "New Hall chat", "task": "New task"}[self.mode]
+        civ = self.mode == "civ"
         in_mode = self.section == "chats" or self.section.startswith("council:")
         nav = ft.Column(spacing=2, controls=[
             self.mode_switch(),
-            self.nav_row(new_label, ft.Icons.EDIT_NOTE_ROUNDED, False,
+            self.nav_row("New chat", ft.Icons.EDIT_NOTE_ROUNDED, False,
                          lambda _e: self.page.run_task(self.new_in_mode), trailing=t.muted("Ctrl N", size=11)),
-            self.nav_row({"agent": "Chats", "hall": "Hall chats", "task": "Tasks"}[self.mode],
-                         ft.Icons.CHAT_BUBBLE_OUTLINE_ROUNDED, in_mode,
+            *([self.nav_row("Give them work", ft.Icons.ASSIGNMENT_OUTLINED, False,
+                            lambda _e: self.page.run_task(self.council_view().new_task))] if civ else []),
+            self.nav_row("Chats", ft.Icons.CHAT_BUBBLE_OUTLINE_ROUNDED, in_mode,
                          lambda _e: self.page.run_task(self.show_section, "chats")),
             self.nav_row("Control center", ft.Icons.TUNE_ROUNDED, not in_mode,
                          lambda _e: self.page.run_task(self.show_section, "overview")),
@@ -333,8 +334,9 @@ class Workspace:
         ])
 
     def mode_switch(self) -> ft.Control:
-        modes = [("agent", "Agent", "Your agent, or one seat of a rig"), ("hall", "Hall", "Every seat of your rigs at once"),
-                 ("task", "Task", "Put work on the rigs' board")]
+        modes = [("agent", "Agent", "Just you and your agent"),
+                 ("civ", "Civilization", "Your agent civilization: every seat of your rigs talks it over, and takes on "
+                                         "work you give them")]
         chips = [ft.Container(
             content=ft.Text(label, size=12.5, weight=ft.FontWeight.W_600,
                             color=t.ON_ACCENT if key == self.mode else t.MUTED),
@@ -360,10 +362,8 @@ class Workspace:
             self.refresh_sidebar()
 
     async def new_in_mode(self) -> None:
-        if self.mode == "hall":
+        if self.mode == "civ":
             await self.council_view().new_hall_chat()
-        elif self.mode == "task":
-            await self.council_view().new_task()
         else:
             await self.open_chat(None)
 
@@ -432,7 +432,7 @@ class Workspace:
                     for key, label, icon in CONTROL_PAGES]
         if self.mode != "agent":
             return self.council_view().side_rows(self.mode)
-        seats = self.council.seat_rows() if self.council is not None else []
+        seats: list[ft.Control] = []  # Agent mode is just your agent; the seats are in Civilization
         query = (self.search.value or "").lower().strip()
         pinned_keys = set(self.sidebar_state.get("pinned_keys") or [])
         archived = set(self.sidebar_state.get("archived_keys") or [])
@@ -495,13 +495,15 @@ class Workspace:
             if key == "list":
                 council.showing = None
                 await council.load()
-                title = "Hall" if self.mode == "hall" else "Tasks"
+                title = "Civilization"
                 body = ft.Container(ft.Column([
                     ft.Text(title, size=20, weight=ft.FontWeight.W_600),
-                    t.muted(council.problem or ("Pick a Hall chat on the left, or start one: every seat reads it, "
-                                                "and each answers in turn." if self.mode == "hall" else
-                                                "Pick a task on the left, or post one: the rig offers it to its "
-                                                "seats, and another seat reviews the result.")),
+                    t.muted(council.problem or ("Start a chat and every seat of your rigs reads it and answers in "
+                                                "turn. Or give them work: one takes it on, another reviews it, and "
+                                                "it shows on the board on the left until it's done.")),
+                    *([t.outline_button("Bring up a rig", icon=ft.Icons.GROUPS_OUTLINED,
+                                        on_click=lambda _e: self.page.run_task(self.show_section, "council"))]
+                      if council.problem else []),
                 ], spacing=8), padding=32)
             else:
                 title, body = await council.view(key)

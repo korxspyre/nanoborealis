@@ -70,8 +70,29 @@ def mode_for(chat: str) -> str:
         return "auto"
 
 
-def ask_owner(chat: str, what: str, reason: str) -> str:
-    body: dict[str, Any] = {"chat": chat, "command": what, "reason": reason, "cwd": "the agent's computer"}
+def request_now() -> str:
+    """The owner's own words that started this turn: what the question is for."""
+    try:
+        from nanobot.agent.tools.context import current_request_context
+        ctx = current_request_context()
+        return str(ctx.original_user_text or "")[:2000] if ctx else ""
+    except Exception:
+        return ""
+
+
+def program_of(command: str) -> str:
+    """The program a command runs, past `cd somewhere &&` and variable settings: what "always allow" means."""
+    parts = re.split(r"\s*(?:&&|;)\s*", command.strip())
+    for part in parts:
+        words = [w for w in part.split() if "=" not in w.split("/")[0]]
+        if words and words[0] not in ("cd", "pushd", "export", "source", "."):
+            return words[0]
+    return command.split()[0] if command.split() else "it"
+
+
+def ask_owner(chat: str, what: str, reason: str, detail: dict | None = None) -> str:
+    body: dict[str, Any] = {"chat": chat, "command": what, "reason": reason, "cwd": "the agent's computer",
+                            "request": request_now(), "detail": detail or {}}
     deadline = time.time() + ASK_MAX
     while time.time() < deadline:
         try:
@@ -147,6 +168,27 @@ async def run_hooks(event: str, tool: str, payload: dict) -> str | None:
     return None
 
 
+def change_detail(tool: str, kw: dict, program: str) -> dict:
+    """What the owner is asked about, in a shape the app can draw as Claude Code does: a command, or each file's
+    change (old and new text) to show as a diff."""
+    if tool == "exec":
+        return {"kind": "exec", "command": str(kw.get("command") or kw.get("cmd") or "")[:4000], "program": program,
+                "cwd": str(kw.get("working_dir") or kw.get("workdir") or "")}
+    if tool == "write_file":
+        return {"kind": "edit", "edits": [{"path": str(kw.get("path") or ""), "old": None,
+                                           "new": str(kw.get("content") or "")[:20000]}]}
+    if tool == "edit_file":
+        return {"kind": "edit", "edits": [{"path": str(kw.get("path") or ""), "old": str(kw.get("old_text") or "")[:20000],
+                                           "new": str(kw.get("new_text") or "")[:20000]}]}
+    edits = []
+    for e in kw.get("edits") or []:
+        if isinstance(e, dict):
+            edits.append({"path": str(e.get("path") or ""), "old": e.get("old_text") if e.get("action") != "add" else None,
+                          "new": str(e.get("new_text") or e.get("content") or "")[:20000],
+                          "action": str(e.get("action") or "")})
+    return {"kind": "edit", "edits": edits[:20]}
+
+
 def wrap(cls: type, kind: str, describe, tool_name: str = "") -> None:
     original = cls.execute
     tool_name = tool_name or kind
@@ -165,14 +207,15 @@ def wrap(cls: type, kind: str, describe, tool_name: str = "") -> None:
     async def guarded(self, args: tuple, kwargs: dict, what: str, chat: str) -> Any:
         mode = await asyncio.to_thread(mode_for, chat)
         decision = verdict(kind, what, mode)
-        program = what.split()[0] if kind == "exec" and what.split() else kind
+        program = program_of(what) if kind == "exec" else kind
         if decision == "ask" and program in _always.get(chat, set()):
             decision = "run"
         if decision == "refuse":
             return f"Error: this chat is in plan mode, so nothing may change. Propose this instead: {what[:300]}"
         if decision == "ask":
             reason = "it changes something" if mode == "manual" else "a command that changes something"
-            answer = await asyncio.to_thread(ask_owner, chat, what, f"{mode} mode: {reason}")
+            detail = change_detail(tool_name, kwargs, program)
+            answer = await asyncio.to_thread(ask_owner, chat, what, f"{mode} mode: {reason}", detail)
             if answer == "deny":
                 return f"Error: the owner didn't allow this: {what[:300]}. Ask them, or try something else."
             if answer == "always":

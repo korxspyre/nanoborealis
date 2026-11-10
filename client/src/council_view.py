@@ -18,6 +18,7 @@ import flet as ft
 
 import admin
 import theme as t
+import transcript
 from pairing import PairingError
 
 if TYPE_CHECKING:
@@ -67,7 +68,7 @@ class CouncilView:
         if seat_id == "advisor":
             return "Advisor"
         if seat_id == "hall":
-            return "The Hall"
+            return "Your civilization"
         return next((s["name"] for s in self.seats if s["id"] == seat_id), seat_id)
 
     # -- The sidebar -----------------------------------------------------------------------------------
@@ -87,21 +88,22 @@ class CouncilView:
     def side_rows(self, mode: str) -> list[ft.Control]:
         if self.problem:
             return [ft.Container(t.muted(self.problem, size=12.5), padding=ft.Padding.only(left=12, right=8, top=8))]
-        rows: list[ft.Control] = []
-        if mode == "hall":
-            for room in (r for r in self.rooms if r["kind"] == "hall"):
-                rows.append(self.side_row(room["title"], f"room:{room['id']}", ft.Icons.GROUPS_OUTLINED))
-            if not rows:
-                rows.append(ft.Container(t.muted("No Hall chats yet. Start one above: every seat answers."),
-                                         padding=ft.Padding.only(left=12, right=8, top=8)))
-        elif mode == "task":
-            for task in self.tasks:
-                rows.append(self.side_row(task["title"], f"task:{task['id']}", ft.Icons.TASK_ALT_ROUNDED,
-                                          t.badge(task["state"].upper(), STATE_COLORS.get(task["state"], t.MUTED))))
-            if not rows:
-                rows.append(ft.Container(t.muted("No tasks yet. Post one above, and a rig takes it on."),
-                                         padding=ft.Padding.only(left=12, right=8, top=8)))
-        return rows
+        def heading(text: str) -> ft.Control:
+            return ft.Container(t.muted(text, size=11.5), padding=ft.Padding.only(left=12, top=10, bottom=2))
+
+        def empty(text: str) -> ft.Control:
+            return ft.Container(t.muted(text, size=12.5), padding=ft.Padding.only(left=12, right=8, top=4))
+        rooms = [self.side_row(r["title"], f"room:{r['id']}", ft.Icons.GROUPS_OUTLINED)
+                 for r in self.rooms if r["kind"] == "hall"]
+        board = [self.side_row(x["title"], f"task:{x['id']}", ft.Icons.TASK_ALT_ROUNDED,
+                               t.badge(x["state"].upper(), STATE_COLORS.get(x["state"], t.MUTED))) for x in self.tasks]
+        seats = [self.side_row(s["name"], (lambda room: f"room:{room['id']}" if room else f"seat:{s['id']}")(
+                     next((r for r in self.rooms if r["kind"] == "direct" and r.get("seat") == s["id"]), None)),
+                     ft.Icons.SMART_TOY_OUTLINED, t.muted(f"trust {s['trust']:g}", size=11))
+                 for s in self.seats if not s.get("chair")]
+        return [heading("Chats"), *(rooms or [empty("None yet. New chat: every seat reads it.")]),
+                heading("The board"), *(board or [empty("Nothing yet. Give them work above.")]),
+                *([heading("Talk to one seat"), *seats] if seats else [])]
 
     def seat_rows(self) -> list[ft.Control]:
         """For Agent mode: a one-on-one chat with each council seat, under the chair's own chats."""
@@ -120,24 +122,41 @@ class CouncilView:
     # -- Starting things --------------------------------------------------------------------------------
 
     async def new_hall_chat(self) -> None:
-        topic = t.field("What's it about?", hint="Which database should the task board use?")
+        """A new chat with every seat: an empty conversation with its composer, like a new chat with your agent.
+        The first message makes it (and names it)."""
+        await self.workspace.show_section("council:new")
 
-        async def start(_event=None) -> None:
-            title = (topic.value or "").strip()
-            if not title:
+    def new_view(self) -> tuple[str, ft.Control]:
+        box = t.field(hint="Ask your civilization anything: every seat of your rigs reads it and answers in turn",
+                      multiline=True, autofocus=True)
+
+        async def send(_event=None) -> None:
+            text = (box.value or "").strip()
+            if not text:
                 return
-            self.page.pop_dialog()
+            box.value, box.disabled = "", True
+            self.page.update()
             try:
-                room = await self.call("POST", "/rooms", {"title": title[:200]})
-                await self.call("POST", f"/rooms/{room['id']}/messages", {"text": title})
+                room = await self.call("POST", "/rooms", {"title": text.splitlines()[0][:200]})
+                await self.call("POST", f"/rooms/{room['id']}/messages", {"text": text})
             except PairingError as e:
+                box.value, box.disabled = text, False
                 self.workspace.toast(str(e))
+                self.page.update()
                 return
             await self.workspace.show_section(f"council:room:{room['id']}")
-
-        topic.on_submit = start
-        self.dialog("New Hall chat", "Every seat reads it, and each answers in turn or passes.",
-                    [topic], "Start", start)
+        box.on_submit = send
+        box.shift_enter = True
+        composer = ft.Row([ft.Container(box, expand=True),
+                           ft.IconButton(ft.Icons.ARROW_UPWARD_ROUNDED, tooltip="Send (Enter)", bgcolor=t.ACCENT,
+                                         icon_color=t.ON_ACCENT, on_click=send)], spacing=8)
+        hello = ft.Container(ft.Column([
+            ft.Icon(ft.Icons.GROUPS_ROUNDED, size=40, color=t.ACCENT),
+            ft.Text("Talk to your civilization", size=22, weight=ft.FontWeight.W_600),
+            t.muted("Every seat of your rigs reads your message and answers in turn, or passes. To have them do "
+                    "something and check each other's work, use Give them work.", size=13),
+        ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10), alignment=ft.Alignment.CENTER, padding=48)
+        return "New chat", self.frame([hello], composer)
 
     async def new_task(self) -> None:
         title = t.field("The task", hint="Write a README for my project")
@@ -155,7 +174,7 @@ class CouncilView:
                 return
             await self.workspace.show_section(f"council:task:{task['id']}")
 
-        self.dialog("New task", "The rig offers it to its seats: one takes it on, another reviews the result.",
+        self.dialog("Give them work", "Your rigs offer it to their seats: one takes it on, another reviews the result.",
                     [title, detail], "Post it", post)
 
     def dialog(self, title: str, blurb: str, fields: list[ft.Control], action: str, on_click) -> None:
@@ -181,6 +200,9 @@ class CouncilView:
     async def view(self, key: str) -> tuple[str, ft.Control]:
         """The title and body for "room:<id>", "task:<id>" or "seat:<id>"."""
         kind, _, ident = key.partition(":")
+        if kind == "new":
+            self.showing = None
+            return self.new_view()
         try:
             if kind == "seat":
                 room_id = await self.seat_room(ident)
@@ -209,7 +231,8 @@ class CouncilView:
         tape = ft.Row([t.badge(self.seat_name(author).upper(),
                                t.ACCENT if mine else t.WARN if author in ("advisor", "hall") else t.VIOLET),
                        t.muted(stamp(message.get("at")), size=11)], spacing=8)
-        controls: list[ft.Control] = [tape, ft.Text(message["text"], size=14, selectable=True, color=t.TEXT)]
+        body = ft.Text(message["text"], size=14, selectable=True, color=t.TEXT) if mine else transcript.markdown(message["text"])
+        controls: list[ft.Control] = [tape, body]
         if kind == "escalation":
             controls.insert(1, t.muted("asks for outside advice", size=11.5))
         if not mine and author not in ("advisor", "hall"):
