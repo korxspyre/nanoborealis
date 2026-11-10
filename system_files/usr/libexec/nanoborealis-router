@@ -1,0 +1,404 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+"""The router: one address for inference, many free providers behind it.
+
+The agent and every crew member ask the router (an OpenAI-style /v1/chat/completions). It sends each request to a
+provider that has room for it right now, and when that one says "limit reached" it tries the next, so nobody
+notices when one runs dry. Built in: NVIDIA NIM, Groq and OpenRouter's free models. Nothing here costs money:
+OpenRouter is asked with max_price 0, and the others are their free plans.
+
+    nanoborealis-router                    serve (the systemd unit)
+    nanoborealis-router key <provider>     store a provider's key, read from stdin (root)
+    nanoborealis-router set <provider> <field> <value>   enabled true|false, daily N, per_minute N, max_request N,
+                                           smart MODEL, fast MODEL
+    nanoborealis-router status             what each provider has left today, as JSON
+    nanoborealis-router token              the token clients use (made on first use)
+
+How it chooses, for each request:
+  1. Providers that are on, have a key, aren't resting after a refusal, have requests left today and this minute,
+     and take a request this big (Groq's free plan allows few tokens a minute, so it only gets the small ones).
+  2. Of those, the one with the largest share of its day left.
+  3. A refusal (429, 413, a server error, no answer) rests that provider (a minute, or what it says; until
+     midnight UTC when it says the day is used up) and the request goes to the next.
+
+Models: a request names a model the way OpenRouter does. OpenRouter gets it as it is when it is a free one.
+The others have a "smart" and a "fast" model each, picked from what the provider serves when its key is stored
+(or set by hand); a request for a small model (lightning, mini, flash, 8b...) gets the fast one.
+
+State (root only): /var/lib/nanoborealis/router/{providers.json, usage.json, token}.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import secrets
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+STATE = Path(os.environ.get("NANOBOREALIS_ROUTER_STATE", "/var/lib/nanoborealis/router"))
+LISTEN = os.environ.get("NANOBOREALIS_ROUTER_LISTEN", "0.0.0.0:11438")
+TIMEOUT = float(os.environ.get("NANOBOREALIS_ROUTER_TIMEOUT", "600"))
+FREE_ONLY = {"provider": {"max_price": {"prompt": 0, "completion": 0, "request": 0, "image": 0}}}
+
+# What ships: each provider's address and its free plan's limits as far as they are known. Every number can be
+# changed with `set`, because providers change them and show the real ones only in your own account.
+BUILT_IN = {
+    "nim": {"label": "NVIDIA NIM", "url": "https://integrate.api.nvidia.com/v1", "per_minute": 40, "daily": 1000,
+            "max_request": 0, "where": "build.nvidia.com",
+            "smart_like": ["nemotron-3-ultra", "nemotron.*ultra", "nemotron.*super", "gpt-oss-120b", "llama-3.3-70b", "qwen3"],
+            "fast_like": ["nemotron.*lightning", "nemotron.*nano", "gpt-oss-20b", "llama-3.1-8b", "gemma"]},
+    "groq": {"label": "Groq", "url": "https://api.groq.com/openai/v1", "per_minute": 30, "daily": 1000,
+             "max_request": 6000, "where": "console.groq.com",  # its free plan: about 8,000 tokens a minute
+             "smart_like": ["gpt-oss-120b", "qwen3", "llama-3.3-70b", "kimi"],
+             "fast_like": ["gpt-oss-20b", "llama-3.1-8b", "instant"]},
+    "openrouter": {"label": "OpenRouter", "url": "https://openrouter.ai/api/v1", "per_minute": 20, "daily": 1000,
+                   "max_request": 0, "where": "openrouter.ai/keys", "extra": FREE_ONLY,
+                   "smart": "nvidia/nemotron-3-ultra-550b-a55b:free", "fast": "nvidia/nemotron-3.5-lightning:free"},
+}
+SMALL = re.compile(r"lightning|mini|nano|flash|instant|small|-8b|-7b|-4b|note", re.I)
+SETTABLE = {"enabled", "daily", "per_minute", "max_request", "smart", "fast"}
+lock = threading.RLock()
+
+
+def today() -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime())
+
+
+def midnight() -> float:
+    now = time.time()
+    return now - now % 86400 + 86400
+
+
+def read(name: str) -> dict:
+    try:
+        data = json.loads((STATE / name).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write(name: str, data: dict) -> None:
+    STATE.mkdir(parents=True, exist_ok=True)
+    path = STATE / name
+    tmp = path.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, path)
+
+
+def providers() -> dict[str, dict]:
+    """The built-in providers with the owner's own settings and keys over them."""
+    saved = read("providers.json")
+    return {name: {**base, "name": name, "enabled": True, **(saved.get(name) or {})} for name, base in BUILT_IN.items()}
+
+
+def client_token() -> str:
+    path = STATE / "token"
+    try:
+        return path.read_text().strip()
+    except OSError:
+        STATE.mkdir(parents=True, exist_ok=True)
+        token = secrets.token_urlsafe(32)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(token + "\n")
+        return token
+
+
+class Usage:
+    """Requests per provider today (kept on disk), this minute, and who is resting until when."""
+
+    def __init__(self) -> None:
+        self.data = read("usage.json")
+        self.recent: dict[str, list[float]] = {}
+        kept = self.data.get("_resting") if isinstance(self.data.get("_resting"), dict) else {}
+        self.resting: dict[str, tuple[float, str]] = {k: (float(v[0]), str(v[1])) for k, v in kept.items()}
+        self.saved = 0.0
+
+    def day(self, name: str) -> dict:
+        entry = self.data.get(name)
+        if not isinstance(entry, dict) or entry.get("day") != today():
+            entry = self.data[name] = {"day": today(), "requests": 0, "tokens": 0, "refused": 0}
+        return entry
+
+    def this_minute(self, name: str) -> int:
+        cutoff = time.time() - 60
+        self.recent[name] = [x for x in self.recent.get(name, []) if x > cutoff]
+        return len(self.recent[name])
+
+    def count(self, name: str, tokens: int) -> None:
+        entry = self.day(name)
+        entry["requests"] += 1
+        entry["tokens"] += tokens
+        self.recent.setdefault(name, []).append(time.time())
+        self.save()
+
+    def rest(self, name: str, seconds: float, why: str) -> None:
+        self.day(name)["refused"] += 1
+        self.resting[name] = (time.time() + seconds, why)
+        self.data["_resting"] = {k: list(v) for k, v in self.resting.items() if v[0] > time.time()}
+        self.save(now=True)
+
+    def rest_left(self, name: str) -> tuple[float, str]:
+        until, why = self.resting.get(name, (0.0, ""))
+        return (max(0.0, until - time.time()), why)
+
+    def save(self, now: bool = False) -> None:
+        if now or time.time() - self.saved > 5:
+            self.saved = time.time()
+            write("usage.json", self.data)
+
+
+usage = Usage()
+
+
+def tier(model: str) -> str:
+    return "fast" if SMALL.search(model or "") else "smart"
+
+
+def model_for(provider: dict, asked: str) -> str | None:
+    if provider["name"] == "openrouter" and asked.endswith(":free"):
+        return asked
+    return provider.get(tier(asked)) or provider.get("smart") or None
+
+
+def candidates(asked: str, size: int) -> list[tuple[dict, str]]:
+    """The providers that can take this request now, the one with most of its day left first."""
+    found = []
+    with lock:
+        for name, p in providers().items():
+            model = model_for(p, asked)
+            if not p.get("enabled") or not p.get("key") or not model:
+                continue
+            if usage.rest_left(name)[0] > 0 or (p.get("max_request") and size > int(p["max_request"])):
+                continue
+            daily, used = int(p.get("daily") or 0), usage.day(name)["requests"]
+            if (daily and used >= daily) or (p.get("per_minute") and usage.this_minute(name) >= int(p["per_minute"])):
+                continue
+            found.append(((daily - used) / daily if daily else 1.0, p, model))
+    found.sort(key=lambda x: -x[0])
+    return [(p, model) for _left, p, model in found]
+
+
+def status() -> dict:
+    out = {}
+    with lock:
+        for name, p in providers().items():
+            day = usage.day(name)
+            rest, why = usage.rest_left(name)
+            out[name] = {"label": p["label"], "where": p.get("where", ""), "has_key": bool(p.get("key")),
+                         "enabled": bool(p.get("enabled")), "daily": int(p.get("daily") or 0), "used": day["requests"],
+                         "tokens": day["tokens"], "refused": day["refused"], "per_minute": int(p.get("per_minute") or 0),
+                         "max_request": int(p.get("max_request") or 0), "smart": p.get("smart") or "", "fast": p.get("fast") or "",
+                         "resting": int(rest), "resting_why": why}
+    return {"providers": out, "day": today()}
+
+
+def refusal(status_code: int, text: str, headers) -> tuple[float, str]:
+    """How long a provider rests after refusing, and why (shown to the owner)."""
+    lowered = text.lower()
+    if status_code == 429 and re.search(r"per day|daily|per-day|quota.*day|rpd|tokens per day|tpd", lowered):
+        return midnight() - time.time(), "today's limit is used up"
+    try:
+        wait = float(headers.get("retry-after") or 0)
+    except (TypeError, ValueError):
+        wait = 0.0
+    if status_code == 429:
+        return min(max(wait, 20.0), 900.0), "too many requests just now"
+    if status_code in (401, 403):
+        return 3600.0, "it refused the key"
+    if status_code == 413:
+        return 0.0, "the request was too big for it"
+    return 30.0, f"it answered {status_code}"
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *_args) -> None:
+        pass
+
+    def reply(self, code: int, payload: dict) -> None:
+        body = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def allowed(self) -> bool:
+        given = (self.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
+        return secrets.compare_digest(given.encode(), client_token().encode())
+
+    def do_GET(self) -> None:
+        if not self.allowed():
+            return self.reply(401, {"error": {"message": "Not the router's token."}})
+        if self.path.rstrip("/") == "/v1/models":
+            ids = sorted({m for p in providers().values() if p.get("key") for m in (p.get("smart"), p.get("fast")) if m})
+            return self.reply(200, {"object": "list", "data": [{"id": i, "object": "model"} for i in ids]})
+        if self.path.rstrip("/") == "/status":
+            return self.reply(200, status())
+        self.reply(404, {"error": {"message": "No such endpoint."}})
+
+    def do_POST(self) -> None:
+        if not self.allowed():
+            return self.reply(401, {"error": {"message": "Not the router's token."}})
+        if self.path.rstrip("/") != "/v1/chat/completions":
+            return self.reply(404, {"error": {"message": "No such endpoint."}})
+        try:
+            raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            body = json.loads(raw)
+            asked = str(body.get("model") or "")
+        except (ValueError, AttributeError):
+            return self.reply(400, {"error": {"message": "Bad request."}})
+        size = len(raw) // 4  # tokens, near enough to know what fits where
+        tried: list[str] = []
+        for _attempt in range(6):
+            options = [(p, m) for p, m in candidates(asked, size) if p["name"] not in tried]
+            if not options:
+                break
+            provider, model = options[0]
+            tried.append(provider["name"])
+            if self.forward(provider, model, body, size):
+                return
+        left = {n: s for n, s in status()["providers"].items() if s["has_key"]}
+        why = "; ".join(f"{s['label']}: " + (s["resting_why"] or ("today's limit is used up" if s["daily"] and s["used"] >= s["daily"]
+                                                                   else "couldn't take this request")) for s in left.values())
+        self.reply(429, {"error": {"message": "Every free provider is out for now. " + (why or "No provider has a key yet: "
+                                               "add one in Mission control, Providers."), "type": "rate_limit_error"}})
+
+    def forward(self, provider: dict, model: str, body: dict, size: int) -> bool:
+        """Send it to one provider. True when the answer (good or not worth retrying elsewhere) went to the client."""
+        name = provider["name"]
+        out = {**body, **(provider.get("extra") or {}), "model": model}
+        request = urllib.request.Request(provider["url"] + "/chat/completions", data=json.dumps(out).encode(), method="POST",
+                                         headers={"Authorization": f"Bearer {provider['key']}", "Content-Type": "application/json",
+                                                  "Accept": "text/event-stream" if body.get("stream") else "application/json",
+                                                  "User-Agent": "nanoborealis-router", "X-Title": "NanoBorealis"})
+        try:
+            response = urllib.request.urlopen(request, timeout=TIMEOUT)
+        except urllib.error.HTTPError as error:
+            text = error.read(4000).decode(errors="replace")
+            if error.code == 400:  # the request itself is wrong: another provider would say the same
+                with lock:
+                    usage.count(name, 0)
+                self.send_response(400)
+                data = text.encode()
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return True
+            seconds, why = refusal(error.code, text, error.headers)
+            with lock:
+                usage.rest(name, seconds, why)
+            print(f"nanoborealis-router: {name} refused ({error.code}: {why}); trying the next", file=sys.stderr, flush=True)
+            return False
+        except (urllib.error.URLError, OSError) as error:
+            with lock:
+                usage.rest(name, 30, "it didn't answer")
+            print(f"nanoborealis-router: {name} didn't answer ({error}); trying the next", file=sys.stderr, flush=True)
+            return False
+        with response:
+            self.send_response(200)
+            self.send_header("Content-Type", response.headers.get("Content-Type") or "application/json")
+            self.send_header("X-NanoBorealis-Provider", name)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            answered = 0
+            try:
+                while True:
+                    chunk = response.read1(65536)
+                    if not chunk:
+                        break
+                    answered += len(chunk)
+                    self.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+                    self.wfile.flush()
+                self.wfile.write(b"0\r\n\r\n")
+            except OSError:
+                pass  # the client went away
+        with lock:
+            usage.count(name, size + answered // 4)
+        return True
+
+
+def discover(name: str) -> dict:
+    """Ask a provider which models it serves and pick its smart and fast ones."""
+    p = providers()[name]
+    picked: dict = {}
+    if not p.get("key") or not p.get("smart_like"):
+        return picked
+    try:
+        request = urllib.request.Request(p["url"] + "/models", headers={"Authorization": f"Bearer {p['key']}",
+                                                                        "User-Agent": "nanoborealis-router"})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            ids = [str(m.get("id")) for m in json.loads(response.read()).get("data", []) if isinstance(m, dict)]
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        print(f"couldn't list {name}'s models: {error}", file=sys.stderr)
+        return picked
+    for kind in ("smart", "fast"):
+        for pattern in p[f"{kind}_like"]:
+            match = next((i for i in sorted(ids) if re.search(pattern, i, re.I)), None)
+            if match:
+                picked[kind] = match
+                break
+    return picked
+
+
+def main(argv: list[str]) -> int:
+    if argv[:1] == ["key"] and len(argv) == 2 and argv[1] in BUILT_IN:
+        key = sys.stdin.read().strip()
+        saved = read("providers.json")
+        entry = saved.setdefault(argv[1], {})
+        if key:
+            entry["key"] = key
+        else:
+            entry.pop("key", None)
+        write("providers.json", saved)
+        if key:
+            picked = {k: v for k, v in discover(argv[1]).items() if not entry.get(k)}
+            if picked:
+                saved = read("providers.json")
+                saved.setdefault(argv[1], {}).update(picked)
+                write("providers.json", saved)
+        print(json.dumps({"saved": argv[1], "models": {k: providers()[argv[1]].get(k) for k in ("smart", "fast")}}))
+        return 0
+    if argv[:1] == ["set"] and len(argv) == 4 and argv[1] in BUILT_IN and argv[2] in SETTABLE:
+        value: object = argv[3]
+        if argv[2] == "enabled":
+            value = argv[3] == "true"
+        elif argv[2] in ("daily", "per_minute", "max_request"):
+            value = max(0, int(argv[3]))
+        saved = read("providers.json")
+        saved.setdefault(argv[1], {})[argv[2]] = value
+        write("providers.json", saved)
+        return 0
+    if argv == ["status"]:
+        print(json.dumps(status()))
+        return 0
+    if argv == ["token"]:
+        print(client_token())
+        return 0
+    if argv:
+        print(__doc__, file=sys.stderr)
+        return 2
+    client_token()
+    host, _, port = LISTEN.rpartition(":")
+    server = ThreadingHTTPServer((host or "0.0.0.0", int(port)), Handler)
+    server.daemon_threads = True
+    print(f"nanoborealis-router: listening on {LISTEN}", file=sys.stderr, flush=True)
+    server.serve_forever()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

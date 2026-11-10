@@ -28,6 +28,11 @@ if [ -f /etc/nanoborealis/council.env ]; then
     council_rules="        meta skuid $uid fib daddr type local tcp dport 11437 accept"
     echo "council: the agent's seats may use this computer's Hall (port 11437)"
 fi
+router_rules=""
+if [ -f /var/lib/nanoborealis/router/token ]; then
+    router_rules="        meta skuid $uid fib daddr type local tcp dport 11438 accept"
+    echo "router: the agent and the crew may use this computer's inference router (port 11438)"
+fi
 
 lan_rules="        meta skuid $uid ip daddr @lan4 meta l4proto { tcp, udp } th dport 53 accept
         meta skuid $uid ip6 daddr @lan6 meta l4proto { tcp, udp } th dport 53 accept
@@ -61,6 +66,7 @@ table inet nanoborealis {
         meta skuid $uid fib daddr type local tcp dport 8766 accept
 $pool_rules
 $council_rules
+$router_rules
 $lan_rules
     }
     chain input {
@@ -69,6 +75,8 @@ $lan_rules
         iifname != "lo" tcp dport 11436 counter drop
         # So is the Hall: only this computer's seats and services.
         iifname != "lo" tcp dport 11437 counter drop
+        # And the inference router: it holds the owner's provider keys.
+        iifname != "lo" tcp dport 11438 counter drop
     }
 }
 EOF

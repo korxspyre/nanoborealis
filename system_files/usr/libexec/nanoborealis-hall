@@ -458,6 +458,18 @@ class Hall:
         deploy = {"rig": spec, "agents": agents, "remove": gone}
         return {"rig": name, "plan": plan, "tokens": tokens, "deploy": deploy}
 
+    def rig_redeploy(self, name: str) -> dict:
+        """The rig's agent seats again, with new keys, for their containers to be written and restarted: after
+        something they are built from changed (the inference router was set up, say)."""
+        row = self.db.execute("SELECT spec FROM rigs WHERE name = ?", (name,)).fetchone()
+        if not row:
+            raise Refused(404, f"No rig {name}.")
+        spec = json.loads(row["spec"] or "{}")
+        if not spec.get("seats"):
+            raise Refused(409, f"{name} was restored from a snapshot without its file: bring it up again from its file.")
+        agents = self.rig_seats(spec).pop("agents", [])
+        return {"rig": name, "deploy": {"rig": spec, "agents": agents, "remove": []}}
+
     def rig_seats(self, spec: dict) -> dict:
         """Make or update the spec's seats. Returns the tokens of the outside seats made new: shown once. An agent
         seat (its own container, rigagent.py) gets a port and new keys on every `rig up`; they're returned under
@@ -1470,6 +1482,9 @@ def route(hall: Hall, who: str, method: str, parts: list[str], query: dict, data
         case "DELETE", ["rigs", name]:
             admin_only()
             return hall.rig_down(name, data.get("snapshot", True) is not False)
+        case "POST", ["rigs", name, "redeploy"]:
+            admin_only()
+            return hall.rig_redeploy(name)
         case "POST", ["rigs", name, "snapshot"]:
             admin_only()
             return hall.rig_snapshot(name, data.get("label", ""))

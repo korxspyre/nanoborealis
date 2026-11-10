@@ -1183,6 +1183,68 @@ async def rig_deploy(answer: dict) -> None:
         answer["seats_started"] = done.stdout.strip().splitlines() or [done.stderr.strip()[-300:]]
 
 
+# -- Inference providers: the router (nanoborealis-router) ----------------------------------------------------
+
+ROUTER = "/usr/libexec/nanoborealis-router"
+ROUTER_PROVIDERS = ("nim", "groq", "openrouter")
+
+
+async def router_run(*args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
+    return await asyncio.to_thread(subprocess.run, as_root("env", "NANOBOREALIS_ROUTER_STATE=/var/lib/nanoborealis/router",
+                                                           ROUTER, *args), input=stdin, capture_output=True, text=True, timeout=90)
+
+
+async def providers_overview(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    """What each free provider has left today, whether it has a key, and whether the router is running."""
+    done = await router_run("status")
+    try:
+        answer = json.loads(done.stdout)
+    except ValueError:
+        return 502, {"error": f"The router didn't answer: {done.stderr.strip()[-300:]}"}
+    running = await asyncio.to_thread(subprocess.run, ["systemctl", "is-active", "--quiet", "nanoborealis-router.service"])
+    answer["running"] = running.returncode == 0
+    return 200, answer
+
+
+async def providers_key(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    """Store (or, empty, remove) a provider's key. The first key starts the router and moves the crew onto it."""
+    name, key = data.get("provider"), data.get("key")
+    if name not in ROUTER_PROVIDERS or not isinstance(key, str) or len(key) > 400 or re.search(r"\s", key.strip()):
+        return 400, {"error": "Give a provider (nim, groq or openrouter) and its key."}
+    had = await asyncio.to_thread(subprocess.run, as_root("test", "-f", "/var/lib/nanoborealis/router/token"), capture_output=True)
+    first = had.returncode != 0
+    done = await router_run("key", name, stdin=key.strip())
+    if done.returncode != 0:
+        return 502, {"error": f"Couldn't store the key: {done.stderr.strip()[-300:]}"}
+    await router_run("token")
+    for unit_args in (("enable", "--now", "nanoborealis-router.service"), ("restart", "nanoborealis-firewall.service")):
+        await asyncio.to_thread(subprocess.run, as_root("systemctl", *unit_args), capture_output=True, timeout=60)
+    log(f"{owner} {'stored' if key.strip() else 'removed'} the {name} key for the router")
+    answer = {"saved": name}
+    with contextlib.suppress(ValueError):
+        answer.update(json.loads(done.stdout))
+    # The crew's containers are built to ask OpenRouter or the router: put them on the router now that it is there.
+    status, rigs = await asyncio.to_thread(hall_proxy, "GET", "/rigs", "", None)
+    if status == 200 and first:
+        for rig in rigs.get("rigs", []):
+            status, again = await asyncio.to_thread(hall_proxy, "POST", f"/rigs/{rig['name']}/redeploy", "", {})
+            if status == 200:
+                await rig_deploy(again)
+                answer.setdefault("moved", []).append(rig["name"])
+    return 200, answer
+
+
+async def providers_set(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    name, field, value = data.get("provider"), data.get("field"), data.get("value")
+    if name not in ROUTER_PROVIDERS or field not in ("enabled", "daily", "per_minute", "max_request", "smart", "fast"):
+        return 400, {"error": "That isn't a setting of a provider."}
+    text = ("true" if value else "false") if isinstance(value, bool) else str(value)[:200]
+    done = await router_run("set", name, field, text)
+    if done.returncode != 0:
+        return 400, {"error": f"Couldn't change it: {done.stderr.strip()[-200:]}"}
+    return 200, {"set": field}
+
+
 async def rigs_up(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
     """Bring up a rig, from a spec that ships with the OS (`name`) or one written in the app (`spec`, TOML).
     Starts the Hall first when it isn't running, and hands it the agent's OpenRouter key: a rig's cloud seats
@@ -2055,6 +2117,9 @@ ADMIN_ROUTES = {
     ("POST", "/nanoborealis/agent/mode"): set_agent_mode,
     ("GET", "/nanoborealis/rigs"): rigs_overview,
     ("POST", "/nanoborealis/rigs/up"): rigs_up,
+    ("GET", "/nanoborealis/providers"): providers_overview,
+    ("POST", "/nanoborealis/providers/key"): providers_key,
+    ("POST", "/nanoborealis/providers/set"): providers_set,
     ("GET", "/nanoborealis/agent"): agent_overview,
     ("GET", "/nanoborealis/agent/file"): agent_file_read,
     ("GET", "/nanoborealis/agent/files"): agent_file_list,

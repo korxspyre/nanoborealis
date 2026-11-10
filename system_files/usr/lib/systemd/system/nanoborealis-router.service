@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+[Unit]
+Description=NanoBorealis router (one address for inference, many free providers behind it)
+Documentation=file:///usr/share/nanoborealis/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Started when the first provider key is stored (the app's Providers page). Keys and usage stay in the state
+# directory, readable by root only. All addresses, so the agent and the crew reach it from their containers;
+# nanoborealis-firewall drops it from the network.
+Environment=NANOBOREALIS_ROUTER_STATE=/var/lib/nanoborealis/router NANOBOREALIS_ROUTER_LISTEN=0.0.0.0:11438
+ExecStart=/usr/libexec/nanoborealis-router
+StateDirectory=nanoborealis/router
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

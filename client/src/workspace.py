@@ -52,6 +52,7 @@ APP_COMMANDS = [("/model", "Choose this chat's model"), ("/new", "Start a new ch
 # Mission control, in groups: what your agent is, what runs by itself, your devices, and the system itself.
 CONTROL_GROUPS = [
     ("Agent", [("models", "Models", ft.Icons.AUTO_AWESOME_OUTLINED),
+               ("providers", "Providers", ft.Icons.ALT_ROUTE_ROUNDED),
                ("skills", "Skills", ft.Icons.EXTENSION_OUTLINED),
                ("subagents", "Subagents", ft.Icons.CALL_SPLIT_ROUNDED),
                ("memory", "Memory", ft.Icons.PSYCHOLOGY_OUTLINED),

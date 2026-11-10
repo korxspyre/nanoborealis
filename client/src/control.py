@@ -143,7 +143,7 @@ class ControlCenter:
             "overview": self.overview, "models": self.models, "channels": self.channels,
             "schedules": self.schedules, "skills": self.skills, "memory": self.memory,
             "mcp": self.mcp, "hooks": self.hooks, "subagents": self.subagents,
-            "devices": self.devices, "pool": self.pool, "colony": self.colony, "permissions": self.permissions_page, "logs": self.logs, "settings": self.settings_page,
+            "devices": self.devices, "pool": self.pool, "colony": self.colony, "permissions": self.permissions_page, "providers": self.providers_page, "logs": self.logs, "settings": self.settings_page,
         }
         try:
             return await builders[key]()
@@ -1037,6 +1037,10 @@ class ControlCenter:
                                                                            on_click=lambda _e: self.mcp_add_dialog())])
 
     # -- Hooks -------------------------------------------------------------------------------------
+    async def providers_page(self) -> ft.Control:
+        import providers_page
+        return await providers_page.build(self)
+
     # -- Permissions -------------------------------------------------------------------------------
     # One page for what agents may do without asking: the four modes, what you've always allowed (and can take
     # back), and what never runs. The rules file is the agent image's gate.py's.

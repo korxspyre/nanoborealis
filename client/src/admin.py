@@ -174,6 +174,19 @@ def hall(machine: Machine, method: str, path: str, body: dict | None = None, tim
     return _call(machine, method, "/nanoborealis/hall" + path, body if method == "POST" else None, timeout=timeout)
 
 
+def providers(machine: Machine) -> dict[str, Any]:
+    """The inference router's providers: {"running", "day", "providers": {name: {label, has_key, used, daily, ...}}}."""
+    return _call(machine, "GET", "/nanoborealis/providers")
+
+
+def provider_key(machine: Machine, provider: str, key: str) -> dict[str, Any]:
+    return _call(machine, "POST", "/nanoborealis/providers/key", {"provider": provider, "key": key})
+
+
+def provider_set(machine: Machine, provider: str, field: str, value: Any) -> dict[str, Any]:
+    return _call(machine, "POST", "/nanoborealis/providers/set", {"provider": provider, "field": field, "value": value})
+
+
 def pool_lend(machine: Machine, lending: bool, ports: list[int] | None = None) -> None:
     """Tell the computer this device lends itself to the pool (its nodes' API ports: one for the GPU,
     one for the processor), or stopped: a computer that coordinates the pool without a node of its

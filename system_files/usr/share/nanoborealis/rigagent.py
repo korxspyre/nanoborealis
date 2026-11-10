@@ -31,7 +31,28 @@ FALLBACKS = ["nvidia/nemotron-3-ultra-550b-a55b:free", "nvidia/nemotron-3.5-supe
              "nvidia/nemotron-3.5-lightning:free"]
 
 
+ROUTER = "http://host.containers.internal:11438/v1"
+ROUTER_TOKEN = Path("/var/lib/nanoborealis/router/token")
+
+
 def config(seat: dict) -> dict:
+    """The seat's nanobot config. With the router set up (a provider key stored in the app), its model is asked
+    through the router, which spreads the crew over every free provider and moves on when one is used up. Without
+    it, OpenRouter's free models directly, as before."""
+    if seat.get("router"):
+        preset = {"provider": "router", "model": seat["model"], "maxTokens": 8192, "contextWindowTokens": 131072,
+                  "temperature": 0.3}
+        return {
+            "providers": {"router": {"apiBase": ROUTER, "apiKey": "${NANOBOREALIS_ROUTER_TOKEN}"}},
+            "modelPresets": {"seat": preset},
+            "agents": {"defaults": {"modelPreset": "seat", "model": seat["model"], "provider": "router", "fallbackModels": []}},
+            "tools": {"exec": {"timeout": 600}},
+            "api": {"host": "0.0.0.0", "port": SEAT_API_PORT, "timeout": 1800.0, "apiKey": "${NANOBOREALIS_SEAT_API_KEY}"},
+        }
+    return direct_config(seat)
+
+
+def direct_config(seat: dict) -> dict:
     presets = {"seat": {"provider": "openrouter", "model": seat["model"], "maxTokens": 8192,
                         "contextWindowTokens": 131072, "temperature": 0.3}}
     fallbacks = []
@@ -113,6 +134,7 @@ Environment=NANOBOREALIS_HALL_URL={HALL}
 Secret=seat-{seat['id']}-hall,type=env,target=NANOBOREALIS_HALL_TOKEN
 Secret=seat-{seat['id']}-api,type=env,target=NANOBOREALIS_SEAT_API_KEY
 Secret=openrouter_api_key,type=env,target=OPENROUTER_API_KEY
+{"Secret=router_token,type=env,target=NANOBOREALIS_ROUTER_TOKEN" if seat.get("router") else "# no router yet: OpenRouter directly"}
 
 [Service]
 Restart=on-failure
@@ -171,7 +193,11 @@ def deploy(data: dict) -> list[str]:
         (qdir / f"seat-{seat_id}.container").unlink(missing_ok=True)
         done.append(f"{seat_id}: stopped (its home stays)")
     rig = data.get("rig") or {}
+    router = ROUTER_TOKEN.read_text().strip() if ROUTER_TOKEN.exists() else ""
+    if router:
+        as_agent("podman", "secret", "create", "--replace", "router_token", "-", stdin=router)
     for seat in data.get("agents") or []:
+        seat["router"] = bool(router)
         as_agent("podman", "secret", "create", "--replace", f"seat-{seat['id']}-hall", "-", stdin=seat["token"])
         as_agent("podman", "secret", "create", "--replace", f"seat-{seat['id']}-api", "-", stdin=seat["api_key"])
         folder = rigs_dir / seat["id"]
