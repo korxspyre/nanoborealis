@@ -496,16 +496,16 @@ class Workspace:
             if key == "list":
                 colony.showing = None
                 await colony.load()
-                title = "Colony"
-                body = ft.Container(ft.Column([
-                    ft.Text(title, size=20, weight=ft.FontWeight.W_600),
-                    t.muted(colony.problem or ("Start a chat and the whole crew reads it and answers in "
-                                                "turn. Or give them a task: one takes it on, another reviews it, and "
-                                                "it shows under Tasks on the left until it's done.")),
-                    *([t.outline_button("Start a colony", icon=ft.Icons.GROUPS_OUTLINED,
-                                        on_click=lambda _e: self.page.run_task(self.show_section, "colony"))]
-                      if colony.problem else []),
-                ], spacing=8), padding=32)
+                if colony.problem:
+                    title = "Colony"
+                    body = ft.Container(ft.Column([
+                        ft.Text(title, size=20, weight=ft.FontWeight.W_600), t.muted(colony.problem),
+                        t.outline_button("Start a colony", icon=ft.Icons.GROUPS_OUTLINED,
+                                         on_click=lambda _e: self.page.run_task(self.show_section, "colony")),
+                    ], spacing=8), padding=32)
+                else:  # straight to talking: the message box, as in Agent mode
+                    title, body = await colony.view("new")
+                    title = "Colony"
             else:
                 title, body = await colony.view(key)
                 await colony.load()

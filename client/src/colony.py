@@ -97,7 +97,7 @@ class ColonyView:
                  for r in self.rooms if r["kind"] == "hall"]
         board = [self.side_row(x["title"], f"task:{x['id']}", ft.Icons.TASK_ALT_ROUNDED,
                                t.badge(x["state"].upper(), STATE_COLORS.get(x["state"], t.MUTED))) for x in self.tasks]
-        seats = [self.side_row(s["name"], (lambda room: f"room:{room['id']}" if room else f"seat:{s['id']}")(
+        seats = [self.side_row(s["name"].split("@")[0].capitalize(), (lambda room: f"room:{room['id']}" if room else f"seat:{s['id']}")(
                      next((r for r in self.rooms if r["kind"] == "direct" and r.get("seat") == s["id"]), None)),
                      ft.Icons.SMART_TOY_OUTLINED, t.muted(f"trust {s['trust']:g}", size=11))
                  for s in self.seats if not s.get("chair")]
@@ -115,7 +115,7 @@ class ColonyView:
         for seat in seats:
             room = next((r for r in self.rooms if r["kind"] == "direct" and r.get("seat") == seat["id"]), None)
             key = f"room:{room['id']}" if room else f"seat:{seat['id']}"
-            rows.append(self.side_row(seat["name"], key, ft.Icons.SMART_TOY_OUTLINED,
+            rows.append(self.side_row(seat["name"].split("@")[0].capitalize(), key, ft.Icons.SMART_TOY_OUTLINED,
                                       t.muted(f"trust {seat['trust']:g}", size=11)))
         return rows
 
