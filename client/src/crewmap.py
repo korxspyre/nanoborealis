@@ -105,6 +105,8 @@ class CrewMap:
             data = await self.colony.call("GET", f"/activity?since={time.time() - 3600:.0f}")
         except PairingError:
             self.summary.value = "Waiting for the colony's computer (this needs its latest update)."
+            self.canvas.shapes = [self.line(e["src"], e["dst"], t.LINE_HI, 1, 0.55) for e in self.ties
+                                  if e["src"] in self.where and e["dst"] in self.where]
             return
         now = data["now"]
         busy = {b["seat"]: b for b in data["busy"]}
