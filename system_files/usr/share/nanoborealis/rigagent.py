@@ -148,7 +148,8 @@ def deploy(data: dict) -> list[str]:
                               input=stdin, text=True, capture_output=True, cwd="/", timeout=300)
 
     def agentctl(*args: str) -> subprocess.CompletedProcess:
-        return subprocess.run(["systemctl", "--user", "-M", f"{AGENT_USER}@", *args], text=True, capture_output=True, timeout=600)
+        # Over the agent's own user bus: `-M nanobot-agent@` is refused from the app's service ("Connection reset").
+        return as_agent("systemctl", "--user", *args)
 
     def own(path: Path) -> None:
         os.chown(path, uid, user.pw_gid)
