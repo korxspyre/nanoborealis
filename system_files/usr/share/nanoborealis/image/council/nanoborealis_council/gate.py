@@ -217,6 +217,29 @@ def change_detail(tool: str, kw: dict, program: str) -> dict:
     return {"kind": "edit", "edits": edits[:20]}
 
 
+def tell_hall(note: str) -> None:
+    """In a colony seat: tell the Hall which tool is in use, for the app's live map of the crew. Never in the way."""
+    url, token = os.environ.get("NANOBOREALIS_HALL_URL", "").rstrip("/"), os.environ.get("NANOBOREALIS_HALL_TOKEN", "")
+    if not (url and token and os.environ.get("NANOBOREALIS_SEAT")):
+        return
+    try:
+        request = urllib.request.Request(url + "/activity", method="POST", data=json.dumps({"note": note[:200]}).encode(),
+                                         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+        urllib.request.urlopen(request, timeout=5).close()
+    except Exception:
+        pass
+
+
+def announce(cls: type, label) -> None:
+    """A tool that needs no permission (web search, fetch, reading): only say it is in use."""
+    original = cls.execute
+
+    async def execute(self, *args: Any, **kwargs: Any) -> Any:
+        asyncio.get_running_loop().run_in_executor(None, tell_hall, label(kwargs))
+        return await original(self, *args, **kwargs)
+    cls.execute = execute
+
+
 def wrap(cls: type, kind: str, describe, tool_name: str = "") -> None:
     original = cls.execute
     tool_name = tool_name or kind
@@ -224,6 +247,8 @@ def wrap(cls: type, kind: str, describe, tool_name: str = "") -> None:
     async def execute(self, *args: Any, **kwargs: Any) -> Any:
         what = describe(kwargs)
         chat = chat_now()
+        asyncio.get_running_loop().run_in_executor(
+            None, tell_hall, ("running: " if kind == "exec" else "") + what.splitlines()[0][:160])
         blocked = await run_hooks("PreToolUse", tool_name, {"tool_name": tool_name, "tool_input": kwargs, "chat_id": chat})
         if blocked:
             return f"Error: blocked by a hook: {blocked}"
@@ -275,4 +300,10 @@ def install() -> None:
                                           f"+ {str(kw.get('new_text') or '')[:800]}", "edit_file")
     wrap(ApplyPatchTool, "edit", lambda kw: "apply a patch:\n" + json.dumps(kw.get("edits") or [], default=str)[:2000],
          "apply_patch")
+    try:  # the tools that change nothing: only shown on the map
+        from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
+        announce(WebSearchTool, lambda kw: f"searching the web: {str(kw.get('query') or '')[:140]}")
+        announce(WebFetchTool, lambda kw: f"reading {str(kw.get('url') or '')[:160]}")
+    except Exception:
+        pass
     _installed = True

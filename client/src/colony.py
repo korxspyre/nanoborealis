@@ -101,7 +101,7 @@ class ColonyView:
                      next((r for r in self.rooms if r["kind"] == "direct" and r.get("seat") == s["id"]), None)),
                      ft.Icons.SMART_TOY_OUTLINED, t.muted(f"trust {s['trust']:g}", size=11))
                  for s in self.seats if not s.get("chair")]
-        return [heading("Chats"), *(rooms or [empty("None yet. New chat: the whole crew reads it.")]),
+        return [self.side_row("Live map", "map", ft.Icons.HUB_OUTLINED), heading("Chats"), *(rooms or [empty("None yet. New chat: the whole crew reads it.")]),
                 heading("Tasks"), *(board or [empty("Nothing yet. Give them work above.")]),
                 *([heading("Crew"), *seats] if seats else [])]
 
@@ -205,6 +205,18 @@ class ColonyView:
         if kind == "new":
             self.showing = None
             return self.new_view()
+        if kind == "map":  # who is doing what right now, and what passes between them (crewmap.py)
+            import crewmap
+            self.showing = key
+            self.follower = follower = object()
+            crew = crewmap.CrewMap(self)
+            try:
+                body = await crew.build()
+            except PairingError as e:
+                return "Live map", self.frame([t.card(t.muted(str(e)))])
+            self.page.run_task(crew.follow, lambda: self.follower is follower and self.showing == "map"
+                               and self.workspace.section == "colony:map")
+            return "Live map", self.frame([body])
         try:
             if kind == "seat":
                 room_id = await self.seat_room(ident)

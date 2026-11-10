@@ -642,6 +642,36 @@ class Hall:
         self.db.execute("INSERT OR REPLACE INTO presence (seat, at, status, note) VALUES (?, ?, ?, ?)", (seat, time.time(), status, note))
         return self.head()
 
+    def activity(self, since: float = 0.0) -> dict:
+        """What the crew is doing right now, and what passed between them since `since`: the app's live map.
+        An event is {at, kind, src, dst, text, task}: dst is who it went to (None: everyone)."""
+        now = time.time()
+        busy = []
+        for seat, b in list(BUSY.items()):
+            words, task = doing(b["session"])
+            step = STEPS.get(seat) or {}
+            busy.append({"seat": seat, "doing": words, "task": task, "since": b["since"],
+                         "step": step.get("note") if now - step.get("at", 0) < 180 else None})
+        since = max(since, now - 3600)
+        events = []
+        for n in self.db.execute("SELECT task_notes.*, tasks.claimed_by, tasks.title FROM task_notes JOIN tasks ON tasks.id = "
+                                 "task_notes.task WHERE task_notes.at > ? ORDER BY task_notes.at DESC LIMIT 60", (since,)):
+            other = n["claimed_by"] if n["claimed_by"] != n["author"] else None
+            events.append({"at": n["at"], "kind": n["kind"], "src": n["author"], "dst": other, "task": n["task"],
+                           "text": (n["text"] or n["title"])[:300]})
+        for m in self.db.execute("SELECT * FROM inbox WHERE created > ? ORDER BY created DESC LIMIT 60", (since,)):
+            events.append({"at": m["created"], "kind": "message", "src": m["sender"], "dst": m["recipient"], "task": None,
+                           "text": m["text"][:300]})
+        for m in self.db.execute("SELECT * FROM messages WHERE at > ? AND kind = 'say' ORDER BY at DESC LIMIT 60", (since,)):
+            events.append({"at": m["at"], "kind": "say", "src": m["author"], "dst": None, "task": None, "text": m["text"][:300]})
+        events.sort(key=lambda e: e["at"])
+        return {"now": now, "busy": busy, "events": events[-80:]}
+
+    def step(self, seat: str, data: dict) -> dict:
+        """A seat's own agent says which tool it is using right now (its gate sends this)."""
+        STEPS[seat] = {"note": text(data.get("note"), "note", 200, required=False) or "", "at": time.time()}
+        return {"ok": True}
+
     def head(self) -> dict:
         """Who leads now: the first seat in line that is here, else the strongest the Hall can ask, else the chair."""
         self.need_rigs()
@@ -971,6 +1001,20 @@ def cloud_choice(answer: str, options: list[str]) -> tuple[str, str] | None:
     return choice, reason.group(1).strip()[:2000] if reason else ""
 
 
+# Who is at work right now, for the app's live map of the crew. In memory: it is about this moment.
+BUSY: dict[str, dict] = {}   # seat -> {"session": "task-5", "since": when the Hall asked it}
+STEPS: dict[str, dict] = {}  # seat -> {"note": the tool it is using, "at": when}: sent by the seat's own agent
+
+
+def doing(session: str) -> tuple[str, int | None]:
+    """A session's name ("task-5", "hall-3", "mail-x", "vote-2", "direct-4") in words, and its task if it is one."""
+    kind, _, rest = session.partition("-")
+    number = int(rest) if rest.isdigit() else None
+    words = {"task": f"working on task {rest}", "hall": "answering in a chat", "direct": "talking with you",
+             "mail": "reading messages", "vote": "voting"}.get(kind, "thinking")
+    return words, number if kind == "task" else None
+
+
 class Orchestrator:
     def __init__(self, hall: Hall):
         import queue
@@ -1087,6 +1131,14 @@ class Orchestrator:
         # Models guess the date from their training and call true things "in the future": tell them.
         prompt = f"Today is {time.strftime('%A, %B %d, %Y')}. Trust this date over your own sense of it.\n\n{prompt}"
         brief = self.briefing(seat)
+        BUSY[seat["id"]] = {"session": session, "since": time.time()}
+        try:
+            return self.ask_now(seat, session, prompt, brief)
+        finally:
+            BUSY.pop(seat["id"], None)
+            STEPS.pop(seat["id"], None)
+
+    def ask_now(self, seat: dict, session: str, prompt: str, brief: str) -> str:
         if seat.get("kind") == "cloud":
             return self.ask_cloud(seat, session, prompt, brief)
         if brief:
@@ -1434,6 +1486,16 @@ def route(hall: Hall, who: str, method: str, parts: list[str], query: dict, data
             if admin:
                 raise Refused(403, "Only seats send a heartbeat.")
             return hall.beat(who, data)
+        case "GET", ["activity"]:
+            try:
+                since = float(query.get("since") or 0)
+            except ValueError:
+                since = 0.0
+            return hall.activity(since)
+        case "POST", ["activity"]:
+            if admin:
+                raise Refused(403, "Only seats say what they are doing.")
+            return hall.step(who, data)
         case "GET", ["head"]:
             return hall.head()
         case "POST", ["benchmarks"]:
