@@ -63,7 +63,9 @@ async def build(center: "ControlCenter") -> ft.Control:
         page.show_dialog(ft.AlertDialog(
             title=ft.Text(f"{label} key"),
             content=ft.Column([box, t.muted(f"Get one at {where}. It is kept on your NanoBorealis computer, readable only "
-                                            "by the router. Leave it empty to remove the key.", size=12)],
+                                            "by the router." + (" Your agent uses the same key, and restarts with it."
+                                                                if name == "openrouter" else " Leave it empty to remove the key."),
+                                    size=12)],
                               tight=True, spacing=10, width=460),
             actions=[t.quiet_button("Cancel", on_click=lambda _e: page.pop_dialog()), t.primary_button("Save", on_click=save)]))
 
@@ -124,6 +126,8 @@ async def build(center: "ControlCenter") -> ft.Control:
         else:
             body = [t.muted(f"Free key from {p['where']}.", size=12.5)]
         cards.append(t.card(ft.Column([head, *body], spacing=8)))
+    if data.get("moved"):
+        center.toast(f"The router took your agent's OpenRouter key. Your crew ({', '.join(data['moved'])}) now uses it.")
     summary = (f"{total_left:,} requests left today across {with_keys} provider{'s' if with_keys != 1 else ''}. "
                "Resets at midnight UTC." if with_keys else
                "Add a key to start. Each provider you add is more free requests a day for your crew.")

@@ -1388,21 +1388,6 @@ class ControlCenter:
     async def settings_page(self) -> ft.Control:
         settings = await self.load_settings()
         guard = agent_settings.free_only(settings)
-        key = t.field("New OpenRouter key", password=True, hint="sk-or-v1-...")
-
-        async def save_key(_event=None) -> None:
-            value = (key.value or "").strip()
-            if not value:
-                return
-            try:
-                await asyncio.to_thread(admin.set_key, self.app.machine, value)
-            except PairingError as e:
-                self.toast(str(e))
-                return
-            key.value = ""
-            self.toast("Saved. The agent restarted with the new key.")
-            self.page.update()
-
         async def toggle_guard(event) -> None:
             try:
                 await agent_settings.set_free_only(self.app.link, bool(event.control.value), self.settings)
@@ -1417,12 +1402,6 @@ class ControlCenter:
                                            "is chosen. Turn off only if you want to pay for a model.")],
                                   spacing=4, expand=True),
                         ft.Switch(value=guard, active_color=t.ACCENT, on_change=toggle_guard)]),
-            ], spacing=8)),
-            t.card(ft.Column([
-                ft.Text("OpenRouter key", size=15, weight=ft.FontWeight.W_600),
-                t.muted("The agent's key for OpenRouter. It never leaves this computer's agent; the app only "
-                        "sends a new one there. Use a key with a low credit limit: the agent can read it."),
-                ft.Row([ft.Container(key, expand=True), t.primary_button("Save", on_click=save_key)]),
             ], spacing=8)),
             t.card(ft.Column([
                 ft.Text("This app", size=15, weight=ft.FontWeight.W_600),
