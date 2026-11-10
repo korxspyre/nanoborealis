@@ -1703,8 +1703,8 @@ class HandsJob:
     timeout: int
     by: str
     task: dict = field(default_factory=dict)  # the request this job serves and its folders: the device holds it to them
-    open: str = ""  # a file, folder, web page or program to open on the device's screen, instead of a command
     cwd: str = ""
+    open: str = ""  # a file, folder, web page or program to open on the device's screen, instead of a command
     created: float = field(default_factory=time.time)
     result: dict | None = None
     done: asyncio.Event = field(default_factory=asyncio.Event)

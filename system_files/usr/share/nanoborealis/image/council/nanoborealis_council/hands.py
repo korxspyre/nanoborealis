@@ -83,6 +83,16 @@ class HandsDevices(Tool):
         return "\n".join(lines)
 
 
+def folder_list(value: Any) -> list[str]:
+    """The folders as a list, whether the model sent a list, a JSON string of one, or one path."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            value = [value] if value.strip() else []
+    return [str(v) for v in value] if isinstance(value, list) else []
+
+
 class HandsOpen(Tool):
     name = "hands_open"
     description = ("Open something on the screen of one of the owner's devices that lends its hands, the way they would "
@@ -95,8 +105,8 @@ class HandsOpen(Tool):
             "device": {"type": "string", "description": "The device's name, as hands_devices lists it."},
             "target": {"type": "string", "description": "A path on that device, a URL, or a program."},
             "request": {"type": "string", "description": "The owner's request this serves, in their words."},
-            "folders": {"type": "array", "items": {"type": "string"},
-                        "description": "Folders on that device the request is about (absolute paths)."},
+            # No type: models often send the list as a JSON string, which a strict "array" refused outright.
+            "folders": {"description": "Folders on that device the request is about (absolute paths): a list."},
         },
         "required": ["device", "target", "request"],
         "additionalProperties": False,
@@ -108,7 +118,7 @@ class HandsOpen(Tool):
         return TOKEN_FILE.exists()
 
     async def execute(self, device: str, target: str, request: str, folders: list[str] | None = None, **kwargs: Any) -> Any:
-        body = {"device": device, "open": target, "timeout": 60, "task": {"request": request, "folders": folders or []}}
+        body = {"device": device, "open": target, "timeout": 60, "task": {"request": request, "folders": folder_list(folders)}}
         try:
             answer = await asyncio.to_thread(call, "POST", "/nanoborealis/agent-hands/run", body, 760)
         except HandsError as error:
@@ -131,8 +141,8 @@ class HandsRun(Tool):
             "device": {"type": "string", "description": "The device's name, as hands_devices lists it."},
             "command": {"type": "string", "description": "The command, in that device's shell."},
             "request": {"type": "string", "description": "The owner's request this serves, in their words."},
-            "folders": {"type": "array", "items": {"type": "string"},
-                        "description": "Folders on that device the request is about (absolute paths)."},
+            # No type: models often send the list as a JSON string, which a strict "array" refused outright.
+            "folders": {"description": "Folders on that device the request is about (absolute paths): a list."},
             "cwd": {"type": "string", "description": "Where to run it; defaults to the first folder."},
             "timeout": {"type": "integer", "description": "Seconds, at most 3600 (default 300)."},
         },
@@ -149,7 +159,7 @@ class HandsRun(Tool):
                       timeout: int = 300, **kwargs: Any) -> Any:
         timeout = max(10, min(int(timeout or 300), 3600))
         body = {"device": device, "command": command, "timeout": timeout, "cwd": cwd,
-                "task": {"request": request, "folders": folders}}
+                "task": {"request": request, "folders": folder_list(folders)}}
         try:
             # The owner may take up to 10 minutes to answer a question about it, on top of the job's own time.
             answer = await asyncio.to_thread(call, "POST", "/nanoborealis/agent-hands/run", body, timeout + 700)
