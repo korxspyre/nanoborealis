@@ -65,6 +65,13 @@ except ImportError:  # without it nothing may leave untokenized while tokenizing
 STATE = Path(os.environ.get("NANOBOREALIS_ROUTER_STATE", "/var/lib/nanoborealis/router"))
 LISTEN = os.environ.get("NANOBOREALIS_ROUTER_LISTEN", "0.0.0.0:11438")
 ASK_AGAIN = 3  # a broken answer is asked for again this many times in all, on the same provider, before the next one
+ASK_FOR = 40  # seconds of broken answers before the agent is told, so it moves on to its fallback models
+BROKEN_FOR = 600  # then that model on that provider is left alone this long (seconds), and tried again after
+broken_until: dict[tuple[str, str], float] = {}
+
+
+def broken(name: str, model: str) -> bool:
+    return broken_until.get((name, model), 0.0) > time.time()
 TIMEOUT = float(os.environ.get("NANOBOREALIS_ROUTER_TIMEOUT", "600"))
 FREE_ONLY = {"provider": {"max_price": {"prompt": 0, "completion": 0, "request": 0, "image": 0}}}
 
@@ -204,8 +211,14 @@ def tier(model: str) -> str:
 
 
 def model_for(provider: dict, asked: str) -> str | None:
+    """The model this provider is asked for: the one named when it serves it (OpenRouter: the free ones), else its
+    own smart or fast one. Only the model lists already fetched are looked at: this runs under the lock."""
     if provider["name"] == "openrouter" and asked.endswith(":free"):
         return asked
+    plain = asked.removesuffix(":free")
+    cached = MODEL_CACHE.get(provider["name"])
+    if cached and any(m.get("model") == plain or m.get("id", "").split(":", 1)[-1] == plain for m in cached[1]):
+        return plain
     return provider.get(tier(asked)) or provider.get("smart") or None
 
 
@@ -249,7 +262,7 @@ def candidates(asked: str, size: int) -> list[tuple[dict, str]]:
     with lock:
         for name, p in providers().items():
             model = model_for(p, asked)
-            if not p.get("enabled") or not p.get("key") or not model:
+            if not p.get("enabled") or not p.get("key") or not model or broken(name, model):
                 continue
             if usage.rest_left(name)[0] > 0 or (p.get("max_request") and size > int(p["max_request"])):
                 continue
@@ -337,31 +350,49 @@ class Handler(BaseHTTPRequestHandler):
         if chosen and (why := pinned_refusal(chosen, size)):
             return self.reply(429, {"error": {"message": f"{asked} can't answer: {why}.", "type": "rate_limit_error"}})
         exact = chosen is not None
+        if chosen and broken(chosen, pinned(asked)[1]):
+            return self.broken_reply(asked)
         tried: list[str] = []
-        broken = 0  # answers that weren't one (Judge)
+        bad, started = 0, time.time()  # answers that weren't one (Judge), and since when
         for _attempt in range(1 if exact else 6):
             options = [(p, m) for p, m in candidates(asked, size) if p["name"] not in tried][:1 if exact else None]
             if not options:
                 break
             provider, model = options[0]
             tried.append(provider["name"])
-            for _again in range(ASK_AGAIN):
+            done, tries = None, 0
+            # In all, across providers, and within ASK_FOR seconds: the agent gives up on a request after about 90
+            # and sends it again, which would only start this over (a broken answer can take 30 seconds to come).
+            while bad < ASK_AGAIN and time.time() - started < ASK_FOR:
                 done = self.forward(provider, model, body, size)
                 if done is not None:
                     break
-                broken += 1
+                bad += 1
+                tries += 1
+            if done is None and tries:
+                broken_until[(provider["name"], model)] = time.time() + BROKEN_FOR
+                print(f"nanoborealis-router: {provider['name']} {model} looks broken; left alone for {BROKEN_FOR // 60} min",
+                      file=sys.stderr, flush=True)
             if done:
                 return
-        if broken:  # an error, not an empty answer: the agent moves on to its fallback models
-            return self.reply(502, {"error": {"message": f"{asked} kept answering with nothing or text that doesn't read "
-                                              f"({broken} tries); its free endpoint looks broken for now.", "type": "api_error"}})
+        skipped = any(broken(n, m) for n, p in providers().items() for m in [model_for(p, pinned(asked)[1])] if m)
+        if bad or skipped:
+            return self.broken_reply(asked)
         left = {n: s for n, s in status()["providers"].items() if s["has_key"]}
         why = "; ".join(f"{s['label']}: " + (s["resting_why"] or ("today's limit is used up" if s["daily"] and s["used"] >= s["daily"]
                                                                    else "couldn't take this request")) for s in left.values())
         self.reply(429, {"error": {"message": "Every free provider is out for now. " + (why or "No provider has a key yet: "
                                                "add one in Mission control, Providers."), "type": "rate_limit_error"}})
 
-    def forward(self, provider: dict, model: str, body: dict, size: int) -> bool:
+    def broken_reply(self, asked: str) -> None:
+        """The model answers with nothing usable. A 424 "empty_response": nanobot doesn't retry it (that would only ask
+        the broken model again; its retry words are rate limit, 5xx, server error, overloaded, timeout, connection,
+        none of them here) but "empty" sends it straight to the agent's fallback models."""
+        self.reply(424, {"error": {"message": f"{asked} answers with nothing usable just now (empty), so it is being left "
+                                              f"alone for a few minutes. Use another model meanwhile.",
+                                   "type": "empty_response", "code": "model_broken"}})
+
+    def forward(self, provider: dict, model: str, body: dict, size: int) -> bool | None:
         """Send it to one provider. True when the answer (good or not worth retrying elsewhere) went to the client."""
         name = provider["name"]
         # OpenRouter's own fields (provider routing, fallbacks) are refused by the others with a 400: only it gets them.
@@ -535,7 +566,10 @@ class Judge:
             return True
         if self.text.strip():
             return readable(self.text)
-        return False  # no answer at all: empty, or only a few characters of "thinking"
+        # Only "thinking": some models (Lightning) put a whole short answer there. It passes when it reads; a broken
+        # model's thinking is a few characters, or a jumble of scripts.
+        thought = self.thought.strip()
+        return len(thought) >= 20 and readable(thought)
 
     def why(self) -> str:
         if not self.text.strip():
@@ -663,6 +697,16 @@ def main(argv: list[str]) -> int:
     server = ThreadingHTTPServer((host or "0.0.0.0", int(port)), Handler)
     server.daemon_threads = True
     print(f"nanoborealis-router: listening on {LISTEN}", file=sys.stderr, flush=True)
+
+    def keep_model_lists() -> None:  # model_for asks for a model by name only where a fetched list shows it served
+        while True:
+            for name in BUILT_IN:
+                try:
+                    provider_models(name)
+                except Exception:
+                    pass
+            time.sleep(3000)
+    threading.Thread(target=keep_model_lists, daemon=True).start()
     server.serve_forever()
     return 0
 
