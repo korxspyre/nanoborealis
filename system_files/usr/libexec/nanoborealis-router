@@ -216,11 +216,16 @@ def model_for(provider: dict, asked: str) -> str | None:
     own smart or fast one. Only the model lists already fetched are looked at: this runs under the lock."""
     if provider["name"] == "openrouter" and asked.endswith(":free"):
         return asked
-    plain = asked.removesuffix(":free")
-    cached = MODEL_CACHE.get(provider["name"])
-    if cached and any(m.get("model") == plain or m.get("id", "").split(":", 1)[-1] == plain for m in cached[1]):
-        return plain
+    if serves(provider["name"], asked):
+        return asked.removesuffix(":free")
     return provider.get(tier(asked)) or provider.get("smart") or None
+
+
+def serves(name: str, asked: str) -> bool:
+    """Whether this provider's fetched model list has the model asked for (OpenRouter: its free one)."""
+    plain = asked.removesuffix(":free")
+    want = {asked, plain + ":free"} if name == "openrouter" else {plain}
+    return any(m.get("model") in want for m in MODEL_CACHE.get(name, (0, []))[1])
 
 
 def pinned(asked: str) -> tuple[str | None, str]:
@@ -261,7 +266,11 @@ def candidates(asked: str, size: int) -> list[tuple[dict, str]]:
         return [(providers()[chosen], model_asked)] if not pinned_refusal(chosen, size) else []
     found = []
     with lock:
+        # A model some provider serves goes only to those that serve it: another would answer with a different model
+        serving = {n for n, p in providers().items() if p.get("key") and serves(n, asked)}
         for name, p in providers().items():
+            if serving and name not in serving:
+                continue
             model = model_for(p, asked)
             if not p.get("enabled") or not p.get("key") or not model or broken(name, model):
                 continue
@@ -404,6 +413,9 @@ class Handler(BaseHTTPRequestHandler):
         # OpenRouter's own fields (provider routing, fallbacks) are refused by the others with a 400: only it gets them.
         own = {} if name == "openrouter" else {"provider", "models", "route", "transforms", "plugins", "usage"}
         out = {**{k: v for k, v in body.items() if k not in own}, **(provider.get("extra") or {}), "model": model}
+        if name == "groq":  # it refuses the thinking that earlier answers leave in the history (a 400)
+            out["messages"] = [{k: v for k, v in m.items() if k not in ("reasoning_content", "reasoning", "reasoning_details")}
+                               if isinstance(m, dict) else m for m in out.get("messages") or []]
         protect = tokenizing()
         if protect:
             try:
@@ -711,7 +723,9 @@ def main(argv: list[str]) -> int:
                     provider_models(name)
                 except Exception:
                     pass
-            time.sleep(3000)
+            # At boot the network may not be up yet: a minute until every provider with a key has its list
+            missing = [n for n, p in providers().items() if p.get("key") and not MODEL_CACHE.get(n, (0, []))[1]]
+            time.sleep(60 if missing else 3000)
     threading.Thread(target=keep_model_lists, daemon=True).start()
     server.serve_forever()
     return 0
