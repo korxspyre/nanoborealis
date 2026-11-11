@@ -16,12 +16,6 @@ fi
 # Skills added in later NanoBorealis releases reach existing agents; ones the agent edited are left alone.
 mkdir -p "$state/workspace/skills"
 cp -Rn /opt/nanobot-seed/workspace/skills/. "$state/workspace/skills/" 2>/dev/null || true
-# The starter subagents (the `subagent` tool's definitions), once; ones the owner edited stay as they are.
-mkdir -p "$state/workspace/.nanoborealis/agents"
-if [ ! -e "$state/workspace/.nanoborealis/.agents-seeded" ]; then
-    cp -Rn /opt/nanobot-seed/workspace/.nanoborealis/agents/. "$state/workspace/.nanoborealis/agents/" 2>/dev/null || true
-    touch "$state/workspace/.nanoborealis/.agents-seeded"  # once: a subagent you deleted stays deleted
-fi
 
 # Free OpenRouter models whose free tier ended: an agent seeded with them would fall back to a model that only
 # answers 404. Each is swapped for a free model of the same use, in the config the agent already has.
@@ -40,6 +34,29 @@ if new != text:
     json.loads(new)  # only a config that still parses is written back
     open(path, "w", encoding="utf-8").write(new)
     print("nanoborealis: swapped free models that are no longer free in config.json")
+EOF
+fi
+
+# With the router set up (the app's Providers page), the agent asks it instead of OpenRouter: the router spreads
+# requests over every free provider and paces them. Without it, OpenRouter directly, as before. A provider
+# pointed somewhere else (the privacy relay) is left alone.
+if [ -f "$state/config.json" ]; then
+    python3 - "$state/config.json" <<'EOF' || true
+import json, os, sys
+path = sys.argv[1]
+config = json.load(open(path, encoding="utf-8"))
+p = config.get("providers", {}).get("openrouter")
+url, token = os.environ.get("NANOBOREALIS_ROUTER_URL", ""), os.environ.get("NANOBOREALIS_ROUTER_TOKEN", "")
+if isinstance(p, dict):
+    routed = p.get("apiBase") == url and bool(url)
+    if url and token and not p.get("apiBase"):
+        p["apiBase"], p["apiKey"], p["_router"] = url, "${NANOBOREALIS_ROUTER_TOKEN}", True
+    elif p.get("_router") and not (url and token):
+        p.pop("apiBase", None); p.pop("_router", None); p["apiKey"] = "${OPENROUTER_API_KEY}"
+    else:
+        sys.exit(0)
+    open(path, "w", encoding="utf-8").write(json.dumps(config, indent=2) + "\n")
+    print("nanoborealis: the agent asks " + ("the router" if p.get("_router") else "OpenRouter directly"))
 EOF
 fi
 

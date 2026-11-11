@@ -23,7 +23,8 @@ rig_inbox = "nanoborealis_council.tools:RigInbox"
 hands_devices = "nanoborealis_council.hands:HandsDevices"
 hands_run = "nanoborealis_council.hands:HandsRun"
 hands_open = "nanoborealis_council.hands:HandsOpen"
-subagent = "nanoborealis_council.subagents:Subagent"
+crew_task = "nanoborealis_council.crew:CrewTask"
+crew_check = "nanoborealis_council.crew:CrewCheck"
 todo = "nanoborealis_council.todo:TodoWrite"
 
 [build-system]

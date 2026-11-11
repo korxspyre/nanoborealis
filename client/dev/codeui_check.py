@@ -52,10 +52,11 @@ space.composer_view()
 check(isinstance(space.plan_chip, ft.Container) and isinstance(space.status_bar_holder, ft.Container) and isinstance(space.crew_holder, ft.Container),
       "the composer has a Plan chip, a status bar and a crew strip")
 check(any(c == "/rewind" for c, _ in space.all_commands()) and any(c == "/plan" for c, _ in space.all_commands()), "the app's commands are in the / palette")
-space.toggle_plan()
-check(space.plan_mode and "Plan first" in space.plan_chip.content.content.controls[-1].value, "the Plan chip turns on")
-space.toggle_plan()
-check(not space.plan_mode, "...and off")
+import asyncio
+asyncio.run(space.set_agent_mode("plan"))
+check(space.plan_mode and space.agent_mode == "plan", "Plan is the chat's mode: the mode chip turns it on")
+asyncio.run(space.set_agent_mode(getattr(space, "mode_before_plan", "auto")))
+check(not space.plan_mode, "...and back to the mode before it")
 
 space.scope = {"project_path": "/home/nanobot/projects/demo", "access_mode": "restricted"}
 check(space.host_folder() == "/srv/nanoborealis/projects/demo", "a chat's project folder is found on the computer")

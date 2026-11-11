@@ -248,8 +248,10 @@ def describe(name: str, args: dict[str, Any]) -> tuple[str, str, str]:
         return "Fetch", _first(args, "url"), ft.Icons.LANGUAGE_ROUNDED
     if name == "spawn":
         return "Subagent", _first(args, "label", "task"), ft.Icons.CALL_SPLIT_ROUNDED
-    if name == "subagent":
-        return f"Subagent {_first(args, 'agent')}".strip(), _first(args, "task"), ft.Icons.CALL_SPLIT_ROUNDED
+    if name == "crew_task":
+        return "Gave the crew a task", _first(args, "title"), ft.Icons.GROUPS_OUTLINED
+    if name == "crew_check":
+        return "Checked on the crew", (f"task {args.get('task')}" if args.get("task") else "their open tasks"), ft.Icons.GROUPS_OUTLINED
     if name == "hands_run":
         return f"Run on {_first(args, 'device')}", _first(args, "command"), ft.Icons.FRONT_HAND_OUTLINED
     if name == "hands_open":

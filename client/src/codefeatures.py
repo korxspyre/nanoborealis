@@ -252,7 +252,6 @@ CLIENT_COMMANDS = [
     ("/btw", "A side question that doesn't go into this chat: /btw what does this error mean?"),
     ("/mcp", "Open the MCP servers"),
     ("/hooks", "Open the hooks"),
-    ("/subagents", "Open the subagents"),
     ("/skills", "Open the skills; /skill-name runs one"),
     ("/hands", "Let agents use this device, or undo an agent's job on it"),
 ]

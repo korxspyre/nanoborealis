@@ -546,7 +546,7 @@ class BackgroundPanel:
                               f"{a['device_name']} · {a['reason']}", t.WARN,
                               on_click=lambda _e, a=a: ws.app.hands.show_ask(a)) for a in asks]
         self.list.controls = [*self.section("THIS CHAT", tools, "Nothing running."),
-                              *self.section("SUBAGENTS", subagents, "None in the background."),
+                              *self.section("YOUR AGENT, ON THE SIDE", subagents, "Nothing running alongside the chat."),
                               *self.section("RIGS' BOARD", board, "Nothing on the board."),
                               *self.section("YOUR DEVICES", devices, "No agent jobs on your devices.")]
         self.page.update()

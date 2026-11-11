@@ -54,7 +54,6 @@ CONTROL_GROUPS = [
     ("Agent", [("models", "Models", ft.Icons.AUTO_AWESOME_OUTLINED),
                ("providers", "Providers", ft.Icons.ALT_ROUTE_ROUNDED),
                ("skills", "Skills", ft.Icons.EXTENSION_OUTLINED),
-               ("subagents", "Subagents", ft.Icons.CALL_SPLIT_ROUNDED),
                ("memory", "Memory", ft.Icons.PSYCHOLOGY_OUTLINED),
                ("permissions", "Permissions", ft.Icons.SHIELD_OUTLINED),
                ("hooks", "Hooks", ft.Icons.WEBHOOK_ROUNDED),
@@ -235,7 +234,7 @@ class Workspace:
                                     ("files", ft.Icons.FOLDER_OUTLINED, "Projects folder (Ctrl+E)"),
                                     ("changes", ft.Icons.DIFFERENCE_OUTLINED, "Changes"),
                                     ("background", ft.Icons.PENDING_ACTIONS_ROUNDED,
-                                     "Background: subagents, the crew's tasks, jobs on your devices"))
+                                     "Background: the crew's tasks, and jobs on your devices"))
         }
         header = ft.Container(
             height=50, padding=ft.Padding.only(left=10, right=12), bgcolor=t.BG,
@@ -1925,7 +1924,7 @@ class Workspace:
                            f"/permissions {' | '.join(modes)}.")
         elif name == "/btw":
             await self.side_question(rest)
-        elif name in ("/mcp", "/hooks", "/subagents", "/skills"):
+        elif name in ("/mcp", "/hooks", "/skills"):
             await self.show_section(name[1:])
         elif name == "/hands":
             await self.app.hands.open_dialog()

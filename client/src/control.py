@@ -142,7 +142,7 @@ class ControlCenter:
         builders: dict[str, Callable[[], Awaitable[ft.Control]]] = {
             "overview": self.overview, "models": self.models, "channels": self.channels,
             "schedules": self.schedules, "skills": self.skills, "memory": self.memory,
-            "mcp": self.mcp, "hooks": self.hooks, "subagents": self.subagents,
+            "mcp": self.mcp, "hooks": self.hooks, 
             "devices": self.devices, "pool": self.pool, "colony": self.colony, "permissions": self.permissions_page, "providers": self.providers_page, "logs": self.logs, "settings": self.settings_page,
         }
         try:
@@ -1138,71 +1138,6 @@ class ControlCenter:
                     "tool_response after. Hooks run inside the agent's container, as the agent.", size=12.5),
         ], spacing=6))
         return self.frame(title, subtitle, [guide, box, note], actions=[t.primary_button("Save", on_click=save)])
-
-    # -- Subagents ----------------------------------------------------------------------------------
-    # Named specialists the agent hands tasks to with its `subagent` tool (the image's subagents.py).
-
-    AGENTS_DIR = f"{admin.WORKSPACE}/.nanoborealis/agents"
-
-    def subagent_dialog(self, path: str | None, text: str) -> None:
-        box = ft.TextField(value=text, multiline=True, min_lines=12, max_lines=22, text_style=ft.TextStyle(font_family=t.MONO, size=12.5),
-                           border_radius=t.RADIUS, border_color=t.LINE_HI, focused_border_color=t.ACCENT)
-
-        async def save(_e=None) -> None:
-            body = box.value or ""
-            name = next((line.split(":", 1)[1].strip() for line in body.splitlines() if line.lower().startswith("name:")), "")
-            name = re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-")[:40]
-            if not name:
-                self.toast("Give it a name: a line 'name: ...' between the --- lines.")
-                return
-            target = path or f"{self.AGENTS_DIR}/{name}.md"
-            self.page.pop_dialog()
-            try:
-                await asyncio.to_thread(admin.write_file, self.app.machine, target, body.rstrip() + "\n")
-            except PairingError as e:
-                self.toast(str(e))
-                return
-            self.toast(f"Saved {name}. The agent can hand it tasks from its next message.")
-            await self.reload("subagents")
-        self.page.show_dialog(ft.AlertDialog(title=ft.Text("Subagent"), content=ft.Container(box, width=620),
-                                             actions=[t.quiet_button("Cancel", on_click=lambda _e: self.page.pop_dialog()),
-                                                      t.primary_button("Save", on_click=save)]))
-
-    async def subagents(self) -> ft.Control:
-        title, subtitle = "Subagents", ("Specialists your agent can hand a task to, each with its own instructions: it works "
-                                        "on the side and reports back, like Claude Code's subagents.")
-        try:
-            files = [f for f in await asyncio.to_thread(admin.list_files, self.app.machine, self.AGENTS_DIR)
-                     if f["path"].endswith(".md")]
-        except PairingError:
-            files = []
-        rows: list[ft.Control] = []
-        for f in files:
-            try:
-                text = await asyncio.to_thread(admin.read_file, self.app.machine, f["path"])
-            except PairingError:
-                continue
-            meta = dict(line.split(":", 1) for line in text.split("---")[1].splitlines() if ":" in line) if text.startswith("---") else {}
-            name = (meta.get("name") or f["path"].rsplit("/", 1)[-1][:-3]).strip()
-
-            async def delete(_e=None, p=f["path"]) -> None:
-                try:
-                    await asyncio.to_thread(admin.delete_file, self.app.machine, p)
-                except PairingError as e:
-                    self.toast(str(e))
-                await self.reload("subagents")
-            rows.append(t.card(ft.Row([
-                ft.Icon(ft.Icons.CALL_SPLIT_ROUNDED, size=18, color=t.VIOLET),
-                ft.Column([ft.Text(name, size=14, weight=ft.FontWeight.W_600),
-                           t.muted((meta.get("description") or "").strip(), size=12)], spacing=2, expand=True),
-                t.quiet_button("Edit", on_click=lambda _e, p=f["path"], body=text: self.subagent_dialog(p, body)),
-                t.quiet_button("Delete", on_click=delete),
-            ], spacing=10), padding=12))
-        if not rows:
-            rows.append(t.muted("None yet. The agent uses one when a task fits it: add one with New.", size=12.5))
-        template = "---\nname: \ndescription: What it's for, and when the agent should use it.\n---\nYour instructions for it.\n"
-        return self.frame(title, subtitle, rows, actions=[t.outline_button("New", icon=ft.Icons.ADD_ROUNDED,
-                                                                           on_click=lambda _e: self.subagent_dialog(None, template))])
 
     # -- Rigs --------------------------------------------------------------------------------------
 

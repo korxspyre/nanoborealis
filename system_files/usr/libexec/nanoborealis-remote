@@ -1203,6 +1203,39 @@ async def router_start() -> None:
     await router_run("token")
     for unit_args in (("enable", "--now", "nanoborealis-router.service"), ("restart", "nanoborealis-firewall.service")):
         await asyncio.to_thread(subprocess.run, as_root("systemctl", *unit_args), capture_output=True, timeout=60)
+    await agent_to_router()
+
+
+ROUTER_DROPIN = ".config/containers/systemd/nanobot.container.d/router.conf"
+
+
+async def agent_to_router() -> bool:
+    """The owner's agent asks the router too: its container gets the router's token, and its entrypoint points its
+    OpenRouter provider at the router. Once; True when it changed something (the agent then restarts)."""
+    if TEST_AGENT_HOME is not None:
+        return False
+    token = await asyncio.to_thread(subprocess.run, as_root("cat", "/var/lib/nanoborealis/router/token"),
+                                    capture_output=True, text=True)
+    if token.returncode != 0 or not token.stdout.strip():
+        return False
+    import pwd
+    home = pwd.getpwnam(AGENT_USER).pw_dir
+    dropin = Path(home) / ROUTER_DROPIN
+    have = await asyncio.to_thread(agent_run, ["test", "-f", str(dropin)])
+    await asyncio.to_thread(agent_podman, "secret", "create", "--replace", "router_token", "-", stdin=token.stdout.strip())
+    if have.returncode == 0:
+        return False
+    text = ("# Written by NanoBorealis when the router was set up: the agent asks it, not OpenRouter directly.\n"
+            "[Container]\nSecret=router_token,type=env,target=NANOBOREALIS_ROUTER_TOKEN\n"
+            "Environment=NANOBOREALIS_ROUTER_URL=http://host.containers.internal:11438/v1\n")
+    wrote = await asyncio.to_thread(agent_run, ["sh", "-c", 'mkdir -p "$(dirname "$0")" && cat > "$0"', str(dropin)], text)
+    if wrote.returncode != 0:
+        log(f"couldn't point the agent at the router: {wrote.stderr.strip()[-200:]}")
+        return False
+    await asyncio.to_thread(agent_systemctl, "daemon-reload")
+    await restart_agent()
+    log("the agent now asks the router")
+    return True
 
 
 async def router_adopt() -> bool:
@@ -2114,7 +2147,15 @@ async def agent_hands(method: str, path: str, headers: list[tuple[str, str]], re
     if method == "GET" and route == "/nanoborealis/agent-hands/mode":
         query = {k: v[-1] for k, v in urllib.parse.parse_qs(query_string).items()}
         return await reply(writer, 200, {"mode": agent_mode(str(query.get("chat") or "default"))})
-    if method != "POST" or route not in ("/nanoborealis/agent-hands/run", "/nanoborealis/agent-hands/ask"):
+    if route == "/nanoborealis/agent-hands/crew" and method == "GET":
+        query = {k: v[-1] for k, v in urllib.parse.parse_qs(query_string).items()}
+        path = f"/tasks/{int(query['task'])}" if str(query.get("task") or "").isdigit() else "/tasks"
+        status, payload = await asyncio.to_thread(hall_proxy, "GET", path, "", None)
+        if status == 200 and "tasks" in payload:
+            payload = {"tasks": [x for x in payload["tasks"] if x.get("state") in ("open", "claimed", "review")][:30]}
+        return await reply(writer, status, payload)
+    if method != "POST" or route not in ("/nanoborealis/agent-hands/run", "/nanoborealis/agent-hands/ask",
+                                         "/nanoborealis/agent-hands/crew"):
         return await reply(writer, 404, {"error": "No such endpoint."})
     try:
         length = int(header(headers, "content-length") or 0)
@@ -2127,6 +2168,14 @@ async def agent_hands(method: str, path: str, headers: list[tuple[str, str]], re
         return await reply(writer, 400, {"error": "Bad request."})
     if route == "/nanoborealis/agent-hands/ask":
         status, payload = await agent_ask(data)
+    elif route == "/nanoborealis/agent-hands/crew":  # the agent hands the colony a task (its crew_task tool)
+        title = str(data.get("title") or "").strip()[:200]
+        if not title:
+            return await reply(writer, 400, {"error": "Give the task a title."})
+        status, payload = await asyncio.to_thread(hall_proxy, "POST", "/tasks", "", {
+            "title": title, "detail": ("From your agent. " + str(data.get("detail") or ""))[:8000]})
+        if status != 200 and "error" in payload:
+            payload["error"] = f"The colony isn't running: {payload['error']}" if status >= 500 else payload["error"]
     else:
         status, payload = await hands_run(data, {}, "the agent", "agent")
     await reply(writer, status, payload)
