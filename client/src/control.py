@@ -744,7 +744,12 @@ class ControlCenter:
         body: list[ft.Control] = [t.card(job_box, visible=bool(job.get("what")))]
         self.fill_pool_job(job_box, job)
         if data.get("error"):
-            body.append(self.problem(f"The pool didn't answer: {data['error']}"))
+            body.append(t.card(ft.Column([
+                ft.Text("Shared compute isn't running on this computer right now", size=15, weight=ft.FontWeight.W_600),
+                t.muted("Nothing is lent to the colony at the moment, so your agent and crew use the free cloud "
+                        "providers. Lend a device's GPU from the NanoBorealis app on it (Devices), then refresh.", size=13),
+                t.muted(f"Details: {data['error']}", size=11.5),
+            ], spacing=8)))
         else:
             body += [self.pool_nodes(data.get("nodes") or []),
                      self.pool_plan(data.get("plan") or {}, rebuild, bool(job.get("running"))),
@@ -1314,7 +1319,9 @@ class ControlCenter:
 
     async def logs(self) -> ft.Control:
         lines = await asyncio.to_thread(admin.logs, self.app.machine, 400)
-        text = "\n".join(lines) or "Nothing logged yet."
+        def tidy(line: str) -> str:  # long container label dumps say nothing to a person: cut them short
+            return line if len(line) <= 240 else line[:240] + " …"
+        text = "\n".join(tidy(x) for x in lines) or "Nothing logged yet."
         box = ft.Container(ft.ListView([t.mono(text, size=11.5, selectable=True)], auto_scroll=True, padding=12),
                            height=max(300, (self.page.height or 800) - 220), bgcolor=t.SIDEBAR,
                            border_radius=t.RADIUS, border=ft.Border.all(1, t.LINE))

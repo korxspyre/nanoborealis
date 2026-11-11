@@ -322,7 +322,7 @@ class Workspace:
                          lambda _e: self.page.run_task(self.new_in_mode), trailing=t.muted("Ctrl N", size=11)),
             *([self.nav_row("New task", ft.Icons.ASSIGNMENT_OUTLINED, False,
                             lambda _e: self.page.run_task(self.colony_view().new_task))] if civ else []),
-            self.nav_row("Chats", ft.Icons.CHAT_BUBBLE_OUTLINE_ROUNDED, in_mode,
+            self.nav_row("Chats", ft.Icons.CHAT_BUBBLE_OUTLINE_ROUNDED, self.section == "chats",
                          lambda _e: self.page.run_task(self.show_section, "chats")),
             self.nav_row("Mission control", ft.Icons.TUNE_ROUNDED, not in_mode,
                          lambda _e: self.page.run_task(self.show_section, "overview")),

@@ -101,7 +101,7 @@ class ColonyView:
                      next((r for r in self.rooms if r["kind"] == "direct" and r.get("seat") == s["id"]), None)),
                      ft.Icons.SMART_TOY_OUTLINED, t.muted(f"trust {s['trust']:g}", size=11))
                  for s in self.seats if not s.get("chair")]
-        return [self.side_row("Live map", "map", ft.Icons.HUB_OUTLINED), heading("Chats"), *(rooms or [empty("None yet. New chat: the whole crew reads it.")]),
+        return [self.side_row("Live map", "map", ft.Icons.HUB_OUTLINED), heading("Chats"), *(rooms or [empty("None yet. Start one with New chat.")]),
                 heading("Tasks"), *(board or [empty("Nothing yet. Give them work above.")]),
                 *([heading("Crew"), *seats] if seats else [])]
 
@@ -127,7 +127,7 @@ class ColonyView:
         await self.workspace.show_section("colony:new")
 
     def new_view(self) -> tuple[str, ft.Control]:
-        box = t.field(hint="Ask your colony anything: the whole crew reads it and answers in turn",
+        box = t.field(hint="Ask your colony anything: the members it fits best answer",
                       multiline=True, autofocus=True)
 
         async def send(_event=None) -> None:
@@ -153,7 +153,7 @@ class ColonyView:
         hello = ft.Container(ft.Column([
             ft.Icon(ft.Icons.GROUPS_ROUNDED, size=40, color=t.ACCENT),
             ft.Text("Talk to your colony", size=22, weight=ft.FontWeight.W_600),
-            t.muted("The whole crew reads your message and answers in turn, or passes. To have them do "
+            t.muted("The members your message names, or whose roles fit it best, answer. To have them do "
                     "something and check each other's work, use New task.", size=13),
         ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10), alignment=ft.Alignment.CENTER, padding=48)
         return "New chat", self.frame([hello], composer)
@@ -368,7 +368,7 @@ class ColonyView:
                                 t.muted(stamp(note.get("at")), size=11)], spacing=8,
                                vertical_alignment=ft.CrossAxisAlignment.START))
         if task.get("result"):
-            body.append(t.card(ft.Column([t.muted("RESULT", size=11), ft.Text(task["result"], size=14, selectable=True)],
+            body.append(t.card(ft.Column([t.muted("RESULT", size=11), ft.Markdown(task["result"], selectable=True, extension_set=ft.MarkdownExtensionSet.GITHUB_WEB)],
                                          spacing=6)))
         actions: list[ft.Control] = []
         if state == "review":

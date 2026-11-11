@@ -279,7 +279,9 @@ class Handler(BaseHTTPRequestHandler):
     def forward(self, provider: dict, model: str, body: dict, size: int) -> bool:
         """Send it to one provider. True when the answer (good or not worth retrying elsewhere) went to the client."""
         name = provider["name"]
-        out = {**body, **(provider.get("extra") or {}), "model": model}
+        # OpenRouter's own fields (provider routing, fallbacks) are refused by the others with a 400: only it gets them.
+        own = {} if name == "openrouter" else {"provider", "models", "route", "transforms", "plugins", "usage"}
+        out = {**{k: v for k, v in body.items() if k not in own}, **(provider.get("extra") or {}), "model": model}
         request = urllib.request.Request(provider["url"] + "/chat/completions", data=json.dumps(out).encode(), method="POST",
                                          headers={"Authorization": f"Bearer {provider['key']}", "Content-Type": "application/json",
                                                   "Accept": "text/event-stream" if body.get("stream") else "application/json",
