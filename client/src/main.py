@@ -24,6 +24,7 @@ import admin
 import discovery
 import handsui
 import host
+import instance
 import models_catalog
 import pairing
 import poolnode
@@ -114,6 +115,7 @@ class NanoBorealisApp:
     async def start(self) -> None:
         p = self.page
         p.title = "NanoBorealis"
+        instance.on_show = lambda: p.run_task(self.come_forward)  # someone opened the app again: this window
         p.fonts = {MONO: "fonts/JetBrainsMono.ttf"}
         if p.window is not None and os.path.exists(os.path.join(ASSETS, "icon.ico")):
             p.window.icon = os.path.join(ASSETS, "icon.ico")  # title bar and taskbar on Windows
@@ -645,6 +647,18 @@ class NanoBorealisApp:
             self.page.run_task(self.resume_sharing_on_start)
         self.hands.stop()  # another computer, perhaps: its own questions, and lend to it if you were lending
         self.page.run_task(self.hands.resume)
+
+    async def come_forward(self) -> None:
+        window = self.page.window
+        if window is None:
+            return
+        window.minimized = False
+        window.visible = True
+        self.page.update()
+        try:
+            await window.to_front()
+        except Exception:
+            pass
 
     async def ask_router_privacy(self, machine) -> None:
         try:
@@ -1201,6 +1215,8 @@ if __name__ == "__main__":
         sys.exit(stickmaker._cli(sys.argv[1:]))
     if host.is_host() and not host.claim_single_instance():
         sys.exit(0)  # already open: its window was brought forward instead
+    if not host.is_host() and not instance.claim():
+        sys.exit(0)  # already open on this device: its window was brought forward instead
     # Under pythonw (no console) these are None, and Flet writes download progress to them.
     if sys.stdout is None:
         sys.stdout = open(os.devnull, "w", encoding="utf-8")
