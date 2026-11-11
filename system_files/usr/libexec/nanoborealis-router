@@ -368,6 +368,7 @@ class Handler(BaseHTTPRequestHandler):
         if chosen and broken(chosen, pinned(asked)[1]):
             return self.broken_reply(asked)
         tried: list[str] = []
+        self.too_big = False  # a provider said the request is too big for it (a 413)
         bad, started = 0, time.time()  # answers that weren't one (Judge), and since when
         for _attempt in range(1 if exact else 6):
             options = [(p, m) for p, m in candidates(asked, size) if p["name"] not in tried][:1 if exact else None]
@@ -393,6 +394,9 @@ class Handler(BaseHTTPRequestHandler):
         skipped = any(broken(n, m) for n, p in providers().items() for m in [model_for(p, pinned(asked)[1])] if m)
         if bad or skipped:
             return self.broken_reply(asked)
+        if exact and self.too_big:  # the model picked can't take a chat this big: not something waiting fixes
+            return self.reply(413, {"error": {"message": f"{asked} can't answer: this chat is too big for its free plan. "
+                                              "Pick a model from another provider for this chat.", "type": "quota_exceeded"}})
         left = {n: s for n, s in status()["providers"].items() if s["has_key"]}
         why = "; ".join(f"{s['label']}: " + (s["resting_why"] or ("today's limit is used up" if s["daily"] and s["used"] >= s["daily"]
                                                                    else "couldn't take this request")) for s in left.values())
@@ -446,6 +450,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(data)
                 return True
             seconds, why = refusal(error.code, text, error.headers)
+            self.too_big = self.too_big or error.code == 413
             with lock:
                 usage.rest(name, seconds, why)
             print(f"nanoborealis-router: {name} refused ({error.code}: {why}); trying the next", file=sys.stderr, flush=True)
