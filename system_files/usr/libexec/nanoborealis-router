@@ -42,6 +42,7 @@ State (root only): /var/lib/nanoborealis/router/{providers.json, usage.json, tok
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import re
@@ -49,6 +50,7 @@ import secrets
 import sys
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -62,6 +64,7 @@ except ImportError:  # without it nothing may leave untokenized while tokenizing
 
 STATE = Path(os.environ.get("NANOBOREALIS_ROUTER_STATE", "/var/lib/nanoborealis/router"))
 LISTEN = os.environ.get("NANOBOREALIS_ROUTER_LISTEN", "0.0.0.0:11438")
+ASK_AGAIN = 3  # a broken answer is asked for again this many times in all, on the same provider, before the next one
 TIMEOUT = float(os.environ.get("NANOBOREALIS_ROUTER_TIMEOUT", "600"))
 FREE_ONLY = {"provider": {"max_price": {"prompt": 0, "completion": 0, "request": 0, "image": 0}}}
 
@@ -335,14 +338,23 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(429, {"error": {"message": f"{asked} can't answer: {why}.", "type": "rate_limit_error"}})
         exact = chosen is not None
         tried: list[str] = []
+        broken = 0  # answers that weren't one (Judge)
         for _attempt in range(1 if exact else 6):
             options = [(p, m) for p, m in candidates(asked, size) if p["name"] not in tried][:1 if exact else None]
             if not options:
                 break
             provider, model = options[0]
             tried.append(provider["name"])
-            if self.forward(provider, model, body, size):
+            for _again in range(ASK_AGAIN):
+                done = self.forward(provider, model, body, size)
+                if done is not None:
+                    break
+                broken += 1
+            if done:
                 return
+        if broken:  # an error, not an empty answer: the agent moves on to its fallback models
+            return self.reply(502, {"error": {"message": f"{asked} kept answering with nothing or text that doesn't read "
+                                              f"({broken} tries); its free endpoint looks broken for now.", "type": "api_error"}})
         left = {n: s for n, s in status()["providers"].items() if s["has_key"]}
         why = "; ".join(f"{s['label']}: " + (s["resting_why"] or ("today's limit is used up" if s["daily"] and s["used"] >= s["daily"]
                                                                    else "couldn't take this request")) for s in left.values())
@@ -396,38 +408,56 @@ class Handler(BaseHTTPRequestHandler):
             return False
         with response:
             kind = response.headers.get("Content-Type") or "application/json"
+            streamed = "event-stream" in kind
+            judge = Judge(bool(body.get("tools")))
+            held: list[bytes] = []  # what came before the answer could be judged: nothing goes out until it is
+            answered = 0
+            try:
+                if streamed:
+                    lines = iter(response.readline, b"")
+                    for raw in lines:
+                        answered += len(raw)
+                        held.append(raw)
+                        judge.line(raw)
+                        if judge.verdict() is not None:
+                            break
+                else:
+                    whole = response.read()
+                    answered = len(whole)
+                    held.append(whole)
+                    judge.whole(whole)
+            except OSError:
+                pass
+            if not judge.good():
+                with lock:
+                    usage.count(name, size + answered // 4)
+                print(f"nanoborealis-router: {name} {model} answered {judge.why()}; asking again", file=sys.stderr, flush=True)
+                return None
             self.send_response(200)
             self.send_header("Content-Type", kind)
             self.send_header("X-NanoBorealis-Provider", name)
             self.send_header("X-NanoBorealis-Tokenized", "yes" if protect else "no")
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
-            answered = 0
 
             def send(data: bytes) -> None:
                 if data:
                     self.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n")
                     self.wfile.flush()
             try:
-                if not protect:
-                    while True:
-                        chunk = response.read1(65536)
-                        if not chunk:
-                            break
-                        answered += len(chunk)
-                        send(chunk)
-                elif "event-stream" in kind:  # streamed: restored line by line, placeholders split across chunks too
-                    restorer = tokenizer.SSERestorer(vault())
-                    for raw in iter(response.readline, b""):
-                        answered += len(raw)
-                        send(b"".join(restorer.line(raw)))
+                if streamed:  # restored line by line (placeholders split across chunks too): the held lines, then the rest
+                    restorer = tokenizer.SSERestorer(vault()) if protect else None
+                    for i, raw in enumerate(itertools.chain(held, lines)):
+                        if i >= len(held):
+                            answered += len(raw)
+                        send(b"".join(restorer.line(raw)) if restorer else raw)
                 else:
-                    whole = response.read()
-                    answered = len(whole)
-                    try:
-                        whole = json.dumps(vault().restore(json.loads(whole))).encode()
-                    except ValueError:
-                        whole = vault().detokenize(whole.decode(errors="replace")).encode()
+                    whole = held[0]
+                    if protect:
+                        try:
+                            whole = json.dumps(vault().restore(json.loads(whole))).encode()
+                        except ValueError:
+                            whole = vault().detokenize(whole.decode(errors="replace")).encode()
                     send(whole)
                 self.wfile.write(b"0\r\n\r\n")
             except OSError:
@@ -435,6 +465,82 @@ class Handler(BaseHTTPRequestHandler):
         with lock:
             usage.count(name, size + answered // 4)
         return True
+
+
+SCRIPT = re.compile(r"^([A-Z]+)")
+SAME_SCRIPT = {"HIRAGANA": "CJK", "KATAKANA": "CJK", "HANGUL": "CJK", "FULLWIDTH": "CJK"}
+
+
+def readable(text: str) -> bool:
+    """Whether text reads like a language, not the mix of scripts and broken characters a broken model emits."""
+    if text.count("�") > 1:
+        return False
+    counts: dict[str, int] = {}
+    for ch in text:
+        if ch.isalpha():
+            m = SCRIPT.match(unicodedata.name(ch, "UNKNOWN"))
+            script = m.group(1) if m else "UNKNOWN"
+            script = SAME_SCRIPT.get(script, script)
+            counts[script] = counts.get(script, 0) + 1
+    letters = sum(counts.values())
+    return letters < 12 or max(counts.values()) / letters >= 0.85
+
+
+class Judge:
+    """Whether a model's answer is one: a tool call, or text that reads. A broken model (it happens on the free
+    endpoints, without notice) answers with nothing, or with a few characters from a dozen scripts; that answer is
+    asked for again instead of reaching the agent. A stream is judged from its first part, so it isn't held long."""
+
+    ENOUGH = 160  # characters of answer that read: the rest streams through without waiting
+
+    def __init__(self, tools: bool):
+        self.tools, self.text, self.thought, self.called, self.done, self.parsed = tools, "", "", False, False, True
+
+    def take(self, message: dict) -> None:
+        self.text += message.get("content") or ""
+        self.thought += message.get("reasoning_content") or message.get("reasoning") or ""
+        self.called = self.called or bool(message.get("tool_calls") or message.get("function_call"))
+
+    def line(self, raw: bytes) -> None:
+        line = raw.strip()
+        if line == b"data: [DONE]":
+            self.done = True
+        elif line.startswith(b"data:"):
+            try:
+                event = json.loads(line[5:])
+                for choice in event.get("choices") or []:
+                    self.take(choice.get("delta") or {})
+                    self.done = self.done or bool(choice.get("finish_reason"))
+            except ValueError:
+                pass
+
+    def whole(self, raw: bytes) -> None:
+        try:
+            for choice in json.loads(raw).get("choices") or []:
+                self.take(choice.get("message") or {})
+            self.done = True
+        except (ValueError, AttributeError):
+            self.parsed = False  # not the shape we know: passed on as it is
+
+    def verdict(self) -> bool | None:
+        """True or False once it can tell; None while it still needs more of the stream."""
+        if self.called:
+            return True
+        if len(self.text) >= self.ENOUGH or len(self.thought) >= 4 * self.ENOUGH:
+            return readable(self.text or self.thought)
+        return self.good() if self.done else None
+
+    def good(self) -> bool:
+        if not self.parsed or self.called:
+            return True
+        if self.text.strip():
+            return readable(self.text)
+        return False  # no answer at all: empty, or only a few characters of "thinking"
+
+    def why(self) -> str:
+        if not self.text.strip():
+            return "nothing" + (f" (thinking {self.thought[:40]!r})" if self.thought else "")
+        return f"text that doesn't read ({self.text[:60]!r})"
 
 
 MODEL_CACHE: dict[str, tuple[float, list[dict]]] = {}
