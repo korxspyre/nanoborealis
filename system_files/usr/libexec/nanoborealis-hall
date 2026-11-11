@@ -436,7 +436,7 @@ class Hall:
         existing = {s["id"]: s for s in self.seats()}
         plan = rigs.plan(spec, existing)
         if plan["taken"]:
-            raise Refused(409, f"These seat ids already belong to another rig or the council: {', '.join(plan['taken'])}.")
+            raise Refused(409, f"These member ids already belong to another crew: {', '.join(plan['taken'])}.")
         if data.get("dry_run"):
             return {"rig": spec["name"], "plan": plan, "dry_run": True}
         name = spec["name"]
@@ -766,7 +766,7 @@ class Hall:
         if kind not in ("say", "pass", "escalation", "system"):
             raise Refused(400, "A message is say, pass, escalation or system.")
         if kind == "system" and author != "you":
-            raise Refused(403, "Only the Hall itself posts system messages.")
+            raise Refused(403, "Only the colony itself posts system messages.")
         body = text(data.get("text"), "The message", required=kind != "pass") or "(passes)"
         reply_to = data.get("reply_to")
         if reply_to is not None and not isinstance(reply_to, int):
@@ -939,7 +939,7 @@ class Hall:
         self.db.execute("UPDATE votes SET closed = 1 WHERE id = ?", (vote_id,))
         found = self.vote(vote_id)
         if found["room"] is not None and found["leading"] is not None:
-            outcome = (f"split ({found['margin']:.0%} margin): the council should ask for advice" if found["split"]
+            outcome = (f"split ({found['margin']:.0%} margin): the colony should ask for advice" if found["split"]
                        else f"{found['leading']} ({found['margin']:.0%} margin)")
             self.post(found["room"], "you", {"kind": "system", "text": f"Vote {vote_id} closed: {outcome}"})
         if found["split"]:
@@ -966,9 +966,30 @@ OPENROUTER_URL = os.environ.get("NANOBOREALIS_HALL_OPENROUTER_URL", "https://ope
 SEAT_TIMEOUT = float(os.environ.get("NANOBOREALIS_HALL_SEAT_TIMEOUT", "1800"))  # a CPU pool is slow to read
 CONTINUOUS_EVERY = float(os.environ.get("NANOBOREALIS_HALL_CONTINUOUS_EVERY", "300"))
 WATCHDOG_EVERY = float(os.environ.get("NANOBOREALIS_HALL_WATCHDOG_EVERY", "60"))
-MAIL_AFTER = float(os.environ.get("NANOBOREALIS_HALL_MAIL_AFTER", "120"))  # mail a seat hasn't taken for this long is tried again
+MAIL_AFTER = float(os.environ.get("NANOBOREALIS_HALL_MAIL_AFTER", "600"))  # mail a seat hasn't taken for this long is tried again
 TASK_AFTER = float(os.environ.get("NANOBOREALIS_HALL_TASK_AFTER", "1800"))  # a task held and quiet for this long is nudged
 CONTEXT_MESSAGES = 20  # the room's newest messages a seat is shown when it's asked to speak
+# Every ask is a full agent turn (often several model requests), and the free providers allow a few thousand a day,
+# so the Hall asks as few seats as will do: the ones a message names or whose role fits, not everyone in turn.
+CHAT_SEATS = int(os.environ.get("NANOBOREALIS_HALL_CHAT_SEATS", "2"))  # seats that answer a message in a Hall room
+TASK_OFFERS = int(os.environ.get("NANOBOREALIS_HALL_TASK_OFFERS", "3"))  # seats a task is offered to, best fit first
+REOFFER_EVERY = float(os.environ.get("NANOBOREALIS_HALL_REOFFER_EVERY", "3600"))  # continuous mode: a task again after
+REOFFERS = int(os.environ.get("NANOBOREALIS_HALL_REOFFERS", "3"))  # ...and at most this many times
+WORD = re.compile(r"[a-z]{4,}")
+
+
+def fit(seat: dict, text_: str) -> int:
+    """How well a seat's role, institution and guidance match some work: shared words, its name counting most."""
+    said = set(WORD.findall(text_.lower()))
+    mine = set(WORD.findall(" ".join(str(seat.get(k) or "") for k in ("role", "pod", "guidance")).lower()))
+    named = any(n and n.lower() in said for n in (seat.get("name"), seat.get("address"), seat["id"].split("-")[-1]))
+    return len(said & mine) + (100 if named else 0)
+
+
+def best(seats: list[dict], text_: str, count: int) -> list[dict]:
+    """The `count` seats that fit the text best; ties go to the weightier (seats come weightiest first)."""
+    ranked = sorted(enumerate(seats), key=lambda x: (-fit(x[1], text_), x[0]))
+    return [s for _i, s in ranked[:max(1, count)]]
 FREE_ONLY = {"provider": {"max_price": {"prompt": 0, "completion": 0, "request": 0, "image": 0}}}
 PASS = re.compile(r"^\W*pass\W*$", re.IGNORECASE)
 
@@ -1035,6 +1056,7 @@ class Orchestrator:
         self.busy = False
         self._vault = None
         self._vault_lock = threading.Lock()
+        self.offered: dict[int, list[float]] = {}  # task -> when continuous mode offered it again
         self.ledger = mixer.Ledger() if mixer else None  # who has been asked lately, and who is resting
         try:  # which free model does well at what survives a restart
             self.stats = mixer.Stats(STATE / "mix.sqlite") if mixer else None
@@ -1103,8 +1125,12 @@ class Orchestrator:
             time.sleep(CONTINUOUS_EVERY)
             try:
                 if self.idle() and self.db(lambda h: h.settings()["autonomy"]) == "continuous":
+                    now = time.time()
                     for task in self.db(lambda h: h.tasks("open")):
-                        self.jobs.put(("task", task["id"]))
+                        times = self.offered.setdefault(task["id"], [])
+                        if len(times) < REOFFERS and (not times or now - times[-1] >= REOFFER_EVERY):
+                            times.append(now)
+                            self.jobs.put(("task", task["id"]))
             except Exception as e:
                 print(f"nanoborealis-hall: the continuous round failed: {e}", file=sys.stderr, flush=True)
 
@@ -1211,7 +1237,7 @@ class Orchestrator:
         if (not settings["escalation"] or not str(settings["escalation_model"]).endswith(":free")
                 or not key_file.exists() or tokenizer is None or CLOUD_OFF):
             return ""
-        messages = [{"role": "system", "content": "You advise a council of smaller AI models that is stuck or split. Answer "
+        messages = [{"role": "system", "content": "You advise a crew of smaller AI models that is stuck or split. Answer "
                                                   "the question directly and briefly, with your reasoning."},
                     {"role": "user", "content": question}]
         # A free cloud model may log what it is sent. Every call here goes through sources.chat_once, which
@@ -1256,7 +1282,8 @@ class Orchestrator:
             return
         seats = self.seats()
         board = self.scoreboard(seats)
-        for seat in seats:
+        said = self.db(lambda h: h.messages(room_id))[-1:]
+        for seat in best(seats, said[0]["text"] if said else room["title"], CHAT_SEATS):
             recent = self.db(lambda h: h.messages(room_id))[-CONTEXT_MESSAGES:]
             lines = "\n".join(f"[{m['author']}{' · ' + m['card'] if m.get('card') else ''}] {m['text']}"
                               for m in recent if m["kind"] != "pass")
@@ -1265,7 +1292,7 @@ class Orchestrator:
             work = self.work_board()
             take = ("\nTo take on an open task yourself, start your reply with CLAIM <its number> on its own line, "
                     "then give the finished work." if seat.get("kind") == "cloud" and "[open]" in work else "")
-            prompt = (f"The Hall, room {room_id}: {room['title']}\n\n{board}{work}{lines}\n\nYou are {seat['id']}. Reply to "
+            prompt = (f"Colony chat {room_id}: {room['title']}\n\n{board}{work}{lines}\n\nYou are {seat['id']}. Reply to "
                       f"the room in a few sentences if you add something new, or answer exactly PASS.{take}")
             answer = self.ask(seat, f"hall-{room_id}", prompt)
             claimed = re.match(r"\s*CLAIM\s+#?(\d+)\s*\n(.*)", answer or "", re.S | re.I)
@@ -1293,15 +1320,16 @@ class Orchestrator:
         if not any(s.get("scorecard") for s in seats):
             return ""
         rows = "\n".join(f"- {s['id']}: {card_text(s.get('scorecard') or {})}" for s in seats)
-        return ("The council's scorecard, from tests of this council's own kind of work graded by code. The figure after '>=' "
+        return ("The crew's scorecard, from tests of this crew's own kind of work graded by code. The figure after '>=' "
                 "is the low end of a 95% interval: trust it over the bare score. Weigh what each seat says by what it is "
                 f"good at:\n{rows}\n\n")
 
     def on_task(self, task_id: int) -> None:
-        """Offer an open task to the seats, weightiest first, until one takes it on."""
+        """Offer an open task to the seats that fit it best (a few, not all), until one takes it on."""
         seats = self.seats()
         board = self.scoreboard(seats)
-        for seat in seats:
+        first = self.db(lambda h: h.task(task_id))
+        for seat in best(seats, f"{first['title']} {first.get('detail') or ''}", TASK_OFFERS):
             task = self.db(lambda h: h.task(task_id))
             if task["state"] != "open":
                 return
@@ -1318,7 +1346,7 @@ class Orchestrator:
                     return
                 continue
             self.ask(seat, f"task-{task_id}",
-                     f"{board}Task {task_id} is open on the council's board: {task['title']}\n\n{task['detail']}\n\n"
+                     f"{board}Task {task_id} is open on the colony's board: {task['title']}\n\n{task['detail']}\n\n"
                      "If you can do it well, claim it with task_claim, do it, and hand it in with task_submit. "
                      "If it isn't for you, or a seat above is better at this kind of work, answer exactly PASS.")
 
@@ -1380,7 +1408,7 @@ class Orchestrator:
 
     def on_failed(self, task_id: int) -> None:
         task = self.db(lambda h: h.task(task_id))
-        advice = self.advise(f"Task: {task['title']}\n{task['detail']}\n\nThe council's attempt:\n{task['result']}\n\n"
+        advice = self.advise(f"Task: {task['title']}\n{task['detail']}\n\nThe crew's attempt:\n{task['result']}\n\n"
                              "Reviews: " + "; ".join(n["text"] for n in task["notes"] if n["kind"] == "reject"))
         if advice:
             self.db(lambda h: h.note(task_id, "advisor", "advice", advice))
@@ -1428,7 +1456,7 @@ class Orchestrator:
                     except Refused:
                         pass
             elif seat["id"] in vote["waiting_for"]:
-                self.ask(seat, f"vote-{vote_id}", f"{board}The council is voting (vote {vote_id}): {vote['question']}\n"
+                self.ask(seat, f"vote-{vote_id}", f"{board}The colony is voting (vote {vote_id}): {vote['question']}\n"
                                                   f"Options: {' / '.join(vote['options'])}\n\n"
                                                   "Cast your ballot with the vote tool, with a short reason.")
 
@@ -1437,9 +1465,9 @@ class Orchestrator:
         if vote["room"] is None:
             return
         reasons = "\n".join(f"- {b['seat']} chose {b['choice']}: {b['reason']}" for b in vote["ballots"])
-        self.notify_head(f"The council split on: {vote['question']}\n{reasons}")
+        self.notify_head(f"The colony split on: {vote['question']}\n{reasons}")
         self.db(lambda h: h.post(vote["room"], "hall", {"kind": "escalation", "text":
-                                 f"The council split on: {vote['question']}\n{reasons}\nWhich is right, and why?"}))
+                                 f"The colony split on: {vote['question']}\n{reasons}\nWhich is right, and why?"}))
 
     def on_escalation(self, room_id: int, message_id: int) -> None:
         asked = next(m for m in self.db(lambda h: h.messages(room_id, message_id - 1, 1)))

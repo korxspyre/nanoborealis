@@ -31,6 +31,10 @@ FALLBACKS = ["nvidia/nemotron-3-ultra-550b-a55b:free", "nvidia/nemotron-3.5-supe
              "nvidia/nemotron-3.5-lightning:free"]
 
 
+# What a seat sends with each request at most: its agent compacts its history past this. Smaller is far fewer tokens
+# a turn; a seat's work lives in files and the Hall, not in a long chat.
+CONTEXT = 32768
+
 ROUTER = "http://host.containers.internal:11438/v1"
 ROUTER_TOKEN = Path("/var/lib/nanoborealis/router/token")
 
@@ -40,7 +44,7 @@ def config(seat: dict) -> dict:
     through the router, which spreads the crew over every free provider and moves on when one is used up. Without
     it, OpenRouter's free models directly, as before."""
     if seat.get("router"):
-        preset = {"provider": "router", "model": seat["model"], "maxTokens": 8192, "contextWindowTokens": 131072,
+        preset = {"provider": "router", "model": seat["model"], "maxTokens": 4096, "contextWindowTokens": CONTEXT,
                   "temperature": 0.3}
         return {
             "providers": {"router": {"apiBase": ROUTER, "apiKey": "${NANOBOREALIS_ROUTER_TOKEN}"}},
@@ -53,12 +57,12 @@ def config(seat: dict) -> dict:
 
 
 def direct_config(seat: dict) -> dict:
-    presets = {"seat": {"provider": "openrouter", "model": seat["model"], "maxTokens": 8192,
-                        "contextWindowTokens": 131072, "temperature": 0.3}}
+    presets = {"seat": {"provider": "openrouter", "model": seat["model"], "maxTokens": 4096,
+                        "contextWindowTokens": CONTEXT, "temperature": 0.3}}
     fallbacks = []
     for i, model in enumerate(m for m in FALLBACKS if m != seat["model"]):
-        presets[f"fallback{i}"] = {"provider": "openrouter", "model": model, "maxTokens": 8192,
-                                   "contextWindowTokens": 131072, "temperature": 0.3}
+        presets[f"fallback{i}"] = {"provider": "openrouter", "model": model, "maxTokens": 4096,
+                                   "contextWindowTokens": CONTEXT, "temperature": 0.3}
         fallbacks.append(f"fallback{i}")
     return {
         "providers": {"openrouter": {"apiKey": "${OPENROUTER_API_KEY}", "extraBody": FREE_ONLY}},
@@ -98,10 +102,10 @@ is a full agent with its own memory and tools, and each has a place in the civil
 
 ## Your tools
 You have every tool the owner's own agent has: run commands, read and write files (the shared projects are in
-~/projects), search and fetch the web, MCP servers, skills, subagents, and hands on the owner's devices. Use them:
+~/projects), search and fetch the web, MCP servers, skills, and hands on the owner's devices. Use them:
 when work needs the web, search it; when it needs code, write and run it.
 
-The Hall is where the civilization meets: `hall_read` (rooms, the board, votes waiting for you), `hall_post`,
+The colony's chats, task board and votes: `hall_read` (chats, the board, votes waiting for you), `hall_post`,
 `task_list`, `task_claim`, `task_update`, `task_submit`, `task_review`, `vote`, `escalate`; and the rig's own:
 `rig_ps` (who is in the civilization and where), `rig_send` (mail a member, an institution, everyone, or the owner)
 and `rig_inbox` (your mail). Take work from the board

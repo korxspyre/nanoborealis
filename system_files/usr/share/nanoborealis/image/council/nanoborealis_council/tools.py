@@ -38,9 +38,9 @@ def hall_call(method: str, path: str, body: dict | None = None) -> Any:
             message = json.loads(error.read()).get("error")
         except ValueError:
             message = None
-        raise HallError(message or f"the Hall answered HTTP {error.code}") from None
+        raise HallError(message or f"the colony answered HTTP {error.code}") from None
     except (urllib.error.URLError, OSError) as error:
-        raise HallError(f"the Hall didn't answer ({getattr(error, 'reason', error)})") from None
+        raise HallError(f"the colony didn't answer ({getattr(error, 'reason', error)})") from None
 
 
 def clip(value: str, limit: int = 600) -> str:
@@ -54,7 +54,7 @@ def show_messages(messages: list[dict]) -> str:
         if m["kind"] == "pass":
             lines.append(f"#{m['id']} [{m['author']}] (passes)")
         else:
-            tag = {"system": " (Hall)", "escalation": " (asks for advice)"}.get(m["kind"], "")
+            tag = {"system": " (colony)", "escalation": " (asks for advice)"}.get(m["kind"], "")
             lines.append(f"#{m['id']} [{m['author']}]{tag}: {clip(m['text'], 2000)}")
     return "\n".join(lines) or "Nothing said yet."
 
@@ -113,7 +113,7 @@ TASK = {"type": "integer", "description": "The task's number."}
 
 class HallRead(CouncilTool):
     name = "hall_read"
-    description = ("Read the council's Hall. Without a room: who is on the council, the rooms, open tasks, and votes "
+    description = ("Read the colony. Without a room: who is in the colony, the rooms, open tasks, and votes "
                    "waiting for you. With a room: its messages (only newer than `after`, if given).")
     parameters = schema({"room": ROOM, "after": {"type": "integer", "description": "Only messages after this id."}})
     read_only = True
@@ -139,7 +139,7 @@ class HallRead(CouncilTool):
 
 class HallPost(CouncilTool):
     name = "hall_post"
-    description = ("Speak in a Hall room, under your nametape. Say something only when it adds to what's been said; "
+    description = ("Speak in a colony chat, under your nametape. Say something only when it adds to what's been said; "
                    "otherwise pass.")
     parameters = schema({"room": ROOM, "text": {"type": "string", "description": "What you say."},
                          "reply_to": {"type": "integer", "description": "The message you answer, if any."},
@@ -211,7 +211,7 @@ class TaskReview(CouncilTool):
 class Vote(CouncilTool):
     name = "vote"
     description = ("Council votes. To answer one, give `vote` and your `choice` (with a short reason). To ask the "
-                   "council to decide, give a `question` and 2 to 8 `options` (and the room it belongs to). Each seat's "
+                   "colony to decide, give a `question` and 2 to 8 `options` (and the room it belongs to). Each seat's "
                    "ballot counts by its capability and earned trust.")
     parameters = schema({"vote": {"type": "integer", "description": "The vote you answer."},
                          "choice": {"type": "string"}, "reason": {"type": "string"},
@@ -235,14 +235,14 @@ class Vote(CouncilTool):
 
 class Escalate(CouncilTool):
     name = "escalate"
-    description = ("Ask for outside advice when the council is stuck or split: the question goes to a free cloud model, "
+    description = ("Ask for outside advice when the colony is stuck or split: the question goes to a free cloud model, "
                    "whose answer is posted in the room. It's advice, not a vote.")
     parameters = schema({"room": ROOM, "question": {"type": "string", "description": "What to ask, with the context."}},
                         ["room", "question"])
 
     async def run(self, room: int, question: str) -> str:
         if not (await self.call("GET", "/settings")).get("escalation"):
-            return ToolResult.error("Escalation is turned off for this council.")
+            return ToolResult.error("Escalation is turned off for this colony.")
         posted = await self.call("POST", f"/rooms/{room}/messages", {"kind": "escalation", "text": question})
         return f"asked for advice (#{posted['id']}); the answer will be posted in room {room}"
 

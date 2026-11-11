@@ -1133,9 +1133,9 @@ def hall_proxy(method: str, path: str, query_string: str, body: dict | None) -> 
         try:
             return error.code, json.loads(error.read())
         except ValueError:
-            return error.code, {"error": f"The Hall answered HTTP {error.code}."}
+            return error.code, {"error": f"The colony answered HTTP {error.code}."}
     except (urllib.error.URLError, OSError):
-        return 503, {"error": "The Hall isn't running. Bring up a rig from the app, or with: nanoborealis rig up"}
+        return 503, {"error": "The colony isn't running. Start it from Mission control, Crew."}
 
 
 def hall_key(key: str) -> None:
@@ -1342,7 +1342,7 @@ async def rigs_up(data: dict, query: dict, owner: str, device_id: str) -> tuple[
         started = await asyncio.to_thread(subprocess.run, as_root("systemctl", "enable", "--now", "nanoborealis-hall.service"),
                                           capture_output=True, text=True, timeout=60)
         if started.returncode != 0:
-            return 502, {"error": f"The Hall wouldn't start: {started.stderr.strip()[-300:]}"}
+            return 502, {"error": f"The colony wouldn't start: {started.stderr.strip()[-300:]}"}
         await asyncio.to_thread(subprocess.run, as_root("systemctl", "restart", "nanoborealis-firewall.service"),
                                 capture_output=True, timeout=60)
         for _ in range(30):
