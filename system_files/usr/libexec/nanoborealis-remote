@@ -1274,6 +1274,8 @@ async def providers_overview(data: dict, query: dict, owner: str, device_id: str
     """What each free provider has left today, whether it has a key, and whether the router is running."""
     first = not await router_has_token()
     moved = await crew_to_router() if await router_adopt() and first else []
+    if not first:
+        await agent_to_router()  # keys stored before the agent could be routed: catch it up (once)
     done = await router_run("status")
     try:
         answer = json.loads(done.stdout)
