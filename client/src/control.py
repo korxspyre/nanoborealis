@@ -143,7 +143,7 @@ class ControlCenter:
             "overview": self.overview, "models": self.models, "channels": self.channels,
             "schedules": self.schedules, "skills": self.skills, "memory": self.memory,
             "mcp": self.mcp, "hooks": self.hooks, 
-            "devices": self.devices, "pool": self.pool, "colony": self.colony, "permissions": self.permissions_page, "providers": self.providers_page, "logs": self.logs, "settings": self.settings_page,
+            "devices": self.devices, "pool": self.pool, "colony": self.colony, "permissions": self.permissions_page, "providers": self.providers_page, "logs": self.logs,
         }
         try:
             return await builders[key]()
@@ -242,6 +242,10 @@ class ControlCenter:
                                       f"{usage.get('total_tokens_30d', 0):,} tokens in the last 30 days"))
         cards.append(t.card(ft.Column([t.muted("SPENT ON OPENROUTER", size=11), *spent_rows], spacing=8)))
 
+        cards.append(t.card(ft.Column([
+            t.muted("THIS APP", size=11),
+            t.muted(f"NanoBorealis app {self.app.version}" + (", updated with the OS" if host.comes_with_os() else "")),
+        ], spacing=6)))
         return self.frame("Overview", "Your agent at a glance.", cards)
 
     async def restart(self) -> None:
@@ -1318,30 +1322,3 @@ class ControlCenter:
                           actions=[t.outline_button("Refresh", icon=ft.Icons.REFRESH_ROUNDED,
                                                     on_click=lambda _e: self.page.run_task(self.reload, "logs"))])
 
-    # -- Settings ----------------------------------------------------------------------------------
-
-    async def settings_page(self) -> ft.Control:
-        settings = await self.load_settings()
-        guard = agent_settings.free_only(settings)
-        async def toggle_guard(event) -> None:
-            try:
-                await agent_settings.set_free_only(self.app.link, bool(event.control.value), self.settings)
-            except LinkError as e:
-                self.toast(str(e))
-            await self.reload("settings")
-
-        body = [
-            t.card(ft.Column([
-                ft.Row([ft.Column([ft.Text("Free models only", size=15, weight=ft.FontWeight.W_600),
-                                   t.muted("OpenRouter refuses any request that would cost money, whatever model "
-                                           "is chosen. Turn off only if you want to pay for a model.")],
-                                  spacing=4, expand=True),
-                        ft.Switch(value=guard, active_color=t.ACCENT, on_change=toggle_guard)]),
-            ], spacing=8)),
-            t.card(ft.Column([
-                ft.Text("This app", size=15, weight=ft.FontWeight.W_600),
-                t.muted(f"NanoBorealis app {self.app.version}" + (", updated with the OS" if host.comes_with_os()
-                                                                   else "")),
-            ], spacing=6)),
-        ]
-        return self.frame("Settings", "Keys, spending, and the agent itself.", body)

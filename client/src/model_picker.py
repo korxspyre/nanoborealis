@@ -140,7 +140,7 @@ class ModelPicker:
                 ft.Text(f"{model.short_name} is not free: OpenRouter charges your key "
                         f"{model.price_label()}.", size=14),
                 t.muted("Every message the agent sends it is billed, and an agent sends many. The free models "
-                        "cost nothing. Using it also turns off \"Free models only\" (Control center, Settings), "
+                        "cost nothing. Using it also turns off \"Free models only\" (Mission control, Providers), "
                         "which otherwise has OpenRouter refuse it.", size=13),
             ], spacing=10, tight=True)),
             actions=[t.quiet_button("Keep free models", on_click=done(False)),

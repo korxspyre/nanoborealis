@@ -15,7 +15,9 @@ from typing import TYPE_CHECKING, Any
 import flet as ft
 
 import admin
+import agent_settings
 import theme as t
+from agent_link import LinkError
 from pairing import PairingError
 
 if TYPE_CHECKING:
@@ -84,6 +86,19 @@ async def build(center: "ControlCenter") -> ft.Control:
                               tight=True, spacing=10, width=420),
             actions=[t.quiet_button("Cancel", on_click=lambda _e: page.pop_dialog()), t.primary_button("Save", on_click=save)]))
 
+    try:
+        settings = await center.load_settings()
+        guard = agent_settings.free_only(settings)
+    except LinkError:
+        settings, guard = None, True
+
+    async def toggle_guard(event) -> None:
+        try:
+            await agent_settings.set_free_only(center.app.link, bool(event.control.value), center.settings)
+        except LinkError as e:
+            center.toast(str(e))
+        await center.reload("providers")
+
     cards: list[ft.Control] = []
     total_left, with_keys = 0, 0
     for name, p in data["providers"].items():
@@ -131,4 +146,10 @@ async def build(center: "ControlCenter") -> ft.Control:
     summary = (f"{total_left:,} requests left today across {with_keys} provider{'s' if with_keys != 1 else ''}. "
                "Resets at midnight UTC." if with_keys else
                "Add a key to start. Each provider you add is more free requests a day for your crew.")
-    return center.frame(TITLE, SUBTITLE, [t.muted(summary, size=13), *cards])
+    free = t.card(ft.Row([
+        ft.Column([ft.Text("Free models only", size=15, weight=ft.FontWeight.W_600),
+                   t.muted("Nothing your agent or crew asks for can cost money: OpenRouter refuses paid models, and the "
+                           "other providers are their free plans. Turn off only if you want to pay for a model.", size=12.5)],
+                  spacing=4, expand=True),
+        ft.Switch(value=guard, active_color=t.ACCENT, disabled=settings is None, on_change=toggle_guard)]))
+    return center.frame(TITLE, SUBTITLE, [t.muted(summary, size=13), *cards, free])

@@ -64,8 +64,7 @@ CONTROL_GROUPS = [
     ("Fleet", [("devices", "Devices", ft.Icons.DEVICES_OUTLINED),
                ("pool", "Shared compute", ft.Icons.HUB_OUTLINED)]),
     ("System", [("overview", "Overview", ft.Icons.SPACE_DASHBOARD_OUTLINED),
-                ("logs", "Logs", ft.Icons.RECEIPT_LONG_OUTLINED),
-                ("settings", "Settings", ft.Icons.SETTINGS_OUTLINED)]),
+                ("logs", "Logs", ft.Icons.RECEIPT_LONG_OUTLINED)]),
 ]
 CONTROL_PAGES = [page for _group, pages in CONTROL_GROUPS for page in pages]
 COMPOSER_HINT = "Ask NanoBorealis to build, fix or explain anything"
