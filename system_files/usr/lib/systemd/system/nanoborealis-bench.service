@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright (C) 2026 korxspyre
+[Unit]
+Description=NanoBorealis crew benchmarks (each crew model tested by code; the results are its trust)
+After=network-online.target nanoborealis-hall.service nanoborealis-router.service
+Wants=network-online.target
+ConditionPathExists=/var/lib/nanoborealis/hall/admin.token
+
+[Service]
+Type=oneshot
+# 6 items in each of 5 areas per model: about 30 requests a model a week, tokenized through the router.
+ExecStart=/usr/bin/python3 /usr/share/nanoborealis/nanobench.py seats --n 6 --skip-days 6
+Nice=10

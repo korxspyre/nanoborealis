@@ -35,6 +35,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -250,7 +251,29 @@ def pool_url() -> str:
         return os.environ.get("NANOBOREALIS_POOL_API", "http://127.0.0.1:52415")
 
 
+ROUTER_URL = os.environ.get("NANOBOREALIS_ROUTER_URL", "http://127.0.0.1:11438/v1")
+ROUTER_TOKEN = Path(os.environ.get("NANOBOREALIS_ROUTER_TOKEN_FILE", "/var/lib/nanoborealis/router/token"))
+
+
+def router_caller(model: str):
+    """Ask exactly this model through the router (tokenized like everything that leaves): an OpenRouter id as it is,
+    "groq:..." or "nim:..." for the others. No stand-in model: a refusal is an error, not someone else's answer."""
+    pinned = model if model.split(":", 1)[0] in ("nim", "groq", "openrouter") else f"openrouter:{model}"
+    token = ROUTER_TOKEN.read_text().strip()
+
+    def call(messages: list[dict], tools: list | None) -> dict:
+        body = {"model": pinned, "messages": messages, "temperature": 0, "max_tokens": 4096, **({"tools": tools} if tools else {})}
+        request = urllib.request.Request(ROUTER_URL + "/chat/completions", data=json.dumps(body).encode(), method="POST",
+                                         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                                                  "X-NanoBorealis-Exact": "1"})
+        with urllib.request.urlopen(request, timeout=900) as response:
+            return json.loads(response.read())["choices"][0]["message"]
+    return call
+
+
 def caller(route: str, model: str):
+    if route == "router":
+        return router_caller(model)
     import sources
     # Room for a reasoning model to think and then answer: at 800, Bonsai 2 27B ran out before answering.
     options = {"temperature": 0, "max_tokens": 4096}
@@ -285,12 +308,21 @@ def main(argv: list[str]) -> None:
         url = option(args, "--hall", os.environ.get("NANOBOREALIS_HALL_URL", "http://127.0.0.1:11437"))
         token_file = option(args, "--admin-token-file", "/var/lib/nanoborealis/hall/admin.token")
         token = Path(token_file).read_text().strip()
+        route = option(args, "--route", "router" if ROUTER_TOKEN.exists() else "pool")
+        fresh_days = float(option(args, "--skip-days", 0))  # a model tested within this many days is left alone
+        done: set[str] = set()
         for seat in hall(url, token, "GET", "/seats")["seats"]:
-            if seat.get("chair") or seat.get("external"):
-                continue  # not a model the pool serves
+            if seat.get("chair") or seat.get("external") or seat["model"] in done:
+                continue  # not a model we can ask, or tested already in this run
+            done.add(seat["model"])
+            if fresh_days:
+                runs = hall(url, token, "GET", "/benchmarks?model=" + urllib.parse.quote(seat["model"], safe=""))["benchmarks"]
+                if any(time.time() - r.get("at", 0) < fresh_days * 86400 for r in runs):
+                    print(f"{seat['model']}: tested within {fresh_days:g} days, skipped")
+                    continue
             print(f"{seat['name']} ({seat['model']}):")
             try:
-                report = run(caller("pool", seat["model"]), n, seed)
+                report = run(caller(route, seat["model"]), n, seed)
             except BenchError as error:
                 print(f"  skipped: {error}")
                 continue

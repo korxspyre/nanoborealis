@@ -83,7 +83,7 @@ def crew_strip(chips: list[dict], on_open: Callable[[dict], None]) -> ft.Control
     for chip in chips:
         lead = chip["head"]
         color = t.ACCENT_HI if lead else t.GOOD if chip["state"] in ("here", "ready") else t.FAINT
-        detail = f"{chip['name']} · trust {chip['trust']}" if chip.get("trust") is not None else chip["name"]
+        detail = f"{chip['name']} · {chip['benchmark']}" if chip.get("benchmark") else chip["name"]
         out.append(t.chip(("★ " if lead else "") + chip["name"], color=color, bgcolor=t.ACCENT_SOFT if lead else t.RAISED,
                           tooltip=f"{detail}\n{chip['model']}\nbenchmark {chip['benchmark']}\n{chip['state']}{' · head agent' if lead else ''}",
                           on_click=lambda _e, c=chip: on_open(c), size=11.5))

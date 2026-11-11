@@ -27,6 +27,11 @@ if TYPE_CHECKING:
     from workspace import Workspace
 
 POLL_SECONDS = 2.0
+def score_text(seat: dict) -> str:
+    """A member's measured ability for a list: its benchmark score, or that it hasn't been tested yet."""
+    return f"{seat['score']:.0f}%" if seat.get("score") is not None else "untested"
+
+
 STATE_COLORS = {"open": t.ACCENT, "claimed": t.VIOLET, "review": t.WARN, "done": t.GOOD, "failed": t.BAD}
 
 
@@ -100,7 +105,7 @@ class ColonyView:
                                t.badge(x["state"].upper(), STATE_COLORS.get(x["state"], t.MUTED))) for x in self.tasks]
         seats = [self.side_row(s["name"].split("@")[0].capitalize(), (lambda room: f"room:{room['id']}" if room else f"seat:{s['id']}")(
                      next((r for r in self.rooms if r["kind"] == "direct" and r.get("seat") == s["id"]), None)),
-                     ft.Icons.SMART_TOY_OUTLINED, t.muted(f"trust {s['trust']:g}", size=11))
+                     ft.Icons.SMART_TOY_OUTLINED, t.muted(score_text(s), size=11, tooltip="Benchmark score (tested by code)"))
                  for s in self.seats if not s.get("chair")]
         return [self.side_row("Live map", "map", ft.Icons.HUB_OUTLINED), heading("Chats"), *(rooms or [empty("None yet. Start one with New chat.")]),
                 heading("Tasks"), *(board or [empty("Nothing yet. Give them work above.")]),
@@ -117,7 +122,7 @@ class ColonyView:
             room = next((r for r in self.rooms if r["kind"] == "direct" and r.get("seat") == seat["id"]), None)
             key = f"room:{room['id']}" if room else f"seat:{seat['id']}"
             rows.append(self.side_row(seat["name"].split("@")[0].capitalize(), key, ft.Icons.SMART_TOY_OUTLINED,
-                                      t.muted(f"trust {seat['trust']:g}", size=11)))
+                                      t.muted(score_text(seat), size=11, tooltip="Benchmark score (tested by code)")))
         return rows
 
     # -- Starting things --------------------------------------------------------------------------------
@@ -159,9 +164,9 @@ class ColonyView:
         ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10), alignment=ft.Alignment.CENTER, padding=48)
         return "New chat", self.frame([hello], composer)
 
-    async def new_task(self) -> None:
-        title = t.field("The task", hint="Write a README for my project")
-        detail = t.field("Details (optional)", multiline=True)
+    async def new_task(self, from_text: str = "") -> None:
+        title = t.field("The task", hint="Write a README for my project", value=from_text.splitlines()[0][:200] if from_text else "")
+        detail = t.field("Details (optional)", multiline=True, value=from_text or "")
 
         async def post(_event=None) -> None:
             if not (title.value or "").strip():
@@ -244,14 +249,22 @@ class ColonyView:
             return t.muted(f"{self.seat_name(author)} passes", size=12)
         text = message["text"]
         copy = (ft.Icons.CONTENT_COPY_ROUNDED, "Copy", lambda: self.workspace.copy_later(text))
-        if author == "you":  # your message: as in the agent chat, a bubble on the right with copy and send again
-            room = message.get("room")
-            again = [(ft.Icons.REFRESH_ROUNDED, "Send it again", lambda: self.page.run_task(self.resend, room, text))] if room else []
-            return transcript.user_message(text, actions=[copy, *again])
+        room = message.get("room")
+        task = (ft.Icons.ASSIGNMENT_OUTLINED, "Make it a task for the crew", lambda: self.page.run_task(self.new_task, text))
+        if author == "you":  # your message: as in the agent chat, a bubble on the right with its actions
+            again = [(ft.Icons.EDIT_OUTLINED, "Edit (back into the message box)", lambda: self.edit_into_box(text)),
+                     (ft.Icons.REFRESH_ROUNDED, "Send it again", lambda: self.page.run_task(self.resend, room, text))] if room else []
+            return transcript.user_message(text, actions=[copy, *again, task])
+        name = self.seat_name(author)
         actions = [] if author in ("advisor", "hall") else [
-            (ft.Icons.THUMB_UP_OUTLINED, "Good answer: more trust for this crew member",
+            (ft.Icons.REPLY_ROUNDED, f"Reply to {name}", lambda: self.edit_into_box(f"{name}, ")),
+            (ft.Icons.REFRESH_ROUNDED, f"Ask {name} again",
+             lambda: self.page.run_task(self.resend, room, f"{name}, please answer that again, another way.")),
+            (ft.Icons.CHAT_OUTLINED, f"Talk with {name} alone", lambda: self.page.run_task(self.open_direct, author)),
+            task,
+            (ft.Icons.THUMB_UP_OUTLINED, "Good answer (goes on their record; only benchmarks set their standing)",
              lambda a=author: self.page.run_task(self.feedback, a, True)),
-            (ft.Icons.THUMB_DOWN_OUTLINED, "Poor answer: less trust",
+            (ft.Icons.THUMB_DOWN_OUTLINED, "Poor answer (goes on their record)",
              lambda a=author: self.page.run_task(self.feedback, a, False))]
         answer = transcript.Answer(text, on_copy=self.workspace.copy_later, actions=actions)
         answer.finish()  # code blocks get their header and copy button
@@ -259,6 +272,19 @@ class ColonyView:
                        *([t.muted("asks for outside advice", size=11.5)] if kind == "escalation" else []),
                        t.muted(stamp(message.get("at")), size=11)], spacing=8)
         return ft.Column([tape, answer.view], spacing=4)
+
+    def edit_into_box(self, text: str) -> None:
+        """Put text in the open chat's message box, for you to change and send."""
+        box = getattr(self, "box", None)
+        if box is None:
+            return
+        box.value = text
+        self.page.update()
+        self.page.run_task(box.focus)
+
+    async def open_direct(self, seat_id: str) -> None:
+        room = next((r for r in self.rooms if r["kind"] == "direct" and r.get("seat") == seat_id), None)
+        await self.workspace.show_section(f"colony:room:{room['id']}" if room else f"colony:seat:{seat_id}")
 
     async def resend(self, room_id: int, text: str) -> None:
         try:
@@ -274,7 +300,7 @@ class ColonyView:
         except PairingError as e:
             self.workspace.toast(str(e))
             return
-        self.workspace.toast(f"Noted. {self.seat_name(seat)}'s trust {'rises' if good else 'drops'} a little.")
+        self.workspace.toast(f"Noted on {self.seat_name(seat)}'s record.")
 
     async def room_view(self, room_id: int) -> tuple[str, ft.Control]:
         room = next((r for r in self.rooms if r["id"] == room_id), None)
@@ -291,6 +317,7 @@ class ColonyView:
                       else f"Message {self.seat_name(room['seat'])}", multiline=True)
         box.max_lines = 6
         box.shift_enter = True
+        self.box = box
         working = transcript.StatusLine()
         listing.data = {"working": working}
 
@@ -380,7 +407,7 @@ class ColonyView:
                 return
             await self.refresh_room(room_id, listing)
 
-        self.dialog("Ask the crew to vote", "Each crew member votes; ballots count by capability and earned trust. "
+        self.dialog("Ask the crew to vote", "Each crew member votes; ballots count by their benchmark scores. "
                     "A split vote goes to a free cloud model for advice.", [question, options], "Ask", ask)
 
     async def task_view(self, task_id: int) -> tuple[str, ft.Control]:

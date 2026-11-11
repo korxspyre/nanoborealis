@@ -111,18 +111,25 @@ def run(base: str, admin_token: str) -> None:
     check(len(admin("GET", f"/rooms/{room['id']}/messages?after={messages[1]['id']}")[1]["messages"]) == 1,
           "a seat can read only what's new")
 
+    # Weight is measured ability: Qwen's model passes most of its benchmark, Gemma's little.
+    admin("POST", "/benchmarks", {"model": "mlx-community/Qwen3-14B-4bit", "suite": "t", "seed": 1,
+                                  "results": {"reasoning": {"passed": 28, "n": 30}}})
+    admin("POST", "/benchmarks", {"model": "m", "suite": "t", "seed": 1, "results": {"reasoning": {"passed": 6, "n": 30}}})
+    weights = {s["id"]: s["weight"] for s in admin("GET", "/seats")[1]["seats"]}
+    check(weights["qwen-14b"] > weights["gemma-12b"], "a member's weight is its benchmark score, not a number in the rig")
     _, vote = admin("POST", "/votes", {"question": "Which?", "options": ["SQLite", "Postgres"], "room": room["id"]})
     qwen("POST", f"/votes/{vote['id']}/ballot", {"choice": "SQLite", "reason": "simpler"})
     check(admin("POST", f"/votes/{vote['id']}/ballot", {"choice": "SQLite"})[0] == 403, "people don't vote as seats")
     check(gemma("POST", f"/votes/{vote['id']}/ballot", {"choice": "MySQL"})[0] == 400, "a ballot must be an option")
     _, done = gemma("POST", f"/votes/{vote['id']}/ballot", {"choice": "Postgres"})
     check(done["closed"] and done["leading"] == "SQLite", "the vote closes when every seat has voted; weight decides")
-    check(abs(done["margin"] - (0.6 - 0.3) / 0.9) < 0.001 and not done["split"], "the margin is weighted")
+    wq, wg = weights["qwen-14b"], weights["gemma-12b"]
+    check(abs(done["margin"] - (wq - wg) / (wq + wg)) < 0.001, "the margin is weighted by measured ability")
     closing = admin("GET", f"/rooms/{room['id']}/messages")[1]["messages"][-1]
     check(closing["kind"] == "system" and "SQLite" in closing["text"], "the outcome is posted in the room")
 
     _, even = admin("POST", "/votes", {"question": "Tabs?", "options": ["yes", "no"]})
-    admin("POST", "/seats", {"id": "gemma-12b", "name": "Gemma", "model": "m", "capability": 55})
+    admin("POST", "/seats", {"id": "gemma-12b", "name": "Gemma", "model": "mlx-community/Qwen3-14B-4bit"})  # same model: equal
     qwen("POST", f"/votes/{even['id']}/ballot", {"choice": "yes"})
     check(gemma("POST", f"/votes/{even['id']}/ballot", {"choice": "no"})[1]["split"], "a near tie is split")
 
@@ -139,7 +146,8 @@ def run(base: str, admin_token: str) -> None:
     check(gemma("POST", f"/tasks/{task['id']}/review", {"verdict": "reject"})[0] == 400, "a rejection needs a reason")
     rejected = gemma("POST", f"/tasks/{task['id']}/review", {"verdict": "reject", "text": "too short"})[1]
     check(rejected["state"] == "claimed" and rejected["rejects"] == 1, "a rejection sends it back to its worker")
-    check(qwen("GET", "/me")[1]["trust"] < 1.0, "...and costs the worker some trust")
+    trust_before = qwen("GET", "/me")[1]["trust"]
+    check(qwen("GET", "/me")[1]["record"].get("faulted", 0) >= 1, "...and goes on the worker's record")
     qwen("POST", f"/tasks/{task['id']}/submit", {"result": "# The Hall\nWhere seats meet."})
     accepted = admin("POST", f"/tasks/{task['id']}/review", {"verdict": "accept"})[1]
     check(accepted["state"] == "done" and [n["kind"] for n in accepted["notes"]] ==
@@ -157,8 +165,10 @@ def run(base: str, admin_token: str) -> None:
     before = admin("GET", "/seats")[1]["seats"]
     admin("POST", "/feedback", {"seat": "gemma-12b", "kind": "thumbs_up", "reason": "good answer"})
     after = {s["id"]: s for s in admin("GET", "/seats")[1]["seats"]}
-    check(after["gemma-12b"]["trust"] > next(s for s in before if s["id"] == "gemma-12b")["trust"],
-          "your thumbs up raises a seat's trust, and with it its weight")
+    check(after["gemma-12b"]["trust"] == next(s for s in before if s["id"] == "gemma-12b")["trust"]
+          and after["gemma-12b"]["record"].get("praised", 0) >= 1,
+          "a thumbs up goes on the record, but an opinion never moves trust")
+    check(qwen("GET", "/me")[1]["trust"] == trust_before, "nor does a rejection: only benchmarks do")
     admin("DELETE", "/seats/gemma-12b")
     check(gemma("GET", "/me")[0] == 401, "a removed seat's token stops working")
 

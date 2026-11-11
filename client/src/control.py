@@ -1239,7 +1239,7 @@ class ControlCenter:
                                                        tooltip=guidance.get(sector) or None), padding=ft.Padding.only(top=8)))
                 for s in members:
                     name = (s["address"] or s["id"]).split("@")[0]
-                    trust = s.get("trust", 1)
+                    score = s.get("score")
                     blocks.append(ft.Row([
                         ft.Icon(ft.Icons.CIRCLE, size=9, color=t.GOOD if s["here"] else t.FAINT,
                                 tooltip="Here" if s["here"] else "Away"),
@@ -1249,9 +1249,11 @@ class ControlCenter:
                                 no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS, tooltip=s.get("role") or None),
                         t.muted(s["model"].split("/")[-1].removesuffix(":free"), size=12, width=210, no_wrap=True,
                                 overflow=ft.TextOverflow.ELLIPSIS, tooltip=s["model"]),
-                        ft.Text(f"trust {trust:g}", size=12, width=64, text_align=ft.TextAlign.RIGHT,
-                                color=t.GOOD if trust > 1 else t.BAD if trust < 1 else t.MUTED,
-                                tooltip="Rises with accepted work and your thumbs up; falls with rejected work"),
+                        ft.Text(f"{score:.0f}%" if score is not None else "untested", size=12, width=64,
+                                text_align=ft.TextAlign.RIGHT,
+                                color=t.MUTED if score is None else t.GOOD if score >= 60 else t.WARN if score >= 35 else t.BAD,
+                                tooltip="Benchmark score: tested by code on reasoning, format, fidelity, tools and review "
+                                        "every week. It alone sets their standing and their say in votes."),
                     ], spacing=10))
             short = lambda seat_id: seat_id.split("-", 1)[-1].capitalize()  # noqa: E731
             ties = ft.ExpansionTile(
@@ -1280,7 +1282,7 @@ class ControlCenter:
                 ft.Column([ft.Row([ft.Text(seat["name"], size=14, weight=ft.FontWeight.W_600),
                                    t.badge("YOUR AGENT", t.ACCENT) if seat["chair"] else ft.Container()], spacing=6),
                            t.muted(seat["model"], size=12)], spacing=2, expand=True),
-                t.muted(f"trust {seat['trust']:g}", size=12),
+                t.muted(f"{seat['score']:.0f}%" if seat.get("score") is not None else "untested", size=12),
             ], spacing=16), padding=ft.Padding.symmetric(vertical=6)))
 
         async def change(changes: dict[str, Any], message: str) -> None:

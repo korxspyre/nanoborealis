@@ -212,7 +212,9 @@ def run(base: str, admin_token: str) -> None:
     check(done is not None and done["claimed_by"] == "a" and [n["author"] for n in done["notes"]][-1] == "b",
           "a task is offered, claimed and done by one seat, and reviewed by another")
     trust_a = lambda seats: next(s["trust"] for s in seats if s["id"] == "a")  # noqa: E731
-    check(trust_a(admin("GET", "/seats")["seats"]) > trust_a(trust_before), "...and the accepted work earns trust")
+    check(trust_a(admin("GET", "/seats")["seats"]) == trust_a(trust_before)
+          and next(s for s in admin("GET", "/seats")["seats"] if s["id"] == "a")["record"].get("praised", 0) >= 1,
+          "...and the accepted work goes on its record, while trust stays what its benchmarks say")
 
     call(base, admin_token, "POST", "/escalation-key", {"key": "sk-or-v1-" + "0" * 40})
     hard = admin("POST", "/tasks", {"title": "A hard one"})["id"]

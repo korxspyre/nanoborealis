@@ -235,16 +235,18 @@ class Hall:
         return self.settings()
 
     def trust(self, seat: str, now: float | None = None) -> float:
-        """1, plus what reviews and thumbs have earned or cost (fading with time), plus the benchmark term:
-        what the model's own NanoBench results say, which is the part of trust nobody's opinion can move."""
-        now = now or time.time()
-        total = 0.0
-        for row in self.db.execute("SELECT delta, at FROM trust WHERE seat = ?", (seat,)):
-            total += row["delta"] * 0.5 ** (max(0.0, now - row["at"]) / 86400 / TRUST_HALF_LIFE_DAYS)
+        """How far a member is trusted: its model's measured ability and nothing else. The low end of its NanoBench
+        score (95% interval) over the last BENCH_DAYS days, as 0.5 (scored nothing) to 1.5 (scored everything);
+        1.0 until it has been tested on enough items. Reviews, thumbs and votes are opinions: they are kept as its
+        record (the trust table) but never move this."""
         row = self.db.execute("SELECT model FROM seats WHERE id = ?", (seat,)).fetchone()
-        if row:
-            total += self.bench_term(row["model"], now)
-        return round(min(TRUST_MAX, max(TRUST_MIN, 1.0 + total)), 3)
+        score = self.measured(row["model"], now) if row else None
+        return 1.0 if score is None else round(0.5 + score / 100, 3)
+
+    def measured(self, model: str, now: float | None = None) -> float | None:
+        """The low end of a model's overall NanoBench score in percent; None until BENCH_MIN_ITEMS items are in."""
+        overall = self.scorecard(model, now).get("overall")
+        return overall["lo"] if overall and overall["n"] >= BENCH_MIN_ITEMS else None
 
     # -- Benchmarks ----------------------------------------------------------------------------------
 
@@ -313,8 +315,9 @@ class Hall:
                         (seat, delta, reason, time.time()))
 
     def weight(self, seat: dict) -> float:
-        """A seat's say in a vote: how capable its model is, times how far it has earned trust."""
-        return round(max(1.0, float(seat["capability"])) / 100 * self.trust(seat["id"]), 4)
+        """A member's say in a vote, and its place in line for work: its measured ability (trust), not anyone's
+        opinion and not a number written into the rig."""
+        return self.trust(seat["id"])
 
     # -- Seats ---------------------------------------------------------------------------------------
 
@@ -327,6 +330,10 @@ class Hall:
         found["external"] = bool(found.get("external"))
         found["scorecard"] = self.scorecard(found["model"])
         found["trust"] = self.trust(seat_id)
+        found["score"] = self.measured(found["model"])  # None: not tested yet
+        found["record"] = {r["kind"]: r["n"] for r in self.db.execute(  # what reviews and the owner said: shown, never counted
+            "SELECT CASE WHEN delta > 0 THEN 'praised' ELSE 'faulted' END AS kind, COUNT(*) AS n FROM trust "
+            "WHERE seat = ? GROUP BY kind", (seat_id,))}
         found["weight"] = self.weight(found)
         return found
 
