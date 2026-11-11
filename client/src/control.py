@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 import flet as ft
 
 import admin
+from colony import score_tip
 import agent_settings
 import host
 import models_catalog
@@ -1252,8 +1253,9 @@ class ControlCenter:
                         ft.Text(f"{score:.0f}%" if score is not None else "untested", size=12, width=64,
                                 text_align=ft.TextAlign.RIGHT,
                                 color=t.MUTED if score is None else t.GOOD if score >= 60 else t.WARN if score >= 35 else t.BAD,
-                                tooltip="Benchmark score: tested by code on reasoning, format, fidelity, tools and review "
-                                        "every week. It alone sets their standing and their say in votes."),
+                                tooltip="Benchmark score, tested by code: LiveBench's published leaderboard and this "
+                                        "computer's own NanoBench tests every week. It alone sets their standing and "
+                                        "their say in votes.\n" + score_tip(s)),
                     ], spacing=10))
             short = lambda seat_id: seat_id.split("-", 1)[-1].capitalize()  # noqa: E731
             ties = ft.ExpansionTile(

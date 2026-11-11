@@ -32,6 +32,16 @@ def score_text(seat: dict) -> str:
     return f"{seat['score']:.0f}%" if seat.get("score") is not None else "untested"
 
 
+def score_tip(seat: dict) -> str:
+    """Where the score comes from: LiveBench's leaderboard and this computer's own NanoBench tests."""
+    parts = [seat.get("score_source") or "Benchmark score (tested by code)"]
+    if seat.get("livebench") is not None:
+        parts.append(f"LiveBench {seat['livebench']:.0f}%")
+    if seat.get("nanobench") is not None:
+        parts.append(f"NanoBench {seat['nanobench']:.0f}% (sure at least)")
+    return " \u00b7 ".join(parts)
+
+
 STATE_COLORS = {"open": t.ACCENT, "claimed": t.VIOLET, "review": t.WARN, "done": t.GOOD, "failed": t.BAD}
 
 
@@ -105,7 +115,7 @@ class ColonyView:
                                t.badge(x["state"].upper(), STATE_COLORS.get(x["state"], t.MUTED))) for x in self.tasks]
         seats = [self.side_row(s["name"].split("@")[0].capitalize(), (lambda room: f"room:{room['id']}" if room else f"seat:{s['id']}")(
                      next((r for r in self.rooms if r["kind"] == "direct" and r.get("seat") == s["id"]), None)),
-                     ft.Icons.SMART_TOY_OUTLINED, t.muted(score_text(s), size=11, tooltip="Benchmark score (tested by code)"))
+                     ft.Icons.SMART_TOY_OUTLINED, t.muted(score_text(s), size=11, tooltip=score_tip(s)))
                  for s in self.seats if not s.get("chair")]
         return [self.side_row("Live map", "map", ft.Icons.HUB_OUTLINED), heading("Chats"), *(rooms or [empty("None yet. Start one with New chat.")]),
                 heading("Tasks"), *(board or [empty("Nothing yet. Give them work above.")]),
@@ -122,7 +132,7 @@ class ColonyView:
             room = next((r for r in self.rooms if r["kind"] == "direct" and r.get("seat") == seat["id"]), None)
             key = f"room:{room['id']}" if room else f"seat:{seat['id']}"
             rows.append(self.side_row(seat["name"].split("@")[0].capitalize(), key, ft.Icons.SMART_TOY_OUTLINED,
-                                      t.muted(score_text(seat), size=11, tooltip="Benchmark score (tested by code)")))
+                                      t.muted(score_text(seat), size=11, tooltip=score_tip(seat))))
         return rows
 
     # -- Starting things --------------------------------------------------------------------------------

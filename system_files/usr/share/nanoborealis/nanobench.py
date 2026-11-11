@@ -310,6 +310,11 @@ def main(argv: list[str]) -> None:
         token = Path(token_file).read_text().strip()
         route = option(args, "--route", "router" if ROUTER_TOKEN.exists() else "pool")
         fresh_days = float(option(args, "--skip-days", 0))  # a model tested within this many days is left alone
+        try:  # the colony's copy of LiveBench's leaderboard, the other half of each model's score (every two weeks)
+            import scores
+            scores.ensure(Path(option(args, "--colony-state", "/var/lib/nanoborealis/colony")))
+        except Exception as error:
+            print(f"LiveBench not refreshed: {error}")
         done: set[str] = set()
         for seat in colony(url, token, "GET", "/seats")["seats"]:
             if seat.get("chair") or seat.get("external") or seat["model"] in done:

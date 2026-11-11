@@ -63,6 +63,27 @@ BENCH_AREAS = ("reasoning", "format", "fidelity", "tools", "review")  # nanobenc
 BENCH_ABBREVIATIONS = {"reasoning": "reasoning", "format": "format", "fidelity": "fidelity", "tools": "tools", "review": "review"}
 BENCH_DAYS = 30  # results older than this no longer count
 BENCH_MIN_ITEMS = 10  # fewer than this and a score says nothing yet, so it doesn't move trust
+LIVE_MIN = 40.0  # a NanoBench score under this means the model fails here: its LiveBench score doesn't count
+LIVE_UNCHECKED = 0.85  # a LiveBench score not yet confirmed by NanoBench counts for this much of itself
+
+
+def livebench_for(model: str) -> dict | None:
+    """The model's LiveBench entry, {name, overall, categories, release}, from the copy in the colony's state folder
+    (scores.ensure refreshes it every two weeks). None when LiveBench doesn't list it."""
+    try:
+        import scores
+        rows, overrides = scores.load(STATE)
+        if isinstance(overrides.get(model), (int, float)):
+            return {"name": model, "overall": float(overrides[model]), "categories": {}, "release": "set by you"}
+        name = scores.match(model.split(":", 1)[1] if model.split(":", 1)[0] in ("nim", "groq", "openrouter") else model,
+                            list(rows))
+        if name is None:
+            return None
+        release = json.loads((STATE / "livebench.json").read_text()).get("release", "")
+        return {"name": name, "overall": float(rows[name]["overall"]), "categories": rows[name].get("categories", {}),
+                "release": release}
+    except Exception:
+        return None
 SEAT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
 
 SCHEMA = """
@@ -245,18 +266,41 @@ class Colony:
         return self.settings()
 
     def trust(self, seat: str, now: float | None = None) -> float:
-        """How far a member is trusted: its model's measured ability and nothing else. The low end of its NanoBench
-        score (95% interval) over the last BENCH_DAYS days, as 0.5 (scored nothing) to 1.5 (scored everything);
-        1.0 until it has been tested on enough items. Reviews, thumbs and votes are opinions: they are kept as its
+        """How far a member is trusted: its model's measured ability and nothing else. Its score (rating(): LiveBench
+        and NanoBench) as 0.5 (scored nothing) to 1.5 (scored everything); 1.0 until something has measured it. Reviews, thumbs and votes are opinions: they are kept as its
         record (the trust table) but never move this."""
         row = self.db.execute("SELECT model FROM seats WHERE id = ?", (seat,)).fetchone()
         score = self.measured(row["model"], now) if row else None
         return 1.0 if score is None else round(0.5 + score / 100, 3)
 
     def measured(self, model: str, now: float | None = None) -> float | None:
-        """The low end of a model's overall NanoBench score in percent; None until BENCH_MIN_ITEMS items are in."""
+        """A model's score in percent (rating()); None when nothing has measured it yet."""
+        return self.rating(model, now)["score"]
+
+    def rating(self, model: str, now: float | None = None) -> dict:
+        """A model's score from two measurements, each tested by code, never by opinion:
+
+          LiveBench (livebench.ai): the published leaderboard, with questions refreshed monthly so they can't have
+            been learned. Broad ability: reasoning, math, coding, language, data analysis, instruction following.
+          NanoBench: this computer's own tests through its own router (tools, format, fidelity, review), the low
+            end of a 95% interval. Whether the model works here, on the endpoint the crew actually gets.
+
+        Both: their mean, unless NanoBench is under LIVE_MIN; then NanoBench alone, because a model whose endpoint
+        is broken (it happens to free ones without notice) has no use for its published score. LiveBench only:
+        LIVE_UNCHECKED of it, until it is checked here. NanoBench only: that."""
         overall = self.scorecard(model, now).get("overall")
-        return overall["lo"] if overall and overall["n"] >= BENCH_MIN_ITEMS else None
+        nano = overall["lo"] if overall and overall["n"] >= BENCH_MIN_ITEMS else None
+        live = livebench_for(model)
+        if nano is not None and live is not None:
+            score = nano if nano < LIVE_MIN else (live["overall"] + nano) / 2
+            source = "NanoBench (fails here, so LiveBench doesn't count)" if nano < LIVE_MIN else "LiveBench and NanoBench"
+        elif live is not None:
+            score, source = live["overall"] * LIVE_UNCHECKED, "LiveBench (not yet checked here)"
+        elif nano is not None:
+            score, source = nano, "NanoBench (not on LiveBench)"
+        else:
+            score, source = None, "not measured yet"
+        return {"score": None if score is None else round(score, 1), "source": source, "nanobench": nano, "livebench": live}
 
     # -- Benchmarks ----------------------------------------------------------------------------------
 
@@ -340,7 +384,10 @@ class Colony:
         found["external"] = bool(found.get("external"))
         found["scorecard"] = self.scorecard(found["model"])
         found["trust"] = self.trust(seat_id)
-        found["score"] = self.measured(found["model"])  # None: not tested yet
+        rated = self.rating(found["model"])
+        found["score"], found["score_source"] = rated["score"], rated["source"]  # score None: not measured yet
+        found["livebench"] = rated["livebench"] and rated["livebench"]["overall"]
+        found["nanobench"] = rated["nanobench"]
         found["record"] = {r["kind"]: r["n"] for r in self.db.execute(  # what reviews and the owner said: shown, never counted
             "SELECT CASE WHEN delta > 0 THEN 'praised' ELSE 'faulted' END AS kind, COUNT(*) AS n FROM trust "
             "WHERE seat = ? GROUP BY kind", (seat_id,))}
@@ -1703,6 +1750,16 @@ def main() -> None:
     colony = Colony(STATE)
     orchestrator = Orchestrator(colony)
     orchestrator.start()
+
+    def keep_livebench() -> None:  # LiveBench's leaderboard, half of each model's score: fetched when missing or old
+        while True:
+            try:
+                import scores
+                scores.ensure(STATE)
+            except Exception:
+                pass
+            time.sleep(6 * 3600)
+    threading.Thread(target=keep_livebench, daemon=True).start()
     server = ThreadingHTTPServer((host or "127.0.0.1", int(port)), handler(colony, orchestrator))
     print(f"nanoborealis-colony: the colony on {LISTEN}", file=sys.stderr, flush=True)
     server.serve_forever()

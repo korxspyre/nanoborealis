@@ -71,8 +71,19 @@ broken_until: dict[tuple[str, str], float] = {}
 
 
 def broken(name: str, model: str) -> bool:
-    return broken_until.get((name, model), 0.0) > time.time()
-TIMEOUT = float(os.environ.get("NANOBOREALIS_ROUTER_TIMEOUT", "600"))
+    return broken_until.get((name, model), 0.0) > time.time() or model_rest_left(name, model)[0] > 0
+
+
+# One model's trouble is that model's: a 404 (not served to this key), a server error or a timeout pauses that model
+# on that provider, and the provider's other models carry on. A rate limit or a refused key is the provider's.
+MODEL_ONLY = {404, 410, 500, 502, 503, 504}
+model_resting: dict[tuple[str, str], tuple[float, str]] = {}
+
+
+def model_rest_left(name: str, model: str) -> tuple[float, str]:
+    until, why = model_resting.get((name, model), (0.0, ""))
+    return (max(0.0, until - time.time()), why)
+TIMEOUT = float(os.environ.get("NANOBOREALIS_ROUTER_TIMEOUT", "120"))  # seconds of silence (a stream may run longer), then the model is paused
 FREE_ONLY = {"provider": {"max_price": {"prompt": 0, "completion": 0, "request": 0, "image": 0}}}
 
 # What ships: each provider's address and its free plan's limits as far as they are known. Every number can be
@@ -234,7 +245,7 @@ def pinned(asked: str) -> tuple[str | None, str]:
     return (head, rest) if sep and head in BUILT_IN and rest else (None, asked)
 
 
-def pinned_refusal(name: str, size: int) -> str:
+def pinned_refusal(name: str, size: int, model: str = "") -> str:
     """Why the named provider can't take a request of this size now ("" when it can)."""
     with lock:
         p = providers().get(name) or {}
@@ -248,6 +259,9 @@ def pinned_refusal(name: str, size: int) -> str:
         rest, why = usage.rest_left(name)
         if rest > 0:
             return f"{p['label']} is resting for {int(rest) // 60 + 1} min: {why}"
+        rest, why = model_rest_left(name, model)
+        if rest > 0 and why:
+            return f"{p['label']} paused this model for {int(rest) // 60 + 1} min: {why}"
         daily, used = int(p.get("daily") or 0), usage.day(name)["requests"]
         if daily and used >= daily:
             return f"{p['label']}'s requests for today are used up"
@@ -263,7 +277,7 @@ def candidates(asked: str, size: int) -> list[tuple[dict, str]]:
     if chosen:
         # A model picked with its provider is that model there, or nothing: another provider would answer with a
         # different model under the same name (pinned_refusal says why it couldn't go).
-        return [(providers()[chosen], model_asked)] if not pinned_refusal(chosen, size) else []
+        return [(providers()[chosen], model_asked)] if not pinned_refusal(chosen, size, model_asked) else []
     found = []
     with lock:
         # A model some provider serves goes only to those that serve it: another would answer with a different model
@@ -357,13 +371,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(400, {"error": {"message": "Bad request."}})
         size = len(raw) // 4  # tokens, near enough to know what fits where
         chosen = pinned(asked)[0]
-        if chosen and (why := pinned_refusal(chosen, size)):
+        if chosen and (why := pinned_refusal(chosen, size, pinned(asked)[1])):
             # Too big for that provider: a 413 "quota_exceeded", which nanobot doesn't retry (it never fits) and
             # answers with the agent's fallback models. Its retry words (rate limit, 429, 5xx...) aren't in it.
             # The other reasons pass in a while: a 429 it waits on.
-            big = "free plan takes about" in why
-            return self.reply(413 if big else 429, {"error": {"message": f"{asked} can't answer: {why}.",
-                                                              "type": "quota_exceeded" if big else "rate_limit_error"}})
+            big, paused = "free plan takes about" in why, "paused this model" in why
+            code, kind = (413, "quota_exceeded") if big else (424, "empty_response") if paused else (429, "rate_limit_error")
+            return self.reply(code, {"error": {"message": f"{asked} can't answer: {why}.", "type": kind}})
         exact = chosen is not None
         if chosen and broken(chosen, pinned(asked)[1]):
             return self.broken_reply(asked)
@@ -404,6 +418,11 @@ class Handler(BaseHTTPRequestHandler):
                                                "add one in Mission control, Providers."), "type": "rate_limit_error"}})
 
     def broken_reply(self, asked: str) -> None:
+        paused = [why for (n, m), (until, why) in model_resting.items() if until > time.time() and why
+                  and m == model_for(providers()[n], pinned(asked)[1])]
+        if paused:  # paused for a reason of its own (not served to this key, a server error): that reason
+            return self.reply(424, {"error": {"message": f"{asked} can't answer just now: {paused[0]} (empty for now). "
+                                              "Use another model meanwhile.", "type": "empty_response", "code": "model_paused"}})
         """The model answers with nothing usable. A 424 "empty_response": nanobot doesn't retry it (that would only ask
         the broken model again; its retry words are rate limit, 5xx, server error, overloaded, timeout, connection,
         none of them here) but "empty" sends it straight to the agent's fallback models."""
@@ -452,12 +471,20 @@ class Handler(BaseHTTPRequestHandler):
             seconds, why = refusal(error.code, text, error.headers)
             self.too_big = self.too_big or error.code == 413
             with lock:
-                usage.rest(name, seconds, why)
-            print(f"nanoborealis-router: {name} refused ({error.code}: {why}); trying the next", file=sys.stderr, flush=True)
+                if error.code in MODEL_ONLY:
+                    model_resting[(name, model)] = (time.time() + (3600 if error.code in (404, 410) else seconds), why)
+                    usage.day(name)["refused"] += 1
+                else:
+                    usage.rest(name, seconds, why)
+            print(f"nanoborealis-router: {name} {model if error.code in MODEL_ONLY else ''} refused ({error.code}: {why}); "
+                  "trying the next", file=sys.stderr, flush=True)
             return False
         except (urllib.error.URLError, OSError) as error:
-            with lock:
-                usage.rest(name, 30, "it didn't answer")
+            with lock:  # a timeout is usually the model (a slow or stuck one); a refused connection, the provider
+                if isinstance(getattr(error, "reason", error), TimeoutError) or isinstance(error, TimeoutError):
+                    model_resting[(name, model)] = (time.time() + 300, "it didn't answer in time")
+                else:
+                    usage.rest(name, 30, "it didn't answer")
             print(f"nanoborealis-router: {name} didn't answer ({error}); trying the next", file=sys.stderr, flush=True)
             return False
         with response:
