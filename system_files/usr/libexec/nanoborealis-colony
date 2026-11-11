@@ -754,6 +754,7 @@ class Colony:
     def new_room(self, data: dict) -> dict:
         title = text(data.get("title"), "The room's title", 200)
         kind = data.get("kind", "colony")
+        kind = "colony" if kind == "hall" else kind  # what an app from before the rename asks for
         if kind not in ("colony", "task", "direct"):
             raise Refused(400, "A room is a colony, a task or a direct (one-on-one) room.")
         seat = None

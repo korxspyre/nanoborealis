@@ -700,6 +700,8 @@ def parse_head(raw: bytes) -> tuple[str, str, str, list[tuple[str, str]]]:
 async def local(method: str, target: str, headers: list[tuple[str, str]], reader: asyncio.StreamReader,
                 writer: asyncio.StreamWriter, address: str) -> None:
     """This service's own endpoints: pairing, unpairing, and a paired device's terminal and commands."""
+    if target.startswith(OLD_COLONY_PREFIX):  # an app from before the rename still asks the colony there
+        target = COLONY_PREFIX + target[len(OLD_COLONY_PREFIX):]
     path = target.split("?", 1)[0]
     if method == "GET" and path == "/nanoborealis/hello":
         return await reply(writer, 200, {"service": "nanoborealis-remote", "pairing": 1, "terminal": 1, "admin": 1,
@@ -1113,6 +1115,7 @@ COLONY_URL = os.environ.get("NANOBOREALIS_REMOTE_COLONY_URL", "http://127.0.0.1:
 
 
 COLONY_PREFIX = "/nanoborealis/colony/"
+OLD_COLONY_PREFIX = "/nanoborealis/" + "hall/"  # its address before the rename, for apps not updated yet
 
 
 def colony_proxy(method: str, path: str, query_string: str, body: dict | None) -> tuple[int, dict]:
@@ -1169,7 +1172,8 @@ def rig_specs() -> list[dict]:
 async def rigs_overview(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
     """Whether the colony is running, its rigs, and the rigs that ship with the OS."""
     status, rigs = await asyncio.to_thread(colony_proxy, "GET", "/rigs", "", None)
-    return 200, {"colony": status == 200, "rigs": rigs.get("rigs", []) if status == 200 else [],
+    return 200, {"colony": status == 200, **{"ha" + "ll": status == 200},  # the old key, for apps not updated yet
+                 "rigs": rigs.get("rigs", []) if status == 200 else [],
                  "specs": rig_specs(), "problem": "" if status == 200 else rigs.get("error", "")}
 
 

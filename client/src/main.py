@@ -651,6 +651,8 @@ class NanoBorealisApp:
             self.router_tokenizes = bool((await asyncio.to_thread(admin.providers, machine)).get("tokenize", True))
         except Exception:  # an older computer, or away: the footer says it can't tell
             self.router_tokenizes = None
+        if self.workspace is not None:  # the footer was drawn before the answer came: draw it again
+            self.page.run_task(self.workspace.refresh_status)
 
     async def keep_linked(self, link: AgentLink) -> None:
         try:
