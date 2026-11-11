@@ -83,7 +83,8 @@ BUILT_IN = {
             "smart_like": ["nemotron-3-ultra", "nemotron.*ultra", "nemotron.*super", "gpt-oss-120b", "llama-3.3-70b", "qwen3"],
             "fast_like": ["nemotron.*lightning", "nemotron.*nano", "gpt-oss-20b", "llama-3.1-8b", "gemma"]},
     "groq": {"label": "Groq", "url": "https://api.groq.com/openai/v1", "per_minute": 30, "daily": 1000,
-             "max_request": 6000, "where": "console.groq.com",  # its free plan: about 8,000 tokens a minute
+             "max_request": 6300, "where": "console.groq.com",  # its free plan: 7,000 input tokens a minute for its
+             # larger models, counted about 10% above this router's estimate (a quarter of the bytes)
              "smart_like": ["gpt-oss-120b", "qwen3", "llama-3.3-70b", "kimi"],
              "fast_like": ["gpt-oss-20b", "llama-3.1-8b", "instant"]},
     "openrouter": {"label": "OpenRouter", "url": "https://openrouter.ai/api/v1", "per_minute": 20, "daily": 1000,
@@ -348,7 +349,12 @@ class Handler(BaseHTTPRequestHandler):
         size = len(raw) // 4  # tokens, near enough to know what fits where
         chosen = pinned(asked)[0]
         if chosen and (why := pinned_refusal(chosen, size)):
-            return self.reply(429, {"error": {"message": f"{asked} can't answer: {why}.", "type": "rate_limit_error"}})
+            # Too big for that provider: a 413 "quota_exceeded", which nanobot doesn't retry (it never fits) and
+            # answers with the agent's fallback models. Its retry words (rate limit, 429, 5xx...) aren't in it.
+            # The other reasons pass in a while: a 429 it waits on.
+            big = "free plan takes about" in why
+            return self.reply(413 if big else 429, {"error": {"message": f"{asked} can't answer: {why}.",
+                                                              "type": "quota_exceeded" if big else "rate_limit_error"}})
         exact = chosen is not None
         if chosen and broken(chosen, pinned(asked)[1]):
             return self.broken_reply(asked)

@@ -112,7 +112,7 @@ def install() -> None:
         for schema in everything:
             name = _name(schema)
             if name in keep:
-                sent.append(schema)
+                sent.append(_shorten(schema) if name in _core() else schema)  # a loaded one comes whole
             else:
                 fn = schema.get("function") if isinstance(schema.get("function"), dict) else schema
                 listed.append(f"{name}: {_summary(fn.get('description', ''))}")
@@ -128,3 +128,23 @@ def install() -> None:
 
     ToolRegistry.get_definitions = get_definitions
     _installed = True
+    try:  # the skills list in the instructions: one line each (the agent reads a skill's whole file when it uses it)
+        from nanobot.agent.skills import SkillsLoader
+        whole_description = SkillsLoader.get_skill_description
+        SkillsLoader.get_skill_description = lambda self, name: _summary(whole_description(self, name))
+    except Exception as e:
+        print(f"nanoborealis lean: skills left as they are ({type(e).__name__})", file=sys.stderr)
+
+
+KEEP_WHOLE = {"apply_patch", "todo", "tools_load"}  # their descriptions are the instructions for using them
+SHORT = 400
+
+
+def _shorten(schema: dict) -> dict:
+    """A long description cut at the last sentence that fits SHORT characters; the parameters stay as they are."""
+    fn = schema.get("function") if isinstance(schema.get("function"), dict) else None
+    text = str((fn or {}).get("description") or "")
+    if not fn or fn.get("name") in KEEP_WHOLE or len(text) <= SHORT:
+        return schema
+    cut = max(text.rfind(". ", 0, SHORT), text.rfind(".\n", 0, SHORT))
+    return {**schema, "function": {**fn, "description": text[:cut + 1] if cut > 80 else text[:SHORT].rstrip() + "…"}}

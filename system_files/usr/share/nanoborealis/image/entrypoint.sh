@@ -75,6 +75,24 @@ if not d.get("_lean_skills"):
 EOF
 fi
 
+# nanobot's AGENTS.md starts with two long sections on reminders and HEARTBEAT.md (about 400 tokens in every
+# request) that say what the cron tool's own description says: one line each instead, once. The owner's own
+# sections are left as they are.
+agents="$state/workspace/AGENTS.md"
+if [ -f "$agents" ] && ! grep -q "nanoborealis: short scheduling" "$agents"; then
+    python3 - "$agents" <<'EOF' || true
+import re, sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+short = {"Scheduled Reminders": "- Reminders and scheduled jobs: load and use the `cron` tool (never only a note in memory).",
+         "Heartbeat Tasks": "- Periodic background checks that should only speak up when something changes: list them in "
+                            "`HEARTBEAT.md`, which the gateway's heartbeat job reads."}
+for title, line in short.items():
+    text = re.sub(rf"## {title}\n.*?(?=\n## |\Z)", f"## {title}\n\n{line}\n", text, count=1, flags=re.S)
+open(path, "w", encoding="utf-8").write(text.rstrip("\n") + "\n\n<!-- nanoborealis: short scheduling -->\n")
+EOF
+fi
+
 # The collective's shared knowledge base: one folder the owner's agent and every colony member read and write.
 if [ -d "$HOME/projects" ] && [ -w "$HOME/projects" ]; then
     mkdir -p "$HOME/projects/knowledge"
