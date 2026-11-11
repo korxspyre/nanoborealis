@@ -99,6 +99,32 @@ async def build(center: "ControlCenter") -> ft.Control:
             center.toast(str(e))
         await center.reload("providers")
 
+    center.app.router_tokenizes = bool(data.get("tokenize", True))
+
+    async def toggle_tokenize(event) -> None:
+        on = bool(event.control.value)
+        try:
+            await asyncio.to_thread(admin.provider_set, machine, "", "tokenize", on)
+        except PairingError as e:
+            center.toast(str(e))
+        else:
+            center.app.router_tokenizes = on
+            center.toast("Tokenizing is on: personal details stay on your computer." if on else
+                         "Tokenizing is off: what you and the crew write goes to the providers as it is.")
+        await center.reload("providers")
+
+    tokenize = t.card(ft.Row([
+        ft.Icon(ft.Icons.SHIELD_OUTLINED if data.get("tokenize", True) else ft.Icons.WARNING_AMBER_ROUNDED, size=20,
+                color=t.GOOD if data.get("tokenize", True) else t.WARN),
+        ft.Column([ft.Text("Tokenize what leaves this computer", size=15, weight=ft.FontWeight.W_600),
+                   t.muted("Before anything goes to a provider, personal details (emails, phone numbers, keys, card "
+                           "numbers, addresses) are swapped for placeholders, and swapped back in the answer. The "
+                           "mapping never leaves your NanoBorealis computer. Covers your agent and the whole crew, on "
+                           "every provider. Images can't be tokenized, so while it's on they aren't sent.", size=12.5)],
+                  spacing=4, expand=True),
+        ft.Switch(value=bool(data.get("tokenize", True)), active_color=t.ACCENT, on_change=toggle_tokenize)],
+        spacing=12))
+
     cards: list[ft.Control] = []
     total_left, with_keys = 0, 0
     for name, p in data["providers"].items():
@@ -152,4 +178,4 @@ async def build(center: "ControlCenter") -> ft.Control:
                            "other providers are their free plans. Turn off only if you want to pay for a model.", size=12.5)],
                   spacing=4, expand=True),
         ft.Switch(value=guard, active_color=t.ACCENT, disabled=settings is None, on_change=toggle_guard)]))
-    return center.frame(TITLE, SUBTITLE, [t.muted(summary, size=13), *cards, free])
+    return center.frame(TITLE, SUBTITLE, [t.muted(summary, size=13), tokenize, *cards, free])

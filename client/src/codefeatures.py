@@ -145,12 +145,15 @@ def privacy_label(provider: str, privacy_on: bool | None) -> tuple[str, str]:
     return ("cloud · not tokenized", "bad") if privacy_on is False else ("cloud · unknown", "warn")
 
 
-def privacy_from_settings(settings: dict) -> bool | None:
-    """Whether the agent's OpenRouter calls go through the tokenizing relay (`nanoborealis privacy on`), from the provider
-    list the agent reports: True when its address is the relay's, False when it isn't, None when it can't be told."""
+def privacy_from_settings(settings: dict, router_tokenizes: bool | None = None) -> bool | None:
+    """Whether what the agent sends the cloud is tokenized, from the provider list the agent reports: through the
+    router, whatever the router says (`router_tokenizes`, from Mission control, Providers; None if not known yet);
+    through the old relay, True; straight to OpenRouter, False; None when it can't be told."""
     for provider in (settings or {}).get("providers") or []:
         if isinstance(provider, dict) and (provider.get("name") or provider.get("provider")) == "openrouter":
             base = str(provider.get("api_base") or provider.get("apiBase") or "")
+            if ":11438" in base:
+                return router_tokenizes
             return "/src/openrouter/" in base if base or "api_base" in provider or "apiBase" in provider else False
     return None
 

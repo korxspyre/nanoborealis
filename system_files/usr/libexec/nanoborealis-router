@@ -15,6 +15,7 @@ OpenRouter is asked with max_price 0, and the others are their free plans.
     nanoborealis-router status             what each provider has left today, as JSON
     nanoborealis-router token              the token clients use (made on first use)
     nanoborealis-router models             every model each provider serves, as JSON
+    nanoborealis-router privacy on|off     tokenize what leaves this computer (on unless turned off)
 
 How it chooses, for each request:
   1. Providers that are on, have a key, aren't resting after a refusal, have requests left today and this minute,
@@ -31,7 +32,12 @@ Models: a request names a model the way OpenRouter does. OpenRouter gets it as i
 The others have a "smart" and a "fast" model each, picked from what the provider serves when its key is stored
 (or set by hand); a request for a small model (lightning, mini, flash, 8b...) gets the fast one.
 
-State (root only): /var/lib/nanoborealis/router/{providers.json, usage.json, token}.
+Tokenizing (on unless turned off): before a request leaves this computer, personal details in it (emails, phone
+numbers, keys, cards, addresses, the names on the owner's list) are swapped for placeholders, different ones for
+each provider, and swapped back in the answer, streamed or not (tokenizer.py). The mapping stays here. Images and
+other media can't be tokenized, so with it on they aren't sent. `nanoborealis-router privacy on|off`.
+
+State (root only): /var/lib/nanoborealis/router/{providers.json, usage.json, token, settings.json, vault/}.
 """
 
 from __future__ import annotations
@@ -47,6 +53,12 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+sys.path.insert(0, os.environ.get("NANOBOREALIS_SHARE", "/usr/share/nanoborealis"))
+try:
+    import tokenizer
+except ImportError:  # without it nothing may leave untokenized while tokenizing is on: such requests are refused
+    tokenizer = None
 
 STATE = Path(os.environ.get("NANOBOREALIS_ROUTER_STATE", "/var/lib/nanoborealis/router"))
 LISTEN = os.environ.get("NANOBOREALIS_ROUTER_LISTEN", "0.0.0.0:11438")
@@ -71,6 +83,24 @@ BUILT_IN = {
 SMALL = re.compile(r"lightning|mini|nano|flash|instant|small|-8b|-7b|-4b|note", re.I)
 SETTABLE = {"enabled", "daily", "per_minute", "max_request", "smart", "fast"}
 lock = threading.RLock()
+_vault = None
+
+
+def tokenizing() -> bool:
+    return read("settings.json").get("tokenize", True) is not False
+
+
+def vault():
+    """The placeholders and what they stand for, kept in the router's own state (root only). The owner's list of
+    names to protect: protect.json in that folder, or /etc/nanoborealis/protect.json."""
+    global _vault
+    with lock:
+        if _vault is None:
+            _vault = tokenizer.Vault(STATE / "vault")
+            extra = Path("/etc/nanoborealis/protect.json")
+            if extra.exists():
+                _vault.load_terms(extra)
+        return _vault
 
 
 def today() -> str:
@@ -220,7 +250,7 @@ def status() -> dict:
                          "tokens": day["tokens"], "refused": day["refused"], "per_minute": int(p.get("per_minute") or 0),
                          "max_request": int(p.get("max_request") or 0), "smart": p.get("smart") or "", "fast": p.get("fast") or "",
                          "resting": int(rest), "resting_why": why}
-    return {"providers": out, "day": today()}
+    return {"providers": out, "day": today(), "tokenize": tokenizing(), "tokenizer": tokenizer is not None}
 
 
 def refusal(status_code: int, text: str, headers) -> tuple[float, str]:
@@ -302,6 +332,17 @@ class Handler(BaseHTTPRequestHandler):
         # OpenRouter's own fields (provider routing, fallbacks) are refused by the others with a 400: only it gets them.
         own = {} if name == "openrouter" else {"provider", "models", "route", "transforms", "plugins", "usage"}
         out = {**{k: v for k, v in body.items() if k not in own}, **(provider.get("extra") or {}), "model": model}
+        protect = tokenizing()
+        if protect:
+            try:
+                if tokenizer is None:
+                    raise RuntimeError("the tokenizer isn't installed")
+                out = vault().protect_request(out, scope=name)  # each provider gets placeholders of its own
+            except Exception as error:  # an image, or no tokenizer: it doesn't leave this computer
+                message = str(error) if tokenizer and isinstance(error, tokenizer.Unprotectable) else f"Not sent: {error}"
+                self.reply(400, {"error": {"message": f"{message}. Tokenizing is on (Mission control, Providers).",
+                                           "type": "invalid_request_error"}})
+                return True
         request = urllib.request.Request(provider["url"] + "/chat/completions", data=json.dumps(out).encode(), method="POST",
                                          headers={"Authorization": f"Bearer {provider['key']}", "Content-Type": "application/json",
                                                   "Accept": "text/event-stream" if body.get("stream") else "application/json",
@@ -331,20 +372,40 @@ class Handler(BaseHTTPRequestHandler):
             print(f"nanoborealis-router: {name} didn't answer ({error}); trying the next", file=sys.stderr, flush=True)
             return False
         with response:
+            kind = response.headers.get("Content-Type") or "application/json"
             self.send_response(200)
-            self.send_header("Content-Type", response.headers.get("Content-Type") or "application/json")
+            self.send_header("Content-Type", kind)
             self.send_header("X-NanoBorealis-Provider", name)
+            self.send_header("X-NanoBorealis-Tokenized", "yes" if protect else "no")
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
             answered = 0
-            try:
-                while True:
-                    chunk = response.read1(65536)
-                    if not chunk:
-                        break
-                    answered += len(chunk)
-                    self.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+
+            def send(data: bytes) -> None:
+                if data:
+                    self.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n")
                     self.wfile.flush()
+            try:
+                if not protect:
+                    while True:
+                        chunk = response.read1(65536)
+                        if not chunk:
+                            break
+                        answered += len(chunk)
+                        send(chunk)
+                elif "event-stream" in kind:  # streamed: restored line by line, placeholders split across chunks too
+                    restorer = tokenizer.SSERestorer(vault())
+                    for raw in iter(response.readline, b""):
+                        answered += len(raw)
+                        send(b"".join(restorer.line(raw)))
+                else:
+                    whole = response.read()
+                    answered = len(whole)
+                    try:
+                        whole = json.dumps(vault().restore(json.loads(whole))).encode()
+                    except ValueError:
+                        whole = vault().detokenize(whole.decode(errors="replace")).encode()
+                    send(whole)
                 self.wfile.write(b"0\r\n\r\n")
             except OSError:
                 pass  # the client went away
@@ -452,6 +513,12 @@ def main(argv: list[str]) -> int:
         return 0
     if argv == ["status"]:
         print(json.dumps(status()))
+        return 0
+    if argv[:1] == ["privacy"] and len(argv) == 2 and argv[1] in ("on", "off"):
+        settings = read("settings.json")
+        settings["tokenize"] = argv[1] == "on"
+        write("settings.json", settings)
+        print(json.dumps({"tokenize": settings["tokenize"]}))
         return 0
     if argv == ["models"]:
         print(json.dumps({"models": all_models()}))

@@ -1327,6 +1327,11 @@ async def providers_key(data: dict, query: dict, owner: str, device_id: str) -> 
 
 async def providers_set(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
     name, field, value = data.get("provider"), data.get("field"), data.get("value")
+    if field == "tokenize":  # the router's own switch, for every provider
+        done = await router_run("privacy", "on" if value is not False else "off")
+        if done.returncode != 0:
+            return 400, {"error": f"Couldn't change it: {done.stderr.strip()[-200:]}"}
+        return 200, {"set": field}
     if name not in ROUTER_PROVIDERS or field not in ("enabled", "daily", "per_minute", "max_request", "smart", "fast"):
         return 400, {"error": "That isn't a setting of a provider."}
     text = ("true" if value else "false") if isinstance(value, bool) else str(value)[:200]

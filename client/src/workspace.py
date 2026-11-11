@@ -1846,7 +1846,7 @@ class Workspace:
                 model=self.model_id or "", provider=codefeatures.provider_of(self.settings, self.model_id),
                 used=self.context_used, window=self.context_window, added=self.lines_added, removed=self.lines_removed,
                 branch=await self.git_branch(), plan=self.plan_mode,
-                privacy_on=codefeatures.privacy_from_settings(self.settings) if self.settings else None,
+                privacy_on=codefeatures.privacy_from_settings(self.settings, getattr(self.app, "router_tokenizes", None)) if self.settings else None,
                 crew=codefeatures.crew_summary(colony.seats, self.head_id) if colony is not None and colony.seats else "")
             self.status_bar_holder.content = codeui.status_bar(segments)
             self.status_bar_holder.update()
@@ -1906,8 +1906,8 @@ class Workspace:
             await self.open_panel("changes")
         elif name == "/privacy":
             words, _tone = codefeatures.privacy_label(codefeatures.provider_of(self.settings, self.model_id),
-                                                      codefeatures.privacy_from_settings(self.settings) if self.settings else None)
-            self.toast(f"This chat's model: {words}. Turn tokenizing on for the cloud with: nanoborealis privacy on")
+                                                      codefeatures.privacy_from_settings(self.settings, getattr(self.app, "router_tokenizes", None)) if self.settings else None)
+            self.toast(f"This chat's model: {words}. Tokenizing is switched in Mission control, Providers.")
         elif name == "/memory":
             await self.show_section("memory")
         elif name == "/agents":

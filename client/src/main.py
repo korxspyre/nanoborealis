@@ -636,6 +636,8 @@ class NanoBorealisApp:
         self.link = link
         self.catalog.router_source = lambda m=machine: admin.provider_models(m)  # NIM's and Groq's models too
         self.catalog.fetched = 0.0
+        self.router_tokenizes = None  # whether the router tokenizes, for the chat's footer: asked now, kept by Providers
+        self.page.run_task(self.ask_router_privacy, machine)
         self.was_up = False
         self.show_chat()
         self.page.run_task(self.keep_linked, link)
@@ -643,6 +645,12 @@ class NanoBorealisApp:
             self.page.run_task(self.resume_sharing_on_start)
         self.hands.stop()  # another computer, perhaps: its own questions, and lend to it if you were lending
         self.page.run_task(self.hands.resume)
+
+    async def ask_router_privacy(self, machine) -> None:
+        try:
+            self.router_tokenizes = bool((await asyncio.to_thread(admin.providers, machine)).get("tokenize", True))
+        except Exception:  # an older computer, or away: the footer says it can't tell
+            self.router_tokenizes = None
 
     async def keep_linked(self, link: AgentLink) -> None:
         try:
