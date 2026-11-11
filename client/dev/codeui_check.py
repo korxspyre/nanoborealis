@@ -52,7 +52,6 @@ space.composer_view()
 check(isinstance(space.plan_chip, ft.Container) and isinstance(space.status_bar_holder, ft.Container) and isinstance(space.crew_holder, ft.Container),
       "the composer has a Plan chip, a status bar and a crew strip")
 check(any(c == "/rewind" for c, _ in space.all_commands()) and any(c == "/plan" for c, _ in space.all_commands()), "the app's commands are in the / palette")
-import asyncio
 asyncio.run(space.set_agent_mode("plan"))
 check(space.plan_mode and space.agent_mode == "plan", "Plan is the chat's mode: the mode chip turns it on")
 asyncio.run(space.set_agent_mode(getattr(space, "mode_before_plan", "auto")))
