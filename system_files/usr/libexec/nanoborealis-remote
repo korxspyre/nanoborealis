@@ -707,7 +707,7 @@ async def local(method: str, target: str, headers: list[tuple[str, str]], reader
                                          "machine": MACHINE})
     if path.startswith("/nanoborealis/agent-hands"):
         return await agent_hands(method, target, headers, reader, writer)  # with its query: the mode is per chat
-    if (method, path) in ADMIN_ROUTES or (path.startswith(HALL_PREFIX) and method in ("GET", "POST", "DELETE")):
+    if (method, path) in ADMIN_ROUTES or (path.startswith(COLONY_PREFIX) and method in ("GET", "POST", "DELETE")):
         return await admin(method, target, headers, reader, writer, address)
     owner = None
     device_id = None
@@ -1108,22 +1108,22 @@ async def agent_usage(data: dict, query: dict, owner: str, device_id: str) -> tu
     return 200, answer
 
 
-HALL_STATE = Path(os.environ.get("NANOBOREALIS_REMOTE_HALL_STATE", "/var/lib/nanoborealis/hall"))
-HALL_URL = os.environ.get("NANOBOREALIS_REMOTE_HALL_URL", "http://127.0.0.1:11437")
+COLONY_STATE = Path(os.environ.get("NANOBOREALIS_REMOTE_COLONY_STATE", "/var/lib/nanoborealis/colony"))
+COLONY_URL = os.environ.get("NANOBOREALIS_REMOTE_COLONY_URL", "http://127.0.0.1:11437")
 
 
-HALL_PREFIX = "/nanoborealis/hall/"
+COLONY_PREFIX = "/nanoborealis/colony/"
 
 
-def hall_proxy(method: str, path: str, query_string: str, body: dict | None) -> tuple[int, dict]:
-    """The council's Hall, for the app on an administrator's device: it speaks there as "you"."""
+def colony_proxy(method: str, path: str, query_string: str, body: dict | None) -> tuple[int, dict]:
+    """The colony, for the app on an administrator's device: it speaks there as "you"."""
     import urllib.error
     import urllib.request
     try:
-        token = (HALL_STATE / "admin.token").read_text().strip()
+        token = (COLONY_STATE / "admin.token").read_text().strip()
     except OSError:
         return 404, {"error": "This computer has no rig yet. Bring one up from the app, or with: nanoborealis rig up"}
-    url = HALL_URL + path + (f"?{query_string}" if query_string else "")
+    url = COLONY_URL + path + (f"?{query_string}" if query_string else "")
     request = urllib.request.Request(url, method=method, data=json.dumps(body).encode() if body is not None else None,
                                      headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
     try:
@@ -1138,19 +1138,19 @@ def hall_proxy(method: str, path: str, query_string: str, body: dict | None) -> 
         return 503, {"error": "The colony isn't running. Start it from Mission control, Crew."}
 
 
-def hall_key(key: str) -> None:
-    """The council's Hall asks free models with the same key when it escalates; keep its copy current."""
+def colony_key(key: str) -> None:
+    """The colony asks free models with the same key when it escalates; keep its copy current."""
     import urllib.request
     try:
-        token = (HALL_STATE / "admin.token").read_text().strip()
+        token = (COLONY_STATE / "admin.token").read_text().strip()
     except OSError:
         return  # no council on this computer
-    request = urllib.request.Request(f"{HALL_URL}/escalation-key", data=json.dumps({"key": key}).encode(), method="POST",
+    request = urllib.request.Request(f"{COLONY_URL}/escalation-key", data=json.dumps({"key": key}).encode(), method="POST",
                                      headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
     try:
         urllib.request.urlopen(request, timeout=10).close()
     except OSError as e:
-        log(f"couldn't give the council's Hall the new key: {e}")
+        log(f"couldn't give the colony the new key: {e}")
 
 
 RIG_SPECS = Path(os.environ.get("NANOBOREALIS_REMOTE_RIG_SPECS", "/usr/share/nanoborealis/rigs"))
@@ -1167,9 +1167,9 @@ def rig_specs() -> list[dict]:
 
 
 async def rigs_overview(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
-    """Whether the Hall is running, its rigs, and the rigs that ship with the OS."""
-    status, rigs = await asyncio.to_thread(hall_proxy, "GET", "/rigs", "", None)
-    return 200, {"hall": status == 200, "rigs": rigs.get("rigs", []) if status == 200 else [],
+    """Whether the colony is running, its rigs, and the rigs that ship with the OS."""
+    status, rigs = await asyncio.to_thread(colony_proxy, "GET", "/rigs", "", None)
+    return 200, {"colony": status == 200, "rigs": rigs.get("rigs", []) if status == 200 else [],
                  "specs": rig_specs(), "problem": "" if status == 200 else rigs.get("error", "")}
 
 
@@ -1261,9 +1261,9 @@ async def router_adopt() -> bool:
 async def crew_to_router() -> list[str]:
     """The crew's containers are built to ask OpenRouter or the router: write and restart them, now on the router."""
     moved = []
-    status, rigs = await asyncio.to_thread(hall_proxy, "GET", "/rigs", "", None)
+    status, rigs = await asyncio.to_thread(colony_proxy, "GET", "/rigs", "", None)
     for rig in (rigs.get("rigs", []) if status == 200 else []):
-        status, again = await asyncio.to_thread(hall_proxy, "POST", f"/rigs/{rig['name']}/redeploy", "", {})
+        status, again = await asyncio.to_thread(colony_proxy, "POST", f"/rigs/{rig['name']}/redeploy", "", {})
         if status == 200:
             await rig_deploy(again)
             moved.append(rig["name"])
@@ -1343,8 +1343,8 @@ async def providers_set(data: dict, query: dict, owner: str, device_id: str) -> 
 
 async def rigs_up(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
     """Bring up a rig, from a spec that ships with the OS (`name`) or one written in the app (`spec`, TOML).
-    Starts the Hall first when it isn't running, and hands it the agent's OpenRouter key: a rig's cloud seats
-    are free OpenRouter models the Hall asks itself, so no pool is needed."""
+    Starts the colony first when it isn't running, and hands it the agent's OpenRouter key: a rig's cloud seats
+    are free OpenRouter models the colony asks itself, so no pool is needed."""
     if isinstance(data.get("spec"), str) and data["spec"].strip():
         spec = data["spec"][:200_000]
     else:
@@ -1352,21 +1352,21 @@ async def rigs_up(data: dict, query: dict, owner: str, device_id: str) -> tuple[
         if chosen is None:
             return 404, {"error": "There's no rig by that name on this computer."}
         spec = Path(chosen["file"]).read_text(encoding="utf-8")
-    if (await asyncio.to_thread(hall_proxy, "GET", "/rigs", "", None))[0] != 200:
-        started = await asyncio.to_thread(subprocess.run, as_root("systemctl", "enable", "--now", "nanoborealis-hall.service"),
+    if (await asyncio.to_thread(colony_proxy, "GET", "/rigs", "", None))[0] != 200:
+        started = await asyncio.to_thread(subprocess.run, as_root("systemctl", "enable", "--now", "nanoborealis-colony.service"),
                                           capture_output=True, text=True, timeout=60)
         if started.returncode != 0:
             return 502, {"error": f"The colony wouldn't start: {started.stderr.strip()[-300:]}"}
         await asyncio.to_thread(subprocess.run, as_root("systemctl", "restart", "nanoborealis-firewall.service"),
                                 capture_output=True, timeout=60)
         for _ in range(30):
-            if (await asyncio.to_thread(hall_proxy, "GET", "/rigs", "", None))[0] == 200:
+            if (await asyncio.to_thread(colony_proxy, "GET", "/rigs", "", None))[0] == 200:
                 break
             await asyncio.sleep(1)
     key = await asyncio.to_thread(agent_podman, "secret", "inspect", "--showsecret", "--format", "{{.SecretData}}", KEY_SECRET)
     if key.returncode == 0 and key.stdout.strip():
-        await asyncio.to_thread(hall_key, key.stdout.strip())
-    status, answer = await asyncio.to_thread(hall_proxy, "POST", "/rigs", "", {"spec": spec, "dry_run": bool(data.get("dry_run"))})
+        await asyncio.to_thread(colony_key, key.stdout.strip())
+    status, answer = await asyncio.to_thread(colony_proxy, "POST", "/rigs", "", {"spec": spec, "dry_run": bool(data.get("dry_run"))})
     if status == 200:
         answer.pop("tokens", None)  # outside seats' tokens are handed out on the computer itself, never over the network
         await rig_deploy(answer)
@@ -1407,7 +1407,7 @@ async def set_agent_key(data: dict, query: dict, owner: str, device_id: str) -> 
             return 502, {"error": f"Couldn't save the key: {result.stderr.strip()[:200]}"}
     _usage = None
     log(f"{owner} gave the agent a new OpenRouter key")
-    await asyncio.to_thread(hall_key, key.strip())
+    await asyncio.to_thread(colony_key, key.strip())
     if TEST_AGENT_HOME is None:
         await asyncio.to_thread(relay_key, key.strip())
     await restart_agent()
@@ -2166,11 +2166,11 @@ async def agent_hands(method: str, path: str, headers: list[tuple[str, str]], re
     if route == "/nanoborealis/agent-hands/crew" and method == "GET":
         query = {k: v[-1] for k, v in urllib.parse.parse_qs(query_string).items()}
         if query.get("what") == "inbox":  # mail the crew sent the owner's agent
-            status, payload = await asyncio.to_thread(hall_proxy, "GET", "/inbox", "seat=agent", None)
+            status, payload = await asyncio.to_thread(colony_proxy, "GET", "/inbox", "seat=agent", None)
             return await reply(writer, status, payload)
         if query.get("what") == "members":  # who is in the colony, and what each is doing right now
-            status, seats = await asyncio.to_thread(hall_proxy, "GET", "/seats", "", None)
-            _s, now = await asyncio.to_thread(hall_proxy, "GET", "/activity", f"since={time.time():.0f}", None)
+            status, seats = await asyncio.to_thread(colony_proxy, "GET", "/seats", "", None)
+            _s, now = await asyncio.to_thread(colony_proxy, "GET", "/activity", f"since={time.time():.0f}", None)
             busy = {b["seat"]: b for b in (now.get("busy") or [])} if _s == 200 else {}
             members = [{"id": s["id"], "name": s.get("address") or s["name"], "role": s.get("role") or "",
                         "group": s.get("pod") or "", "model": s.get("model"), "trust": s.get("trust"),
@@ -2179,7 +2179,7 @@ async def agent_hands(method: str, path: str, headers: list[tuple[str, str]], re
                        for s in (seats.get("seats") or []) if not s.get("chair")] if status == 200 else []
             return await reply(writer, status, {"members": members} if status == 200 else seats)
         path = f"/tasks/{int(query['task'])}" if str(query.get("task") or "").isdigit() else "/tasks"
-        status, payload = await asyncio.to_thread(hall_proxy, "GET", path, "", None)
+        status, payload = await asyncio.to_thread(colony_proxy, "GET", path, "", None)
         if status == 200 and "tasks" in payload:
             payload = {"tasks": [x for x in payload["tasks"] if x.get("state") in ("open", "claimed", "review")][:30]}
         return await reply(writer, status, payload)
@@ -2198,9 +2198,9 @@ async def agent_hands(method: str, path: str, headers: list[tuple[str, str]], re
     if route == "/nanoborealis/agent-hands/ask":
         status, payload = await agent_ask(data)
     elif route == "/nanoborealis/agent-hands/crew" and isinstance(data.get("done"), int):  # crew_inbox: dealt with
-        status, payload = await asyncio.to_thread(hall_proxy, "POST", f"/inbox/{data['done']}/ack", "", {"state": "done"})
+        status, payload = await asyncio.to_thread(colony_proxy, "POST", f"/inbox/{data['done']}/ack", "", {"state": "done"})
     elif route == "/nanoborealis/agent-hands/crew" and data.get("to"):  # crew_send: mail a member, or everyone
-        status, payload = await asyncio.to_thread(hall_proxy, "POST", "/inbox", "", {
+        status, payload = await asyncio.to_thread(colony_proxy, "POST", "/inbox", "", {
             "from": "agent", "to": str(data["to"])[:100], "text": str(data.get("text") or "")[:8000],
             "kind": "reply" if isinstance(data.get("reply_to"), int) else "message",
             **({"reply_to": data["reply_to"]} if isinstance(data.get("reply_to"), int) else {})})
@@ -2208,7 +2208,7 @@ async def agent_hands(method: str, path: str, headers: list[tuple[str, str]], re
         title = str(data.get("title") or "").strip()[:200]
         if not title:
             return await reply(writer, 400, {"error": "Give the task a title."})
-        status, payload = await asyncio.to_thread(hall_proxy, "POST", "/tasks", "", {
+        status, payload = await asyncio.to_thread(colony_proxy, "POST", "/tasks", "", {
             "title": title, "detail": ("From your agent. " + str(data.get("detail") or ""))[:8000]})
         if status != 200 and "error" in payload:
             payload["error"] = f"The colony isn't running: {payload['error']}" if status >= 500 else payload["error"]
@@ -2308,7 +2308,7 @@ async def admin(method: str, target: str, headers: list[tuple[str, str]], reader
         if (method, path) in ADMIN_ROUTES:
             status, payload = await ADMIN_ROUTES[(method, path)](data, query, owner, device_id)
         else:
-            status, payload = await asyncio.to_thread(hall_proxy, method, path[len(HALL_PREFIX) - 1:], query_string,
+            status, payload = await asyncio.to_thread(colony_proxy, method, path[len(COLONY_PREFIX) - 1:], query_string,
                                                       data if method == "POST" else None)
             if isinstance(payload, dict) and payload.get("deploy"):  # a rig went down or came back: its agent seats too
                 payload.pop("tokens", None)

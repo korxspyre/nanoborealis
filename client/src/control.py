@@ -1163,7 +1163,7 @@ class ControlCenter:
 
     async def rig_down(self, name: str) -> None:
         try:
-            await asyncio.to_thread(admin.hall, self.app.machine, "DELETE", f"/rigs/{name}")
+            await asyncio.to_thread(admin.colony, self.app.machine, "DELETE", f"/rigs/{name}")
         except PairingError as e:
             self.toast(str(e))
         else:
@@ -1171,7 +1171,7 @@ class ControlCenter:
         await self.reload("colony")
 
     def write_rig(self) -> None:
-        """A rig written in the app: TOML, checked by the Hall before anything is made (the plan comes first)."""
+        """A rig written in the app: TOML, checked by the colony before anything is made (the plan comes first)."""
         box = ft.TextField(multiline=True, min_lines=14, max_lines=22, text_style=ft.TextStyle(font_family=t.MONO, size=12.5),
                            value='[rig]\nname = "my-colony"\nculture = "We stay on the request and check each other\'s work."\n\n'
                                  '[[seat]]\nid = "builder"\nkind = "cloud"\nmodel = "cohere/north-mini-code:free"\n\n'
@@ -1211,16 +1211,16 @@ class ControlCenter:
             t.primary_button("Start", on_click=lambda _e, n=s["name"]: self.page.run_task(self.rig_up, n)),
         ], spacing=12)) for s in overview["specs"] if s["name"] not in {r["name"] for r in overview["rigs"]}]
         write = t.outline_button("Write a colony", icon=ft.Icons.EDIT_NOTE_ROUNDED, on_click=lambda _e: self.write_rig())
-        if not overview["hall"]:
+        if not overview["colony"]:
             return self.frame(title, subtitle, [
                 t.card(ft.Column([ft.Text("No colony on this computer yet", size=15, weight=ft.FontWeight.W_600),
                                   t.muted("Start one: it needs no GPU. Its crew run on free OpenRouter models, "
                                           "asked through the privacy filter with your agent's OpenRouter key.")], spacing=6)),
                 *starters], actions=[write])
         try:
-            seats, settings = await asyncio.gather(asyncio.to_thread(admin.hall, self.app.machine, "GET", "/seats"),
-                                                   asyncio.to_thread(admin.hall, self.app.machine, "GET", "/settings"))
-            rigs_detail = await asyncio.gather(*(asyncio.to_thread(admin.hall, self.app.machine, "GET", f"/rigs/{r['name']}")
+            seats, settings = await asyncio.gather(asyncio.to_thread(admin.colony, self.app.machine, "GET", "/seats"),
+                                                   asyncio.to_thread(admin.colony, self.app.machine, "GET", "/settings"))
+            rigs_detail = await asyncio.gather(*(asyncio.to_thread(admin.colony, self.app.machine, "GET", f"/rigs/{r['name']}")
                                                  for r in overview["rigs"]))
         except PairingError as e:
             return self.frame(title, subtitle, [t.card(t.muted(str(e)))])
@@ -1287,7 +1287,7 @@ class ControlCenter:
 
         async def change(changes: dict[str, Any], message: str) -> None:
             try:
-                await asyncio.to_thread(admin.hall, self.app.machine, "POST", "/settings", changes)
+                await asyncio.to_thread(admin.colony, self.app.machine, "POST", "/settings", changes)
             except PairingError as e:
                 self.toast(str(e))
             else:

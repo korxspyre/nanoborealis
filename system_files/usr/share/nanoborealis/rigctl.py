@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (C) 2026 korxspyre
-"""`nanoborealis rig`: teams of seats as a file, their mail, the head agent, snapshots. Talks to the Hall as the owner.
+"""`nanoborealis rig`: teams of seats as a file, their mail, the head agent, snapshots. Talks to the colony as the owner.
 
     rigctl.py up <spec.toml> [--plan]     make the rig the file describes (--plan only says what it would do)
     rigctl.py ps [name]                   the rigs, or one rig's seats, who is here, and mail waiting
@@ -13,8 +13,8 @@
     rigctl.py task <title> [-- detail]    put work on the board; the rig's seats claim, do and review it
     rigctl.py board [task id]             the board, or one task with its notes and result
 
-The Hall's URL and the admin token: NANOBOREALIS_HALL_URL (default http://127.0.0.1:11437) and
-NANOBOREALIS_HALL_ADMIN_TOKEN_FILE (default /var/lib/nanoborealis/hall/admin.token). Tokens of outside seats made new are
+The colony's URL and the admin token: NANOBOREALIS_COLONY_URL (default http://127.0.0.1:11437) and
+NANOBOREALIS_COLONY_ADMIN_TOKEN_FILE (default /var/lib/nanoborealis/colony/admin.token). Tokens of outside seats made new are
 kept root-only in NANOBOREALIS_SEATS_DIR (default /etc/nanoborealis/seats), never printed.
 """
 
@@ -27,25 +27,25 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-URL = os.environ.get("NANOBOREALIS_HALL_URL", "http://127.0.0.1:11437").rstrip("/")
-TOKEN_FILE = Path(os.environ.get("NANOBOREALIS_HALL_ADMIN_TOKEN_FILE", "/var/lib/nanoborealis/hall/admin.token"))
+URL = os.environ.get("NANOBOREALIS_COLONY_URL", "http://127.0.0.1:11437").rstrip("/")
+TOKEN_FILE = Path(os.environ.get("NANOBOREALIS_COLONY_ADMIN_TOKEN_FILE", "/var/lib/nanoborealis/colony/admin.token"))
 SEATS_DIR = Path(os.environ.get("NANOBOREALIS_SEATS_DIR", "/etc/nanoborealis/seats"))
 
 
-def hall(method: str, path: str, body: dict | None = None):
+def colony(method: str, path: str, body: dict | None = None):
     try:
         token = TOKEN_FILE.read_text().strip()
     except OSError:
-        sys.exit(f"can't read the Hall's admin token ({TOKEN_FILE}): run this with sudo, on the computer that hosts the council")
+        sys.exit(f"can't read the colony's admin token ({TOKEN_FILE}): run this with sudo, on the computer that hosts the council")
     request = urllib.request.Request(URL + path, data=json.dumps(body).encode() if body else None, method=method,
                                      headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
             return json.loads(response.read())
     except urllib.error.HTTPError as error:
-        sys.exit(f"the Hall said {error.code}: {json.loads(error.read() or b'{}').get('error', '')}")
+        sys.exit(f"the colony said {error.code}: {json.loads(error.read() or b'{}').get('error', '')}")
     except urllib.error.URLError as error:
-        sys.exit(f"the Hall didn't answer ({error.reason}): start a rig with: nanoborealis rig up <spec.toml>")
+        sys.exit(f"the colony didn't answer ({error.reason}): start a rig with: nanoborealis rig up <spec.toml>")
 
 
 def keep_tokens(tokens: dict) -> list[str]:
@@ -85,7 +85,7 @@ def main(argv: list[str]) -> None:
     action, args = argv[0], argv[1:]
     if action == "up" and args:
         spec = Path(args[0]).read_text(encoding="utf-8")
-        answer = hall("POST", "/rigs", {"spec": spec, "dry_run": "--plan" in args})
+        answer = colony("POST", "/rigs", {"spec": spec, "dry_run": "--plan" in args})
         plan = answer["plan"]
         print(("Plan for " if answer.get("dry_run") else "Rig ") + answer["rig"] + ":")
         for key in ("create", "update", "keep", "remove"):
@@ -98,7 +98,7 @@ def main(argv: list[str]) -> None:
             print("Seats the pool runs need their agent started: nanoborealis council apply")
     elif action == "ps":
         if args:
-            rig = hall("GET", f"/rigs/{args[0]}")
+            rig = colony("GET", f"/rigs/{args[0]}")
             print(f"{rig['name']}: {rig['culture'] or '(no culture written)'}")
             for seat in rig["seats"]:
                 here = "here" if seat["here"] else "away"
@@ -108,14 +108,14 @@ def main(argv: list[str]) -> None:
             for edge in rig["edges"]:
                 print(f"  {edge['src']} {edge['kind']} {edge['dst']}")
         else:
-            rigs = hall("GET", "/rigs")["rigs"]
+            rigs = colony("GET", "/rigs")["rigs"]
             print("\n".join(f"  {r['name']}: {r['seats']} seat(s)" for r in rigs) or "No rigs. Make one with: nanoborealis rig up spec.toml")
     elif action == "down" and args:
-        answer = hall("DELETE", f"/rigs/{args[0]}", {"snapshot": False} if "--no-snapshot" in args else {})
+        answer = colony("DELETE", f"/rigs/{args[0]}", {"snapshot": False} if "--no-snapshot" in args else {})
         deploy(answer)
         print(f"{args[0]} is down" + (f" (snapshot {answer['snapshot']}; bring it back with: rig restore {args[0]})" if answer["snapshot"] else ""))
     elif action == "snapshot" and args:
-        answer = hall("POST", f"/rigs/{args[0]}/snapshot", {"label": " ".join(args[1:])})
+        answer = colony("POST", f"/rigs/{args[0]}/snapshot", {"label": " ".join(args[1:])})
         print(f"snapshot {answer['id']}: {answer['seats']} seat(s), {answer['tasks']} task(s) and {answer['mail']} piece(s) of mail in flight")
     elif action == "restore" and args:
         body: dict = {}
@@ -128,7 +128,7 @@ def main(argv: list[str]) -> None:
             body["models"] = [m.id for m in loadout.models_from_list(pool.call("GET", "/models"))]
         except Exception:
             pass
-        answer = hall("POST", f"/rigs/{args[0]}/restore", body)
+        answer = colony("POST", f"/rigs/{args[0]}/restore", body)
         print(f"Restored {args[0]} from snapshot {answer['snapshot']}:")
         show_outcomes(answer["outcomes"])
         deploy(answer)
@@ -137,34 +137,34 @@ def main(argv: list[str]) -> None:
         if answer["tasks_reopened"]:
             print(f"  back on the board: task(s) {', '.join(map(str, answer['tasks_reopened']))}")
     elif action == "send" and len(args) >= 2:
-        answer = hall("POST", "/inbox", {"to": args[0], "text": " ".join(args[1:])})
+        answer = colony("POST", "/inbox", {"to": args[0], "text": " ".join(args[1:])})
         print(f"sent to {', '.join(answer['to'])}")
     elif action == "inbox":
         seat = args[0] if args and not args[0].startswith("--") else None
         state = args[args.index("--state") + 1] if "--state" in args else None
-        mail = hall("GET", "/inbox" + "?" + "&".join(x for x in ((f"seat={seat}" if seat else ""), (f"state={state}" if state else "")) if x))["mail"]
+        mail = colony("GET", "/inbox" + "?" + "&".join(x for x in ((f"seat={seat}" if seat else ""), (f"state={state}" if state else "")) if x))["mail"]
         for m in mail:
             print(f"  [{m['id']}] {m['state']:<9} {m['kind']:<8} from {m['sender']}: {m['text'][:100]}")
         if not mail:
             print("  no mail")
     elif action == "task" and args:
         title, _, detail = " ".join(args).partition(" -- ")
-        answer = hall("POST", "/tasks", {"title": title.strip(), "detail": detail.strip()})
+        answer = colony("POST", "/tasks", {"title": title.strip(), "detail": detail.strip()})
         print(f"task {answer['id']} is on the board; follow it with: nanoborealis rig board {answer['id']}")
     elif action == "board":
         if args:
-            task = hall("GET", f"/tasks/{args[0]}")
+            task = colony("GET", f"/tasks/{args[0]}")
             print(f"[{task['id']}] {task['state']}: {task['title']}" + (f" (by {task['claimed_by']})" if task.get("claimed_by") else ""))
             for note in task.get("notes", []):
                 print(f"  {note['author']} {note['kind']}: {note['text'][:300]}")
             if task.get("result"):
                 print("\n" + task["result"])
         else:
-            tasks = hall("GET", "/tasks")["tasks"]
+            tasks = colony("GET", "/tasks")["tasks"]
             print("\n".join(f"  [{t['id']}] {t['state']:<8} {t['title'][:70]}" + (f"  ({t['claimed_by']})" if t.get("claimed_by") else "")
                             for t in tasks) or "  the board is empty")
     elif action == "head":
-        answer = hall("GET", "/head")
+        answer = colony("GET", "/head")
         print(f"Head agent: {answer['head']} ({answer['reason']})")
         for entry in answer["line"]:
             print(f"  #{entry['rank']} {entry['seat']}: {entry['state']}")

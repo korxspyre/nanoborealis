@@ -10,7 +10,7 @@
 # Root loads this at boot, so the agent, which has no root on the host, can't undo it.
 # If this computer is in a pool, the agent may also use the pool relay (`nanoborealis pool`),
 # which offers chat only; the pool node's own API (no password) stays out of its reach.
-# If it has a council (`nanoborealis council`), its seats may reach the Hall, which needs a token.
+# If it has a council (`nanoborealis council`), its seats may reach the colony, which needs a token.
 set -euo pipefail
 
 if ! uid="$(id -u nanobot-agent 2>/dev/null)"; then
@@ -26,7 +26,7 @@ fi
 council_rules=""
 if [ -f /etc/nanoborealis/council.env ]; then
     council_rules="        meta skuid $uid fib daddr type local tcp dport 11437 accept"
-    echo "council: the agent's seats may use this computer's Hall (port 11437)"
+    echo "council: the agent's seats may use this computer's Colony (port 11437)"
 fi
 router_rules=""
 if [ -f /var/lib/nanoborealis/router/token ]; then
@@ -73,7 +73,7 @@ $lan_rules
         type filter hook input priority filter; policy accept;
         # The pool relay is for this computer's agent only.
         iifname != "lo" tcp dport 11436 counter drop
-        # So is the Hall: only this computer's seats and services.
+        # So is the colony: only this computer's seats and services.
         iifname != "lo" tcp dport 11437 counter drop
         # And the inference router: it holds the owner's provider keys.
         iifname != "lo" tcp dport 11438 counter drop

@@ -33,7 +33,7 @@ Usage: $(basename "$0") <command>
   pool ...          pool this computer with others on your network to run models none could alone:
                     join [--private NAME] [--cpu], serve MODEL, stop MODEL, status, logs, leave; and a
                     council of models at once: nodes, plan, apply, drain, undrain, bench, scores, policy
-  council ...       seat a council on the pool's loadout, one agent per model, meeting in the Hall:
+  council ...       seat a council on the pool's loadout, one agent per model, meeting in the colony:
                     apply, status, bench (the council's own benchmarks), seat ID [capability],
                     autonomy on-task|continuous, escalation on|off, remove
   rig ...           teams of agents as a file: up SPEC.toml [--plan], ps [NAME], down NAME, snapshot NAME,
@@ -457,19 +457,19 @@ confirm() {
     [ "$reply" = "yes" ]
 }
 
-hall() { sudo python3 /usr/share/nanoborealis/council.py hall "$@"; }
-hall_key() {  # the agent's OpenRouter key to the Hall: escalation and cloud seats ask free models with it
+colony() { sudo python3 /usr/share/nanoborealis/council.py colony "$@"; }
+colony_key() {  # the agent's OpenRouter key to the colony: escalation and cloud seats ask free models with it
     as_agent podman secret inspect --showsecret --format '{{.SecretData}}' openrouter_api_key 2>/dev/null \
         | python3 -c 'import json, sys; print(json.dumps({"key": sys.stdin.read().strip()}))' \
-        | { read -r body; hall POST /escalation-key "$body" >/dev/null 2>&1 \
-            || echo "note: no OpenRouter key for the Hall yet; set one in the app's settings"; }
+        | { read -r body; colony POST /escalation-key "$body" >/dev/null 2>&1 \
+            || echo "note: no OpenRouter key for the colony yet; set one in the app's settings"; }
 }
 
 case "$cmd" in
     council)
         # The council (docs/rigs/README.md): one seat per model of the pool's loadout, each its own
-        # agent with its own memory, meeting the others in the Hall. The agent you already have is the
-        # chair. Seats reach their models through the pool relay, and the Hall with a token of their own.
+        # agent with its own memory, meeting the others in the colony. The agent you already have is the
+        # chair. Seats reach their models through the pool relay, and the colony with a token of their own.
         me="$(basename "$0")"
         council_dir="$AGENT_HOME/council"
         qdir="$AGENT_HOME/.config/containers/systemd"
@@ -484,7 +484,7 @@ for s in json.load(sys.stdin): print(s["id"])' 2>/dev/null || true; }
                 "model": "an outside agent", "family": "outside", "capability": float(sys.argv[3]), "external": True, "rotate": True}
                 | ({"head_rank": int(sys.argv[4])} if len(sys.argv) > 4 else {})))' "$1" "$2" "$3" ${4:+"$4"})" || return 1
             sudo install -d -m 0700 /etc/nanoborealis/seats
-            hall POST /seats "$body" | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])' \
+            colony POST /seats "$body" | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])' \
                 | sudo sh -c "umask 077 && cat > /etc/nanoborealis/seats/$1.token"
         }
         case "${2:-status}" in
@@ -500,12 +500,12 @@ for s in json.load(sys.stdin): print(s["id"])' 2>/dev/null || true; }
                 count="$(python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))))' "$tmp/seats.json")"
                 [ "$count" -gt 0 ] || { echo "The pool's loadout has no models, so there's no one to seat. See: $me pool plan" >&2; exit 1; }
 
-                # The Hall, and the firewall opening that lets seats (and only they) reach it.
+                # The colony, and the firewall opening that lets seats (and only they) reach it.
                 sudo install -d -m 0755 /etc/nanoborealis
                 sudo sh -c 'umask 022 && echo "# written by nanoborealis council apply" > /etc/nanoborealis/council.env'
-                sudo systemctl enable --now --quiet nanoborealis-hall.service
+                sudo systemctl enable --now --quiet nanoborealis-colony.service
                 sudo systemctl restart nanoborealis-firewall.service
-                for _ in $(seq 1 30); do hall GET /me >/dev/null 2>&1 && break; sleep 1; done
+                for _ in $(seq 1 30); do colony GET /me >/dev/null 2>&1 && break; sleep 1; done
                 sudo sed -n 's/^NANOBOREALIS_RELAY_TOKEN=//p' /etc/nanoborealis/pool.env | secret pool_relay_token
 
                 # Seats that left the loadout: their containers go, their homes (memory) stay.
@@ -514,7 +514,7 @@ for s in json.load(sys.stdin): print(s["id"])' 2>/dev/null || true; }
                     case " $keep " in *" $old "*) continue ;; esac
                     agentctl stop "seat-$old.service" 2>/dev/null || true
                     sudo rm -f "$qdir/seat-$old.container"
-                    hall DELETE "/seats/$old" >/dev/null 2>&1 || true
+                    colony DELETE "/seats/$old" >/dev/null 2>&1 || true
                     echo "unseated $old (its memory stays, for if its model comes back)"
                 done
 
@@ -524,10 +524,10 @@ for s in json.load(sys.stdin): print(s["id"])' 2>/dev/null || true; }
                     fields="$(python3 -c 'import json, sys
 s = next(s for s in json.load(open(sys.argv[1])) if s["id"] == sys.argv[2])
 print(json.dumps({k: s[k] for k in ("id", "name", "model", "family", "capability", "port")} | {"rotate": True}))' "$tmp/seats.json" "$id")"
-                    # A fresh Hall token and API key on every apply, straight into the seat's secrets.
-                    hall POST /seats "$fields" > "$tmp/seat.json"
+                    # A fresh Colony token and API key on every apply, straight into the seat's secrets.
+                    colony POST /seats "$fields" > "$tmp/seat.json"
                     python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["token"], end="")' "$tmp/seat.json" \
-                        | secret "seat-$id-hall"
+                        | secret "seat-$id-colony"
                     python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["api_key"], end="")' "$tmp/seat.json" \
                         | secret "seat-$id-api"
                     rm -f "$tmp/seat.json"
@@ -536,20 +536,20 @@ print(json.dumps({k: s[k] for k in ("id", "name", "model", "family", "capability
                     echo "seated $id"
                 done
 
-                hall_key
+                colony_key
 
-                # The chair: the agent you already talk to, with its own place in the Hall.
-                hall POST /seats '{"id": "chair", "name": "Chair", "model": "your agent'"'"'s own models", "chair": true, "capability": 50, "rotate": true}' \
-                    | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"], end="")' | secret chair-hall
+                # The chair: the agent you already talk to, with its own place in the colony.
+                colony POST /seats '{"id": "chair", "name": "Chair", "model": "your agent'"'"'s own models", "chair": true, "capability": 50, "rotate": true}' \
+                    | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"], end="")' | secret chair-colony
                 sudo install -d -o "$AGENT_USER" -g "$AGENT_USER" "$qdir/nanobot.container.d"
                 printf '%s\n' "# The chair's place in the council (nanoborealis council apply)." "[Container]" \
-                    "Environment=NANOBOREALIS_HALL_URL=http://host.containers.internal:11437" \
-                    "Secret=chair-hall,type=env,target=NANOBOREALIS_HALL_TOKEN" \
+                    "Environment=NANOBOREALIS_COLONY_URL=http://host.containers.internal:11437" \
+                    "Secret=chair-colony,type=env,target=NANOBOREALIS_COLONY_TOKEN" \
                     | sudo -u "$AGENT_USER" tee "$qdir/nanobot.container.d/council.conf" >/dev/null
 
-                # Claude's seat: an outside seat, for Claude Code to join over the Hall's API. It is only made
+                # Claude's seat: an outside seat, for Claude Code to join over the colony's API. It is only made
                 # if it isn't there; its token is kept (root-only) for you to hand to Claude, see: council seat.
-                if ! hall GET /seats | python3 -c 'import json, sys; sys.exit(0 if any(s["id"] == "claude" for s in json.load(sys.stdin)["seats"]) else 1)'; then
+                if ! colony GET /seats | python3 -c 'import json, sys; sys.exit(0 if any(s["id"] == "claude" for s in json.load(sys.stdin)["seats"]) else 1)'; then
                     outside_seat claude Claude 50 1 >/dev/null && echo "seated claude: an outside seat, first in line to be the head agent while it is here (its token is in /etc/nanoborealis/seats/claude.token)"
                 fi
 
@@ -559,40 +559,40 @@ print(json.dumps({k: s[k] for k in ("id", "name", "model", "family", "capability
                 echo "The council has $count seat(s), the chair and Claude's outside seat. Talk to it from the app, or see: $me council status" ;;
             bench)
                 # NanoBench: the council's own tests, run on each seat's model through the pool and graded by code.
-                # The results go to the Hall as the benchmark part of trust, and into what every seat is told.
+                # The results go to the colony as the benchmark part of trust, and into what every seat is told.
                 echo "Benchmarking each seat's model on the pool; the pool is busy meanwhile. (--n sets items per area, default 6.)"
                 sudo python3 /usr/share/nanoborealis/nanobench.py seats "${@:3}" ;;
             seat)
-                # An outside seat: an agent that isn't run by the pool but joins over the Hall's API, as Claude
-                # Code does. It sees the Hall tokenized (personal details swapped for placeholders), a vote doesn't
+                # An outside seat: an agent that isn't run by the pool but joins over the colony's API, as Claude
+                # Code does. It sees the colony tokenized (personal details swapped for placeholders), a vote doesn't
                 # wait for it, and its weight is the capability you give it times the trust it earns.
                 [[ "${3:-}" =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]] || { echo "usage: $me council seat <id> [capability 0-100]   (new token each time)" >&2; exit 2; }
                 outside_seat "$3" "$(python3 -c 'import sys; print(sys.argv[1].title())' "$3")" "${4:-50}" \
-                    && echo "Seat $3 made. Its token is in /etc/nanoborealis/seats/$3.token (root only). To join: set NANOBOREALIS_HALL_URL and" \
-                            "NANOBOREALIS_HALL_TOKEN, then: python3 /usr/share/nanoborealis/hallseat.py me" ;;
+                    && echo "Seat $3 made. Its token is in /etc/nanoborealis/seats/$3.token (root only). To join: set NANOBOREALIS_COLONY_URL and" \
+                            "NANOBOREALIS_COLONY_TOKEN, then: python3 /usr/share/nanoborealis/colonyseat.py me" ;;
             status)
-                if ! systemctl is-active --quiet nanoborealis-hall.service; then
+                if ! systemctl is-active --quiet nanoborealis-colony.service; then
                     echo "No council yet. Seat one on the pool's loadout with: $me council apply"
                     exit 0
                 fi
-                hall GET /seats | python3 -c 'import json, sys
+                colony GET /seats | python3 -c 'import json, sys
 for s in json.load(sys.stdin)["seats"]:
     print("  %-28s %-30s trust %-5s weight %s" % (s["name"], s["id"], s["trust"], s["weight"]))'
                 for id in $(seat_ids); do
                     printf '  seat-%s: %s\n' "$id" "$(agentctl is-active "seat-$id.service" 2>/dev/null || true)"
                 done
-                hall GET /settings | python3 -c 'import json, sys; s = json.load(sys.stdin)
+                colony GET /settings | python3 -c 'import json, sys; s = json.load(sys.stdin)
 escalation = "on, to " + s["escalation_model"] if s["escalation"] else "off"
 print("Autonomy: %s. Escalation: %s." % (s["autonomy"], escalation))' ;;
             autonomy)
                 case "${3:-}" in
-                    on-task|continuous) hall POST /settings "{\"autonomy\": \"$3\"}" >/dev/null && echo "Autonomy: $3" ;;
+                    on-task|continuous) colony POST /settings "{\"autonomy\": \"$3\"}" >/dev/null && echo "Autonomy: $3" ;;
                     *) echo "usage: $me council autonomy on-task|continuous" >&2; exit 2 ;;
                 esac ;;
             escalation)
                 case "${3:-}" in
-                    on) hall POST /settings '{"escalation": true}' >/dev/null && echo "Escalation is on (free models only)." ;;
-                    off) hall POST /settings '{"escalation": false}' >/dev/null && echo "Escalation is off." ;;
+                    on) colony POST /settings '{"escalation": true}' >/dev/null && echo "Escalation is on (free models only)." ;;
+                    off) colony POST /settings '{"escalation": false}' >/dev/null && echo "Escalation is off." ;;
                     *) echo "usage: $me council escalation on|off" >&2; exit 2 ;;
                 esac ;;
             remove)
@@ -603,26 +603,26 @@ print("Autonomy: %s. Escalation: %s." % (s["autonomy"], escalation))' ;;
                 sudo rm -f "$qdir/nanobot.container.d/council.conf"
                 agentctl daemon-reload
                 agentctl restart nanobot.service
-                sudo systemctl disable --now --quiet nanoborealis-hall.service
+                sudo systemctl disable --now --quiet nanoborealis-colony.service
                 sudo rm -f /etc/nanoborealis/council.env
                 sudo systemctl restart nanoborealis-firewall.service
-                echo "The council is dismissed. The seats' memories and the Hall's history stay, for next time." ;;
+                echo "The council is dismissed. The seats' memories and the colony's history stay, for next time." ;;
             *)
                 echo "usage: $me council apply | status | bench [--n N] | seat <id> [capability] | autonomy on-task|continuous | escalation on|off | remove" >&2
                 exit 2 ;;
         esac ;;
     rig)
         # Teams of agents as a file (docs/rigs/README.md): up, ps, down, snapshot, restore, send, inbox, head.
-        # A rig needs no pool: its cloud seats are free OpenRouter models the Hall asks itself, so `rig up` starts
-        # the Hall and hands it the agent's OpenRouter key when they aren't there yet.
+        # A rig needs no pool: its cloud seats are free OpenRouter models the colony asks itself, so `rig up` starts
+        # the colony and hands it the agent's OpenRouter key when they aren't there yet.
         case "${2:-}" in
             up|restore)
-                if ! systemctl is-active --quiet nanoborealis-hall.service; then
-                    sudo systemctl enable --now --quiet nanoborealis-hall.service
+                if ! systemctl is-active --quiet nanoborealis-colony.service; then
+                    sudo systemctl enable --now --quiet nanoborealis-colony.service
                     sudo systemctl restart nanoborealis-firewall.service
-                    for _ in $(seq 1 30); do hall GET /me >/dev/null 2>&1 && break; sleep 1; done
+                    for _ in $(seq 1 30); do colony GET /me >/dev/null 2>&1 && break; sleep 1; done
                 fi
-                hall_key ;;
+                colony_key ;;
         esac
         sudo python3 /usr/share/nanoborealis/rigctl.py "${@:2}" ;;
     lan)

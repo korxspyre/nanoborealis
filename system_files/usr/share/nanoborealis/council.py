@@ -4,13 +4,13 @@
 
 A seat is one model of the pool's loadout, run as its own nanobot agent: its own container, home
 and memory, its model reached through the pool relay, and the council's tools switched on by its
-Hall token. This file works out which seats there should be and writes each one's files; the
-`nanoborealis council` command does the system side (the Hall, secrets, containers).
+Colony token. This file works out which seats there should be and writes each one's files; the
+`nanoborealis council` command does the system side (the colony, secrets, containers).
 
     python3 council.py seats <plan.json> <seats.json>   the seats the loadout calls for, as JSON
     python3 council.py files <seats.json> <seat-id> <dir>   write a seat's config.json, AGENTS.md
                                                             and its Quadlet unit into <dir>
-    python3 council.py hall <METHOD> <path> [<json>]   (as root) one call to the Hall, as admin
+    python3 council.py colony <METHOD> <path> [<json>]   (as root) one call to the colony, as admin
 """
 
 from __future__ import annotations
@@ -21,10 +21,10 @@ import sys
 from pathlib import Path
 
 RELAY = "http://host.containers.internal:11436/v1"
-HALL = "http://host.containers.internal:11437"  # the Hall, as seats in their containers reach it
-HALL_LOCAL = "http://127.0.0.1:11437"
-HALL_STATE = "/var/lib/nanoborealis/hall"
-FIRST_PORT = 8770  # seat n's API on this computer's loopback, where the Hall reaches it: 8770 + n
+COLONY = "http://host.containers.internal:11437"  # the colony, as seats in their containers reach it
+COLONY_LOCAL = "http://127.0.0.1:11437"
+COLONY_STATE = "/var/lib/nanoborealis/colony"
+FIRST_PORT = 8770  # seat n's API on this computer's loopback, where the colony reaches it: 8770 + n
 SEAT_API_PORT = 8900  # nanobot serve's port inside the seat's container
 MAX_SEATS = 16
 IMAGE = "localhost/nanoborealis-agent:latest"
@@ -70,8 +70,8 @@ def desired(plan: dict, existing: list[dict]) -> list[dict]:
 
 def config(seat: dict) -> dict:
     """The seat's nanobot config: its one model through the pool relay. A seat has no cloud models
-    and no OpenRouter key; asking the cloud is the council's escalation, through the Hall. It runs
-    `nanobot serve`, so the Hall is its only way in: the owner reaches it through the Hall too."""
+    and no OpenRouter key; asking the cloud is the council's escalation, through the colony. It runs
+    `nanobot serve`, so the colony is its only way in: the owner reaches it through the colony too."""
     return {
         "providers": {"pool": {"apiBase": RELAY, "apiKey": "${NANOBOREALIS_RELAY_TOKEN}"}},
         "modelPresets": {"seat": {"provider": "pool", "model": seat["model"], "maxTokens": 4096,
@@ -79,7 +79,7 @@ def config(seat: dict) -> dict:
         "agents": {"defaults": {"modelPreset": "seat", "model": seat["model"], "provider": "pool",
                                 "fallbackModels": []}},
         "tools": {"exec": {"timeout": 600}},
-        # The Hall talks to the seat through nanobot's OpenAI-style API, one session per room.
+        # The colony talks to the seat through nanobot's OpenAI-style API, one session per room.
         "api": {"host": "0.0.0.0", "port": SEAT_API_PORT, "timeout": 1800.0, "apiKey": "${NANOBOREALIS_SEAT_API_KEY}"},
     }
 
@@ -90,10 +90,10 @@ def agents_md(seat: dict) -> str:
 You are one of several AI models running on the owner's own computers. Together you are the
 council. Each seat is its own agent, with its own memory. You run {seat['model']}.
 
-You meet the other seats in the **Hall**, through your council tools:
-- `hall_read` shows who is on the council, the rooms, open tasks, and votes waiting for you.
+You meet the other seats in the **Colony**, through your council tools:
+- `colony_read` shows who is on the council, the rooms, open tasks, and votes waiting for you.
   With a room, it shows that room's messages.
-- `hall_post` speaks in a room under your nametape. Speak when you add something new: a fact, a
+- `colony_post` speaks in a room under your nametape. Speak when you add something new: a fact, a
   correction, a better idea, a concern. Otherwise pass (`pass: true`). Don't repeat others.
 - The task board: `task_list`, `task_claim`, `task_update`, `task_submit`, `task_review`. Claim
   only what you can do well. Review others' work honestly: accepted work earns its author trust,
@@ -103,7 +103,7 @@ You meet the other seats in the **Hall**, through your council tools:
 - `escalate`: when the council is stuck or split, ask for outside advice from a free cloud model.
   Its answer is advice, not a vote.
 
-The owner can talk to you directly, or to the whole council in the Hall. Be direct and concise:
+The owner can talk to you directly, or to the whole council in the colony. Be direct and concise:
 other seats read what you write, and every word costs the pool time.
 """
 
@@ -125,8 +125,8 @@ Volume=%h/council/{seat['id']}:/opt/nanoborealis-seat:ro,Z
 UserNS=keep-id:uid=1000,gid=1000
 PublishPort=127.0.0.1:{seat['port']}:{SEAT_API_PORT}
 Environment=NANOBOREALIS_SEAT={seat['id']}
-Environment=NANOBOREALIS_HALL_URL={HALL}
-Secret=seat-{seat['id']}-hall,type=env,target=NANOBOREALIS_HALL_TOKEN
+Environment=NANOBOREALIS_COLONY_URL={COLONY}
+Secret=seat-{seat['id']}-colony,type=env,target=NANOBOREALIS_COLONY_TOKEN
 Secret=seat-{seat['id']}-api,type=env,target=NANOBOREALIS_SEAT_API_KEY
 Secret=pool_relay_token,type=env,target=NANOBOREALIS_RELAY_TOKEN
 
@@ -155,20 +155,20 @@ def main(argv: list[str]) -> None:
         except (OSError, ValueError):
             existing = []
         print(json.dumps(desired(plan, existing), indent=2))
-    elif len(argv) in (3, 4) and argv[0] == "hall":  # as root: one call to the Hall with the admin token
+    elif len(argv) in (3, 4) and argv[0] == "colony":  # as root: one call to the colony with the admin token
         import urllib.error
         import urllib.request
-        token = Path(HALL_STATE, "admin.token").read_text().strip()
+        token = Path(COLONY_STATE, "admin.token").read_text().strip()
         body = argv[3].encode() if len(argv) == 4 else None
-        request = urllib.request.Request(HALL_LOCAL + argv[2], data=body, method=argv[1],
+        request = urllib.request.Request(COLONY_LOCAL + argv[2], data=body, method=argv[1],
                                          headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 print(response.read().decode())
         except urllib.error.HTTPError as error:
-            sys.exit(f"the Hall said: {error.read().decode(errors='replace')}")
+            sys.exit(f"the colony said: {error.read().decode(errors='replace')}")
         except urllib.error.URLError as error:
-            sys.exit(f"the Hall didn't answer: {error.reason}")
+            sys.exit(f"the colony didn't answer: {error.reason}")
     elif len(argv) == 4 and argv[0] == "files":
         seats = json.loads(Path(argv[1]).read_text(encoding="utf-8"))
         seat = next((s for s in seats if s["id"] == argv[2]), None)

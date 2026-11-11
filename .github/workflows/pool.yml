@@ -20,7 +20,7 @@ on:
       - 'system_files/usr/share/nanoborealis/tokenizer.py'
       - 'system_files/usr/share/nanoborealis/sources.py'
       - 'system_files/usr/share/nanoborealis/mixer.py'
-      - 'system_files/usr/share/nanoborealis/hallseat.py'
+      - 'system_files/usr/share/nanoborealis/colonyseat.py'
       - 'system_files/usr/share/nanoborealis/privacy.py'
       - 'system_files/usr/share/nanoborealis/nanobench.py'
       - 'system_files/usr/share/nanoborealis/rigs.py'
@@ -33,7 +33,7 @@ on:
       - 'tests/orchestrator_check.py'
       - 'tests/mixer_check.py'
       - 'system_files/usr/libexec/nanoborealis-relay'
-      - 'system_files/usr/libexec/nanoborealis-hall'
+      - 'system_files/usr/libexec/nanoborealis-colony'
       - 'tests/tokenizer_check.py'
   workflow_dispatch:
     inputs:
@@ -90,7 +90,7 @@ jobs:
       - name: Rigs
         run: python3 tests/rigs_check.py
 
-      # Cloud seats: a rig of free OpenRouter models the Hall asks itself, so a rig runs without a pool.
+      # Cloud seats: a rig of free OpenRouter models the colony asks itself, so a rig runs without a pool.
       - name: Cloud seats
         run: python3 tests/cloud_seats_check.py
 
@@ -102,8 +102,8 @@ jobs:
       - name: Privacy routing
         run: python3 tests/privacy_check.py
 
-      - name: The council's Hall
-        run: python3 tests/hall_check.py
+      - name: The colony
+        run: python3 tests/colony_check.py
 
       - name: The council's seats
         run: python3 tests/council_seats_check.py

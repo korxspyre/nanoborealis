@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (C) 2026 korxspyre
-"""Checks the Hall's orchestrator end to end: the real Hall, two stand-in seats that answer on their
-API the way nanobot serve does (and use the Hall's API the way their council tools would), and a
+"""Checks the colony's orchestrator end to end: the real Colony, two stand-in seats that answer on their
+API the way nanobot serve does (and use the colony's API the way their council tools would), and a
 stand-in OpenRouter for escalation.
 
     python3 tests/orchestrator_check.py
@@ -52,41 +52,41 @@ def call(base: str, token: str, method: str, path: str, body: dict | None = None
 
 
 class Seat:
-    """A stand-in seat: `a` is keen and capable, `b` is a strict reviewer who passes in the Hall."""
+    """A stand-in seat: `a` is keen and capable, `b` is a strict reviewer who passes in the colony."""
 
-    def __init__(self, name: str, hall: str):
-        self.name, self.hall, self.token, self.api_key = name, hall, "", ""
+    def __init__(self, name: str, colony: str):
+        self.name, self.colony, self.token, self.api_key = name, colony, "", ""
         self.port = free_port()
 
-    def hall_call(self, method: str, path: str, body: dict | None = None) -> dict:
-        return call(self.hall, self.token, method, path, body)[1]
+    def colony_call(self, method: str, path: str, body: dict | None = None) -> dict:
+        return call(self.colony, self.token, method, path, body)[1]
 
     def turn(self, session: str, prompt: str) -> str:
         CALLS.append((self.name, session, prompt))
         if session.startswith("direct-"):
             return f"direct: {prompt}"
-        if session.startswith("hall-"):
+        if session.startswith("colony-"):
             return "I'd use SQLite." if self.name == "a" else "PASS"
         if match := re.search(r"Task (\d+) is open", prompt):
             if self.name != "a":
                 return "PASS"
             task = int(match.group(1))
-            self.hall_call("POST", f"/tasks/{task}/claim")
-            self.hall_call("POST", f"/tasks/{task}/submit", {"result": "done by a"})
+            self.colony_call("POST", f"/tasks/{task}/claim")
+            self.colony_call("POST", f"/tasks/{task}/submit", {"result": "done by a"})
             return "claimed and handed in"
         if match := re.search(r"handed in task (\d+) \(([^)]*)\)", prompt):
             hard = "hard" in match.group(2)
-            self.hall_call("POST", f"/tasks/{match.group(1)}/review",
+            self.colony_call("POST", f"/tasks/{match.group(1)}/review",
                            {"verdict": "reject", "text": "not good enough"} if hard else {"verdict": "accept"})
             return "reviewed"
         if match := re.search(r"Your work on task (\d+) was sent back", prompt):
-            self.hall_call("POST", f"/tasks/{match.group(1)}/submit", {"result": "tried again"})
+            self.colony_call("POST", f"/tasks/{match.group(1)}/submit", {"result": "tried again"})
             return "resubmitted"
         if "Mail from" in prompt:
             return f"{self.name} read the mail"
         if match := re.search(r"\(vote (\d+)\).*\nOptions: (.*)\n", prompt):
             options = match.group(2).split(" / ")
-            self.hall_call("POST", f"/votes/{match.group(1)}/ballot",
+            self.colony_call("POST", f"/votes/{match.group(1)}/ballot",
                            {"choice": options[0] if self.name == "a" else options[1], "reason": "because"})
             return "voted"
         return "PASS"
@@ -151,11 +151,11 @@ def main() -> None:
         port, advisor_port = free_port(), free_port()
         base = f"http://127.0.0.1:{port}"
         openrouter(advisor_port)
-        env = {**os.environ, "NANOBOREALIS_HALL_STATE": tmp, "NANOBOREALIS_HALL_LISTEN": f"127.0.0.1:{port}",
-               "NANOBOREALIS_HALL_OPENROUTER_URL": f"http://127.0.0.1:{advisor_port}/api/v1/chat/completions",
-               "NANOBOREALIS_HALL_SEAT_TIMEOUT": "30",
+        env = {**os.environ, "NANOBOREALIS_COLONY_STATE": tmp, "NANOBOREALIS_COLONY_LISTEN": f"127.0.0.1:{port}",
+               "NANOBOREALIS_COLONY_OPENROUTER_URL": f"http://127.0.0.1:{advisor_port}/api/v1/chat/completions",
+               "NANOBOREALIS_COLONY_SEAT_TIMEOUT": "30",
                "NANOBOREALIS_TOOLS": str(ROOT / "system_files/usr/share/nanoborealis")}
-        hall = subprocess.Popen([sys.executable, str(ROOT / "system_files/usr/libexec/nanoborealis-hall")], env=env)
+        colony = subprocess.Popen([sys.executable, str(ROOT / "system_files/usr/libexec/nanoborealis-colony")], env=env)
         try:
             def listening() -> bool:
                 try:
@@ -166,8 +166,8 @@ def main() -> None:
             until(listening, 10)
             run(base, Path(tmp, "admin.token").read_text().strip())
         finally:
-            hall.terminate()
-            hall.wait(10)
+            colony.terminate()
+            colony.wait(10)
     if FAILED:
         sys.exit(1)
     print("all orchestrator checks passed")
@@ -184,7 +184,7 @@ def run(base: str, admin_token: str) -> None:
         seat.token, seat.api_key = made["token"], made.get("api_key", "")
         seat.serve()
     check(bool(a.api_key) and "api_key" not in admin("GET", "/seats")["seats"][0],
-          "a seat with an API gets the Hall's key to it, shown once")
+          "a seat with an API gets the colony's key to it, shown once")
     kept = admin("POST", "/seats", {"id": "b", "name": "B", "model": "m/b", "capability": 40})
     check(kept["port"] == b.port, "updating a seat without its port keeps the port")
     admin("POST", "/seats", {"id": "chair", "name": "Chair", "model": "cloud", "chair": True})
@@ -194,9 +194,9 @@ def run(base: str, admin_token: str) -> None:
     said = until(lambda: [m for m in admin("GET", f"/rooms/{room}/messages")["messages"] if m["author"] in ("a", "b")]
                  if len(admin("GET", f"/rooms/{room}/messages")["messages"]) >= 3 else None)
     check(said is not None and [(m["author"], m["kind"]) for m in said] == [("a", "say"), ("b", "pass")],
-          "Hall chat: every seat answers in turn, weightiest first, and a seat can pass")
-    check(not any(c[0] == "chair" for c in CALLS), "...the chair (no API) isn't asked through the Hall")
-    first = next(c for c in CALLS if c[0] == "b" and c[1] == f"hall-{room}")
+          "Colony chat: every seat answers in turn, weightiest first, and a seat can pass")
+    check(not any(c[0] == "chair" for c in CALLS), "...the chair (no API) isn't asked through the colony")
+    first = next(c for c in CALLS if c[0] == "b" and c[1] == f"colony-{room}")
     check("I'd use SQLite." in first[2], "...and each seat sees what the seats before it said")
 
     direct = admin("POST", "/rooms", {"title": "Just b", "kind": "direct", "seat": "b"})["id"]
@@ -261,7 +261,7 @@ def run(base: str, admin_token: str) -> None:
           "...all of them free, with a price limit of 0")
     check(not any(secret in json.dumps(r) for r in ADVICE[asked:]) and any("<<EMAIL_" in json.dumps(r) for r in ADVICE[asked:]),
           "...and none of them was sent the email address, only a placeholder for it")
-    check(posted is not None and secret in posted["text"], "...while the advice posted to the Hall has the real address back in it")
+    check(posted is not None and secret in posted["text"], "...while the advice posted to the colony has the real address back in it")
     reviews = [r for r in ADVICE[asked:] if r["messages"][0]["content"].startswith("You review")]
     check(bool(reviews) and "You advise" not in json.dumps(reviews[0]["messages"][1:]),
           "...a model of another make reviews the combined answer, seeing only the question and the answer")
@@ -273,7 +273,7 @@ def run(base: str, admin_token: str) -> None:
     time.sleep(1)
     check(len(ADVICE) == asked + 1, "with escalation_mix off, one model is asked, as before")
 
-    # Claude's outside seat: it joins over the API, sees the Hall tokenized, and nothing waits for it.
+    # Claude's outside seat: it joins over the API, sees the colony tokenized, and nothing waits for it.
     made = admin("POST", "/seats", {"id": "claude", "name": "Claude", "model": "an outside agent", "family": "outside",
                                     "capability": 50, "external": True})
     me = lambda method, path, body=None: call(base, made["token"], method, path, body)  # noqa: E731
@@ -284,12 +284,12 @@ def run(base: str, admin_token: str) -> None:
     seen = [m for m in me("GET", f"/rooms/{room}/messages")[1]["messages"] if "figures" in m["text"]]
     holder = re.search(r"<<EMAIL_[0-9a-f]{10,16}>>", seen[0]["text"]) if seen else None
     check(seen and mail not in json.dumps(me("GET", f"/rooms/{room}/messages")[1]) and holder is not None,
-          "the outside seat reads the Hall with the email address swapped for a placeholder")
+          "the outside seat reads the colony with the email address swapped for a placeholder")
     me("POST", f"/rooms/{room}/messages", {"text": f"Agreed: write to {holder.group(0)} today."})
     spoke = next((m for m in admin("GET", f"/rooms/{room}/messages")["messages"] if m["author"] == "claude"), None)
     check(spoke is not None and mail in spoke["text"], "...and what it writes back with the placeholder reaches the council with the real address")
     check(me("GET", "/rooms")[1] and not any(mail in json.dumps(r) for r in me("GET", "/tasks")[1]["tasks"]),
-          "...in every part of the Hall, tasks included")
+          "...in every part of the colony, tasks included")
 
     vote = admin("POST", "/votes", {"question": "Ship it?", "options": ["yes", "no"]})["id"]
     until(lambda: admin("GET", f"/votes/{vote}")["closed"])
@@ -335,8 +335,8 @@ def run(base: str, admin_token: str) -> None:
           "...a weak result over enough items lowers it")
 
     admin("POST", f"/rooms/{room}/messages", {"text": "Which of us should take the next build?"})
-    until(lambda: any(c[0] == "b" and c[1] == f"hall-{room}" and "scorecard" in c[2] for c in CALLS[-6:]))
-    told = next((c[2] for c in reversed(CALLS) if c[0] == "b" and c[1] == f"hall-{room}"), "")
+    until(lambda: any(c[0] == "b" and c[1] == f"colony-{room}" and "scorecard" in c[2] for c in CALLS[-6:]))
+    told = next((c[2] for c in reversed(CALLS) if c[0] == "b" and c[1] == f"colony-{room}"), "")
     check("scorecard" in told and "- a: reasoning" in told and "tools 100" in told and "- b: reasoning" in told,
           "every seat is told the council's scorecard before it speaks, so it can weigh the others' words")
     spoken = [m for m in admin("GET", f"/rooms/{room}/messages")["messages"] if m["author"] == "a"]
@@ -345,11 +345,11 @@ def run(base: str, admin_token: str) -> None:
     outside = [m for m in me("GET", f"/rooms/{room}/messages")[1]["messages"] if m["author"] == "a"]
     check(outside and "benchmark" in outside[-1]["card"], "...an outside seat sees them too")
 
-    shown = subprocess.run([sys.executable, str(ROOT / "system_files/usr/share/nanoborealis/hallseat.py"), "read", str(room)],
-                           capture_output=True, text=True, env={**os.environ, "NANOBOREALIS_HALL_URL": base,
-                                                                "NANOBOREALIS_HALL_TOKEN": made["token"]})
+    shown = subprocess.run([sys.executable, str(ROOT / "system_files/usr/share/nanoborealis/colonyseat.py"), "read", str(room)],
+                           capture_output=True, text=True, env={**os.environ, "NANOBOREALIS_COLONY_URL": base,
+                                                                "NANOBOREALIS_COLONY_TOKEN": made["token"]})
     check(shown.returncode == 0 and "<<EMAIL_" in shown.stdout and mail not in shown.stdout,
-          "the hallseat client reads the Hall as an outside seat, tokenized")
+          "the colonyseat client reads the colony as an outside seat, tokenized")
 
 
 if __name__ == "__main__":

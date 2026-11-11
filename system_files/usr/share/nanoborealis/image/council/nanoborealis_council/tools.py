@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (C) 2026 korxspyre
-"""The council's tools. Each talks to the Hall as this seat, with the seat's own token, and returns
+"""The council's tools. Each talks to the colony as this seat, with the seat's own token, and returns
 short plain text the model can read. They're only enabled in a seat: an agent without
-NANOBOREALIS_HALL_URL and NANOBOREALIS_HALL_TOKEN (today's single agent) doesn't get them.
+NANOBOREALIS_COLONY_URL and NANOBOREALIS_COLONY_TOKEN (today's single agent) doesn't get them.
 """
 
 from __future__ import annotations
@@ -20,13 +20,13 @@ TIMEOUT = 30
 SHOWN = 30  # most messages, tasks or votes one call shows
 
 
-class HallError(Exception):
+class ColonyError(Exception):
     pass
 
 
-def hall_call(method: str, path: str, body: dict | None = None) -> Any:
-    url = os.environ.get("NANOBOREALIS_HALL_URL", "").rstrip("/")
-    token = os.environ.get("NANOBOREALIS_HALL_TOKEN", "")
+def colony_call(method: str, path: str, body: dict | None = None) -> Any:
+    url = os.environ.get("NANOBOREALIS_COLONY_URL", "").rstrip("/")
+    token = os.environ.get("NANOBOREALIS_COLONY_TOKEN", "")
     request = urllib.request.Request(url + path, method=method,
                                      data=json.dumps(body).encode() if body is not None else None,
                                      headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
@@ -38,9 +38,9 @@ def hall_call(method: str, path: str, body: dict | None = None) -> Any:
             message = json.loads(error.read()).get("error")
         except ValueError:
             message = None
-        raise HallError(message or f"the colony answered HTTP {error.code}") from None
+        raise ColonyError(message or f"the colony answered HTTP {error.code}") from None
     except (urllib.error.URLError, OSError) as error:
-        raise HallError(f"the colony didn't answer ({getattr(error, 'reason', error)})") from None
+        raise ColonyError(f"the colony didn't answer ({getattr(error, 'reason', error)})") from None
 
 
 def clip(value: str, limit: int = 600) -> str:
@@ -88,15 +88,15 @@ class CouncilTool(Tool):
 
     @classmethod
     def enabled(cls, ctx: Any) -> bool:
-        return bool(os.environ.get("NANOBOREALIS_HALL_URL") and os.environ.get("NANOBOREALIS_HALL_TOKEN"))
+        return bool(os.environ.get("NANOBOREALIS_COLONY_URL") and os.environ.get("NANOBOREALIS_COLONY_TOKEN"))
 
     async def call(self, method: str, path: str, body: dict | None = None) -> Any:
-        return await asyncio.to_thread(hall_call, method, path, body)
+        return await asyncio.to_thread(colony_call, method, path, body)
 
     async def execute(self, **kwargs: Any) -> Any:
         try:
             return await self.run(**kwargs)
-        except HallError as error:
+        except ColonyError as error:
             return ToolResult.error(str(error))
 
     async def run(self, **kwargs: Any) -> str:
@@ -111,8 +111,8 @@ ROOM = {"type": "integer", "description": "The room's number."}
 TASK = {"type": "integer", "description": "The task's number."}
 
 
-class HallRead(CouncilTool):
-    name = "hall_read"
+class ColonyRead(CouncilTool):
+    name = "colony_read"
     description = ("Read the colony. Without a room: who is in the colony, the rooms, open tasks, and votes "
                    "waiting for you. With a room: its messages (only newer than `after`, if given).")
     parameters = schema({"room": ROOM, "after": {"type": "integer", "description": "Only messages after this id."}})
@@ -137,8 +137,8 @@ class HallRead(CouncilTool):
         return "\n".join(lines)
 
 
-class HallPost(CouncilTool):
-    name = "hall_post"
+class ColonyPost(CouncilTool):
+    name = "colony_post"
     description = ("Speak in a colony chat, under your nametape. Say something only when it adds to what's been said; "
                    "otherwise pass.")
     parameters = schema({"room": ROOM, "text": {"type": "string", "description": "What you say."},
@@ -254,7 +254,7 @@ from . import gate as _gate  # noqa: E402
 _gate.install()
 
 
-# -- The rig: OpenRig's agent tools (rig_ps, rig_send, rig_inbox), on the Hall --------------------------------
+# -- The rig: OpenRig's agent tools (rig_ps, rig_send, rig_inbox), on the colony --------------------------------
 
 
 class RigPs(CouncilTool):

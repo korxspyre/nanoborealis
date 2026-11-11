@@ -123,5 +123,16 @@ if [ -f /etc/fstab ] && [ -L /home ] && grep -Eq '^[^#[:space:]]+[[:space:]]+/ho
     log "fstab: the home subvolume is mounted at /var/home, where /home points"
 fi
 
+# The colony's service was nanoborealis-hall: its state folder moves, and if it was switched on, the new one is.
+if [ -d /var/lib/nanoborealis/hall ] && [ ! -e /var/lib/nanoborealis/colony ]; then
+    mv /var/lib/nanoborealis/hall /var/lib/nanoborealis/colony && log "moved the colony's state from its old name"
+fi
+if [ -L /etc/systemd/system/multi-user.target.wants/nanoborealis-hall.service ]; then
+    rm -f /etc/systemd/system/multi-user.target.wants/nanoborealis-hall.service
+    systemctl enable nanoborealis-colony.service >/dev/null 2>&1
+    systemctl start --no-block nanoborealis-colony.service
+    log "the colony's service is nanoborealis-colony now"
+fi
+
 [ "$did" -eq 1 ] || echo "nanoborealis-migrate: nothing to migrate"
 exit 0

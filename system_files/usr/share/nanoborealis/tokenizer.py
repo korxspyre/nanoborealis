@@ -379,5 +379,5 @@ class SSERestorer:
 
 
 def default_vault() -> Vault:
-    """The vault the relay and Hall use: NANOBOREALIS_VAULT, else /var/lib/nanoborealis/vault."""
+    """The vault the relay and Colony use: NANOBOREALIS_VAULT, else /var/lib/nanoborealis/vault."""
     return Vault(os.environ.get("NANOBOREALIS_VAULT") or "/var/lib/nanoborealis/vault")

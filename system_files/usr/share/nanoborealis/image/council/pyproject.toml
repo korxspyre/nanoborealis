@@ -3,13 +3,13 @@
 [project]
 name = "nanoborealis-council"
 version = "0.1.0"
-description = "The council's tools for a nanobot seat: the Hall's floor, task board and votes"
+description = "The council's tools for a nanobot seat: the colony's floor, task board and votes"
 requires-python = ">=3.10"
 dependencies = []  # nanobot itself is what loads these; the tools use only the standard library
 
 [project.entry-points."nanobot.tools"]
-hall_read = "nanoborealis_council.tools:HallRead"
-hall_post = "nanoborealis_council.tools:HallPost"
+colony_read = "nanoborealis_council.tools:ColonyRead"
+colony_post = "nanoborealis_council.tools:ColonyPost"
 task_list = "nanoborealis_council.tools:TaskList"
 task_claim = "nanoborealis_council.tools:TaskClaim"
 task_update = "nanoborealis_council.tools:TaskUpdate"

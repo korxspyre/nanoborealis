@@ -34,7 +34,7 @@ def placement(model: str, capability: float = 50, family: str = "") -> dict:
 check(council.slug("mlx-community/Qwen3-14B-4bit") == "qwen3-14b-4bit", "a seat's id comes from its model")
 check(council.nametape("mlx-community/Qwen3-14B-4bit") == "Qwen3 14B", "its nametape is the model's short name")
 check(council.nametape("mlx-community/gemma-3-12b-it-4bit") == "gemma 3 12b", "...without quantization or tuning tags")
-check(council.slug("a/" + "x" * 80) == "x" * 40, "ids stay short enough for the Hall")
+check(council.slug("a/" + "x" * 80) == "x" * 40, "ids stay short enough for the colony")
 
 plan = {"placements": [placement("mlx-community/Qwen3-14B-4bit", 52.4, "qwen"),
                        placement("mlx-community/gemma-3-12b-it-4bit", 44, "gemma")]}
@@ -62,10 +62,10 @@ check("${NANOBOREALIS_RELAY_TOKEN}" in json.dumps(config) and "${NANOBOREALIS_SE
 
 unit = council.quadlet(seats[0])
 for line in ("ContainerName=seat-qwen3-14b-4bit", "PublishPort=127.0.0.1:8770:8900", "Exec=serve",
-             "Secret=seat-qwen3-14b-4bit-hall,type=env,target=NANOBOREALIS_HALL_TOKEN",
+             "Secret=seat-qwen3-14b-4bit-colony,type=env,target=NANOBOREALIS_COLONY_TOKEN",
              "Volume=seat-qwen3-14b-4bit-home:/home/nanobot", "Environment=NANOBOREALIS_SEAT=qwen3-14b-4bit"):
     check(line in unit.splitlines(), f"the seat's unit: {line.split('=')[0]}")
-check("Qwen3 14B" in council.agents_md(seats[0]) and "hall_read" in council.agents_md(seats[0]),
+check("Qwen3 14B" in council.agents_md(seats[0]) and "colony_read" in council.agents_md(seats[0]),
       "its instructions say who it is and how the council works")
 
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

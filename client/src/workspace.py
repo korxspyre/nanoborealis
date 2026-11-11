@@ -191,7 +191,7 @@ class Workspace:
         self.panel_views: dict[str, Any] = {}
         self.control: Any = None
         # The chat modes, like Chat / Cowork / Code: Agent (your agent, the chair, or one colony seat),
-        # Hall (the whole colony) and Task (the colony's board). See colony.py.
+        # Colony (the whole colony) and Task (the colony's board). See colony.py.
         self.mode = "agent"
         self.colony: Any = None
         # The coding-agent features (codefeatures.py): plan mode, the status bar, the crew strip, checkpoints.
@@ -367,7 +367,7 @@ class Workspace:
 
     async def new_in_mode(self) -> None:
         if self.mode == "civ":
-            await self.colony_view().new_hall_chat()
+            await self.colony_view().new_colony_chat()
         else:
             await self.open_chat(None)
 
@@ -470,7 +470,7 @@ class Workspace:
         if (self.page.width or 1200) < t.NARROW:
             await self.page.close_drawer()
         if section == "chats" and self.mode != "agent":
-            section = "colony:list"  # a mode's own list: the Hall's chats, or the board
+            section = "colony:list"  # a mode's own list: the colony's chats, or the board
         self.section = section
         in_chats = section == "chats"
         in_colony = section.startswith("colony:")

@@ -576,22 +576,22 @@ def write(state: dict) -> None:
     os.replace(temporary, OUT)
 
 
-HALL_STATE = "/var/lib/nanoborealis/hall"
-HALL_URL = "http://127.0.0.1:11437"
+COLONY_STATE = "/var/lib/nanoborealis/colony"
+COLONY_URL = "http://127.0.0.1:11437"
 
 
 def council() -> dict | None:
     """The council at a glance: its seats with their trust, the task board's counts, open votes,
-    and the latest thing said in the Hall. None when this computer has no council."""
+    and the latest thing said in the colony. None when this computer has no council."""
     import urllib.request
 
     try:
-        token = open(os.path.join(HALL_STATE, "admin.token"), encoding="utf-8").read().strip()
+        token = open(os.path.join(COLONY_STATE, "admin.token"), encoding="utf-8").read().strip()
     except OSError:
         return None
 
     def get(path: str) -> dict:
-        request = urllib.request.Request(HALL_URL + path, headers={"Authorization": f"Bearer {token}"})
+        request = urllib.request.Request(COLONY_URL + path, headers={"Authorization": f"Bearer {token}"})
         with urllib.request.urlopen(request, timeout=3) as response:
             return json.loads(response.read())
 
@@ -599,12 +599,12 @@ def council() -> dict | None:
         seats, tasks, votes, rooms = get("/seats")["seats"], get("/tasks")["tasks"], get("/votes?open=1")["votes"], \
             get("/rooms")["rooms"]
         latest = None
-        hall_rooms = [r for r in rooms if r["kind"] == "hall"]
-        if hall_rooms:
-            said = [m for m in get(f"/rooms/{hall_rooms[0]['id']}/messages")["messages"] if m["kind"] != "pass"]
+        colony_rooms = [r for r in rooms if r["kind"] == "colony"]
+        if colony_rooms:
+            said = [m for m in get(f"/rooms/{colony_rooms[0]['id']}/messages")["messages"] if m["kind"] != "pass"]
             if said:
-                names = {s["id"]: s["name"] for s in seats} | {"you": "You", "advisor": "Advisor", "hall": "The Hall"}
-                latest = {"room": hall_rooms[0]["title"], "author": names.get(said[-1]["author"], said[-1]["author"]),
+                names = {s["id"]: s["name"] for s in seats} | {"you": "You", "advisor": "Advisor", "colony": "The colony"}
+                latest = {"room": colony_rooms[0]["title"], "author": names.get(said[-1]["author"], said[-1]["author"]),
                           "text": " ".join(said[-1]["text"].split())[:160]}
     except (OSError, ValueError, KeyError) as e:
         return {"error": str(e)[:200]}

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (C) 2026 korxspyre
 """Inference sources besides the pool: anything that speaks the OpenAI chat API. A llama.cpp server,
-Strata, Avalon, Project Maya or FreeToken on a PC down the hall, a notebook on a free GPU tier, or
+Strata, Avalon, Project Maya or FreeToken on a PC down the colony, a notebook on a free GPU tier, or
 OpenRouter's free models.
 
     python3 sources.py list
@@ -55,7 +55,7 @@ class Source:
     free_only: bool = False  # only models whose id ends in :free
     extra: dict = field(default_factory=dict)  # merged into every request body (OpenRouter's max_price, say)
     allow_raw: bool = False
-    key_file: str = ""  # a file holding the key, for a service that has one of its own (the Hall's OpenRouter key)
+    key_file: str = ""  # a file holding the key, for a service that has one of its own (the colony's OpenRouter key)
 
     @property
     def tokenizes(self) -> bool:

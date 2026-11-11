@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (C) 2026 korxspyre
 """Checks rigs (a team of seats as a file), the durable inbox with its delivery guard, the head agent, the
-watchdog, and snapshot and restore: the pure logic in rigs.py, then the real Hall with stand-in seats.
+watchdog, and snapshot and restore: the pure logic in rigs.py, then the real Colony with stand-in seats.
 
     python3 tests/rigs_check.py
 """
@@ -96,7 +96,7 @@ head = lambda beats, now=1000.0: rigs.pick_head(seats, beats, now)["head"]  # no
 check(head({"c": {"at": 990.0, "status": "ok"}}) == "c" and head({}) == "p" and head({"c": {"at": 990.0, "status": "limited"}}) == "p"
       and head({"c": {"at": 100.0, "status": "ok"}}) == "p", "the head is the first in line that is here and not worn out")
 check(rigs.pick_head([seats[2], seats[3]], {}, 0)["head"] == "q" and rigs.pick_head([seats[3]], {}, 0)["head"] == "chair"
-      and rigs.pick_head([], {}, 0)["head"] is None, "...else the strongest seat the Hall can ask, else the chair")
+      and rigs.pick_head([], {}, 0)["head"] is None, "...else the strongest seat the colony can ask, else the chair")
 
 again, dead = rigs.overdue_mail([{"state": "new", "created": 0, "tries": 1}, {"state": "new", "created": 0, "tries": 3},
                                  {"state": "new", "created": 99, "tries": 0}, {"state": "done", "created": 0, "tries": 0}], 100, 50, 3)
@@ -110,7 +110,7 @@ out = rigs.restore_outcomes({"seats": [{"id": "x", "address": "x@r", "model": "m
 check([o["outcome"] for o in out] == ["resumed", "awaiting-decision", "fresh-primed"],
       "restore says honestly what came back: resumed, awaiting a decision, or made again")
 
-# -- The Hall --------------------------------------------------------------------------------------------------
+# -- The colony --------------------------------------------------------------------------------------------------
 
 
 def main() -> None:
@@ -118,11 +118,11 @@ def main() -> None:
         port, advisor = oc.free_port(), oc.free_port()
         base = f"http://127.0.0.1:{port}"
         oc.openrouter(advisor)
-        env = {**os.environ, "NANOBOREALIS_HALL_STATE": tmp, "NANOBOREALIS_HALL_LISTEN": f"127.0.0.1:{port}",
-               "NANOBOREALIS_HALL_OPENROUTER_URL": f"http://127.0.0.1:{advisor}/api/v1/chat/completions",
-               "NANOBOREALIS_HALL_SEAT_TIMEOUT": "30", "NANOBOREALIS_TOOLS": str(ROOT / "system_files/usr/share/nanoborealis"),
-               "NANOBOREALIS_HALL_WATCHDOG_EVERY": "1", "NANOBOREALIS_HALL_MAIL_AFTER": "2", "NANOBOREALIS_HALL_TASK_AFTER": "3"}
-        hall = subprocess.Popen([sys.executable, str(ROOT / "system_files/usr/libexec/nanoborealis-hall")], env=env, stderr=subprocess.DEVNULL)
+        env = {**os.environ, "NANOBOREALIS_COLONY_STATE": tmp, "NANOBOREALIS_COLONY_LISTEN": f"127.0.0.1:{port}",
+               "NANOBOREALIS_COLONY_OPENROUTER_URL": f"http://127.0.0.1:{advisor}/api/v1/chat/completions",
+               "NANOBOREALIS_COLONY_SEAT_TIMEOUT": "30", "NANOBOREALIS_TOOLS": str(ROOT / "system_files/usr/share/nanoborealis"),
+               "NANOBOREALIS_COLONY_WATCHDOG_EVERY": "1", "NANOBOREALIS_COLONY_MAIL_AFTER": "2", "NANOBOREALIS_COLONY_TASK_AFTER": "3"}
+        colony = subprocess.Popen([sys.executable, str(ROOT / "system_files/usr/libexec/nanoborealis-colony")], env=env, stderr=subprocess.DEVNULL)
         try:
             def listening() -> bool:
                 try:
@@ -133,8 +133,8 @@ def main() -> None:
             until(listening, 10)
             run(base, Path(tmp, "admin.token").read_text().strip(), tmp)
         finally:
-            hall.terminate()
-            hall.wait(10)
+            colony.terminate()
+            colony.wait(10)
     if oc.FAILED:
         sys.exit(1)
     print("rigs checks passed")
@@ -169,7 +169,7 @@ def run(base: str, token: str, state: str) -> None:
     until(lambda: any(c[0] == "rb" and "Mail from you" in c[2] for c in CALLS))
     told = next((c[2] for c in CALLS if c[0] == "rb" and "Mail from you" in c[2]), "")
     check(status == 200 and told.index("We make small, tested changes") < told.index("Builds and reviews") < told.index("Your role: builder")
-          < told.index("Mail from you"), "mail for a seat the Hall can ask is delivered with its team's culture, pod and role first")
+          < told.index("Mail from you"), "mail for a seat the colony can ask is delivered with its team's culture, pod and role first")
     reply = until(lambda: next((m for m in admin("GET", "/inbox")[1]["mail"] if m["kind"] == "reply"), None))
     done = admin("GET", "/inbox?seat=starter-build&state=done")[1]["mail"]
     check(reply is not None and reply["text"] == "rb read the mail" and reply["sender"] == "starter-build" and len(done) == 1,
@@ -219,13 +219,13 @@ def run(base: str, token: str, state: str) -> None:
     by_build("POST", f"/tasks/{task}/submit", {"result": "built"})
     asked = until(lambda: next((m for m in claude("GET", "/inbox")[1]["mail"] if "Please review" in m["text"] and f"task {task}" in m["text"]), None))
     check(asked is not None and not any(f"handed in task {task}" in c[2] for c in CALLS),
-          "a named reviewer the Hall can't ask (Claude's seat) is sent the review as mail")
+          "a named reviewer the colony can't ask (Claude's seat) is sent the review as mail")
     check(claude("POST", f"/tasks/{task}/review", {"verdict": "accept"})[1]["state"] == "done", "...and its review closes the task")
     task = own_task(claude)
     claude("POST", f"/tasks/{task}/submit", {"result": "claude's work"})
     until(lambda: any(c[0] == "rb" and f"handed in task {task}" in c[2] for c in CALLS))
     check(until(lambda: admin("GET", f"/tasks/{task}")[1]["state"] == "done") and admin("GET", f"/tasks/{task}")[1]["notes"][-1]["author"] == "starter-build",
-          "a named reviewer the Hall can ask (a pool seat) is asked, and reviews it")
+          "a named reviewer the colony can ask (a pool seat) is asked, and reviews it")
 
     # The watchdog.
     quiet = own_task(claude)
@@ -244,7 +244,7 @@ def run(base: str, token: str, state: str) -> None:
 
     # The command line.
     Path(state, "starter.toml").write_text(SPEC.replace('name = "starter"', 'name = "cli"'), encoding="utf-8")
-    cli_env = {**os.environ, "NANOBOREALIS_HALL_URL": base, "NANOBOREALIS_HALL_ADMIN_TOKEN_FILE": str(Path(state, "admin.token")),
+    cli_env = {**os.environ, "NANOBOREALIS_COLONY_URL": base, "NANOBOREALIS_COLONY_ADMIN_TOKEN_FILE": str(Path(state, "admin.token")),
                "NANOBOREALIS_SEATS_DIR": str(Path(state, "seats"))}
 
     def rigctl(*args: str) -> str:

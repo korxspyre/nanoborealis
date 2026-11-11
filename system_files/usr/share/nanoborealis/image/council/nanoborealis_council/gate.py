@@ -217,9 +217,9 @@ def change_detail(tool: str, kw: dict, program: str) -> dict:
     return {"kind": "edit", "edits": edits[:20]}
 
 
-def tell_hall(note: str) -> None:
-    """In a colony seat: tell the Hall which tool is in use, for the app's live map of the crew. Never in the way."""
-    url, token = os.environ.get("NANOBOREALIS_HALL_URL", "").rstrip("/"), os.environ.get("NANOBOREALIS_HALL_TOKEN", "")
+def tell_colony(note: str) -> None:
+    """In a colony seat: tell the colony which tool is in use, for the app's live map of the crew. Never in the way."""
+    url, token = os.environ.get("NANOBOREALIS_COLONY_URL", "").rstrip("/"), os.environ.get("NANOBOREALIS_COLONY_TOKEN", "")
     if not (url and token and os.environ.get("NANOBOREALIS_SEAT")):
         return
     try:
@@ -235,7 +235,7 @@ def announce(cls: type, label) -> None:
     original = cls.execute
 
     async def execute(self, *args: Any, **kwargs: Any) -> Any:
-        asyncio.get_running_loop().run_in_executor(None, tell_hall, label(kwargs))
+        asyncio.get_running_loop().run_in_executor(None, tell_colony, label(kwargs))
         return await original(self, *args, **kwargs)
     cls.execute = execute
 
@@ -248,7 +248,7 @@ def wrap(cls: type, kind: str, describe, tool_name: str = "") -> None:
         what = describe(kwargs)
         chat = chat_now()
         asyncio.get_running_loop().run_in_executor(
-            None, tell_hall, ("running: " if kind == "exec" else "") + what.splitlines()[0][:160])
+            None, tell_colony, ("running: " if kind == "exec" else "") + what.splitlines()[0][:160])
         blocked = await run_hooks("PreToolUse", tool_name, {"tool_name": tool_name, "tool_input": kwargs, "chat_id": chat})
         if blocked:
             return f"Error: blocked by a hook: {blocked}"

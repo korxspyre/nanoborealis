@@ -3,8 +3,8 @@
 """NanoBench: the council's own benchmarks, run on the models that sit on it, graded by code.
 
     python3 nanobench.py run <model> [--route pool|<source>] [--n 6] [--seed S] [--json]
-    python3 nanobench.py seats [--n 6] [--hall URL] [--admin-token-file PATH]
-                                    run the suite on every pool seat's model and post the results to the Hall
+    python3 nanobench.py seats [--n 6] [--colony URL] [--admin-token-file PATH]
+                                    run the suite on every pool seat's model and post the results to the colony
 
 Five areas, each a set of generated items with one right answer a program can check, so no model grades
 another and nobody's opinion enters:
@@ -18,7 +18,7 @@ another and nobody's opinion enters:
 The items are generated from a seed (by default the day), so they change from run to run and a model can't
 be tuned to a fixed list. An item that errors (the model was down) is not a failure and not counted; a
 run where half the items errored raises instead of reporting a score. A score is shown with its 95%
-Wilson interval, because six items say little: the Hall trusts the lower end.
+Wilson interval, because six items say little: the colony trusts the lower end.
 
 What this is not. It measures how a model does on these items on this computer, to rank the council's
 members for the council's work. It isn't comparable with public leaderboards, and nothing here executes
@@ -205,7 +205,7 @@ def wilson(passed: int, n: int, z: float = 1.96) -> tuple[float, float]:
 
 
 def run(call: Callable[[list[dict], list | None], dict], n: int = 6, seed: int | None = None, areas=AREAS) -> dict:
-    """The suite against `call(messages, tools) -> assistant message`. Returns the results to post to the Hall."""
+    """The suite against `call(messages, tools) -> assistant message`. Returns the results to post to the colony."""
     seed = int(time.time() // 86400) if seed is None else seed
     results = {a: {"passed": 0, "n": 0} for a in areas}
     errors = empty = 0
@@ -283,7 +283,7 @@ def caller(route: str, model: str):
     return call
 
 
-def hall(url: str, token: str, method: str, path: str, body: dict | None = None):
+def colony(url: str, token: str, method: str, path: str, body: dict | None = None):
     request = urllib.request.Request(url.rstrip("/") + path, data=json.dumps(body).encode() if body is not None else None,
                                      method=method, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
     with urllib.request.urlopen(request, timeout=60) as response:
@@ -305,18 +305,18 @@ def main(argv: list[str]) -> None:
         print(json.dumps(report, indent=2) if "--json" in args else f"{args[0]} on {SUITE} (seed {report['seed']}):\n"
               + "\n".join(summary(report)))
     elif action == "seats":
-        url = option(args, "--hall", os.environ.get("NANOBOREALIS_HALL_URL", "http://127.0.0.1:11437"))
-        token_file = option(args, "--admin-token-file", "/var/lib/nanoborealis/hall/admin.token")
+        url = option(args, "--colony", os.environ.get("NANOBOREALIS_COLONY_URL", "http://127.0.0.1:11437"))
+        token_file = option(args, "--admin-token-file", "/var/lib/nanoborealis/colony/admin.token")
         token = Path(token_file).read_text().strip()
         route = option(args, "--route", "router" if ROUTER_TOKEN.exists() else "pool")
         fresh_days = float(option(args, "--skip-days", 0))  # a model tested within this many days is left alone
         done: set[str] = set()
-        for seat in hall(url, token, "GET", "/seats")["seats"]:
+        for seat in colony(url, token, "GET", "/seats")["seats"]:
             if seat.get("chair") or seat.get("external") or seat["model"] in done:
                 continue  # not a model we can ask, or tested already in this run
             done.add(seat["model"])
             if fresh_days:
-                runs = hall(url, token, "GET", "/benchmarks?model=" + urllib.parse.quote(seat["model"], safe=""))["benchmarks"]
+                runs = colony(url, token, "GET", "/benchmarks?model=" + urllib.parse.quote(seat["model"], safe=""))["benchmarks"]
                 if any(time.time() - r.get("at", 0) < fresh_days * 86400 for r in runs):
                     print(f"{seat['model']}: tested within {fresh_days:g} days, skipped")
                     continue
@@ -327,7 +327,7 @@ def main(argv: list[str]) -> None:
                 print(f"  skipped: {error}")
                 continue
             print("\n".join(summary(report)))
-            hall(url, token, "POST", "/benchmarks", {"model": seat["model"], **report})
+            colony(url, token, "POST", "/benchmarks", {"model": seat["model"], **report})
     else:
         sys.exit(__doc__)
 

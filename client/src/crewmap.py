@@ -5,7 +5,7 @@
 Every crew member is a card, in a column for its sector, with you at the top. A member at work lights up and says
 what it is doing (the task, and the tool in use: a search, a command, a file). A line is drawn for a while between
 two members when one sends the other a message, hands work in, or reviews it. Under the map, the same things as a
-list, newest first. It follows along by asking the Hall for /activity every couple of seconds.
+list, newest first. It follows along by asking the colony for /activity every couple of seconds.
 """
 
 from __future__ import annotations

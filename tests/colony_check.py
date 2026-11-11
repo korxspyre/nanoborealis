@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (C) 2026 korxspyre
-"""Checks the Hall (nanoborealis-hall) end to end: the real service on a spare port, driven as the
+"""Checks the colony (nanoborealis-colony) end to end: the real service on a spare port, driven as the
 computer's own services (the admin token) and as two seats.
 
-    python3 tests/hall_check.py
+    python3 tests/colony_check.py
 """
 
 from __future__ import annotations
@@ -55,8 +55,8 @@ def main() -> None:
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         port = free_port()
         base = f"http://127.0.0.1:{port}"
-        env = {**os.environ, "NANOBOREALIS_HALL_STATE": tmp, "NANOBOREALIS_HALL_LISTEN": f"127.0.0.1:{port}"}
-        service = subprocess.Popen([sys.executable, str(ROOT / "system_files/usr/libexec/nanoborealis-hall")], env=env)
+        env = {**os.environ, "NANOBOREALIS_COLONY_STATE": tmp, "NANOBOREALIS_COLONY_LISTEN": f"127.0.0.1:{port}"}
+        service = subprocess.Popen([sys.executable, str(ROOT / "system_files/usr/libexec/nanoborealis-colony")], env=env)
         try:
             for _ in range(50):
                 try:
@@ -72,7 +72,7 @@ def main() -> None:
             service.wait(10)
     if FAILED:
         sys.exit(1)
-    print("all Hall checks passed")
+    print("all Colony checks passed")
 
 
 def run(base: str, admin_token: str) -> None:
@@ -107,7 +107,7 @@ def run(base: str, admin_token: str) -> None:
     messages = admin("GET", f"/rooms/{room['id']}/messages")[1]["messages"]
     check([m["author"] for m in messages] == ["you", "qwen-14b", "gemma-12b"], "messages carry their nametapes")
     check(qwen("POST", f"/rooms/{room['id']}/messages", {"kind": "system", "text": "I win"})[0] == 403,
-          "a seat can't post as the Hall")
+          "a seat can't post as the colony")
     check(len(admin("GET", f"/rooms/{room['id']}/messages?after={messages[1]['id']}")[1]["messages"]) == 1,
           "a seat can read only what's new")
 
@@ -133,14 +133,14 @@ def run(base: str, admin_token: str) -> None:
     qwen("POST", f"/votes/{even['id']}/ballot", {"choice": "yes"})
     check(gemma("POST", f"/votes/{even['id']}/ballot", {"choice": "no"})[1]["split"], "a near tie is split")
 
-    _, task = admin("POST", "/tasks", {"title": "Write the README", "detail": "Explain the Hall."})
+    _, task = admin("POST", "/tasks", {"title": "Write the README", "detail": "Explain the colony."})
     check(task["state"] == "open" and task["author"] == "you", "you post a task; it's open")
     check(admin("POST", f"/tasks/{task['id']}/claim")[0] == 403, "people don't claim tasks")
     check(qwen("POST", f"/tasks/{task['id']}/claim")[1]["state"] == "claimed", "a seat claims it")
     check(gemma("POST", f"/tasks/{task['id']}/claim")[0] == 409, "...and nobody else can")
     check(gemma("POST", f"/tasks/{task['id']}/submit", {"result": "x"})[0] == 409, "only the worker hands it in")
     qwen("POST", f"/tasks/{task['id']}/update", {"text": "outlined it"})
-    check(qwen("POST", f"/tasks/{task['id']}/submit", {"result": "# The Hall"})[1]["state"] == "review",
+    check(qwen("POST", f"/tasks/{task['id']}/submit", {"result": "# The colony"})[1]["state"] == "review",
           "handing it in puts it up for review")
     check(qwen("POST", f"/tasks/{task['id']}/review", {"verdict": "accept"})[0] == 403, "no seat reviews its own work")
     check(gemma("POST", f"/tasks/{task['id']}/review", {"verdict": "reject"})[0] == 400, "a rejection needs a reason")
@@ -148,7 +148,7 @@ def run(base: str, admin_token: str) -> None:
     check(rejected["state"] == "claimed" and rejected["rejects"] == 1, "a rejection sends it back to its worker")
     trust_before = qwen("GET", "/me")[1]["trust"]
     check(qwen("GET", "/me")[1]["record"].get("faulted", 0) >= 1, "...and goes on the worker's record")
-    qwen("POST", f"/tasks/{task['id']}/submit", {"result": "# The Hall\nWhere seats meet."})
+    qwen("POST", f"/tasks/{task['id']}/submit", {"result": "# The colony\nWhere seats meet."})
     accepted = admin("POST", f"/tasks/{task['id']}/review", {"verdict": "accept"})[1]
     check(accepted["state"] == "done" and [n["kind"] for n in accepted["notes"]] ==
           ["claim", "progress", "submit", "reject", "submit", "accept"], "you accept it; its history is kept")

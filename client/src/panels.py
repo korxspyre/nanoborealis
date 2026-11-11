@@ -528,7 +528,7 @@ class BackgroundPanel:
                                t.GOOD if b["done"] else t.VIOLET)
                      for b in sorted(ws.background.values(), key=lambda b: -b["started"])[:12]]
         try:
-            tasks = [x for x in (await asyncio.to_thread(admin.hall, self.machine, "GET", "/tasks"))["tasks"]
+            tasks = [x for x in (await asyncio.to_thread(admin.colony, self.machine, "GET", "/tasks"))["tasks"]
                      if x["state"] in ("open", "claimed", "review")]
         except Exception:
             tasks = []

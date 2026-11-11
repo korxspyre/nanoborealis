@@ -2,7 +2,7 @@
 # Copyright (C) 2026 korxspyre
 """Rigs: a team of seats written down as a file, with shared norms, and the logic around them.
 
-Pure logic, no network and no database: the Hall (nanoborealis-hall) keeps the state and calls in here.
+Pure logic, no network and no database: the colony (nanoborealis-colony) keeps the state and calls in here.
 A rig is the idea OpenRig calls by that name, for NanoBorealis' council:
 
     [rig]
@@ -16,14 +16,14 @@ A rig is the idea OpenRig calls by that name, for NanoBorealis' council:
     [[seat]]
     id = "build"              # becomes the seat "starter-build", addressed as build@starter
     pod = "dev"
-    kind = "pool"             # run on the pool as its own agent; the Hall can ask it
+    kind = "pool"             # run on the pool as its own agent; the colony can ask it
     model = "mlx-community/Qwen3-14B-4bit"
     capability = 45
 
     [[seat]]
     id = "claude"
     pod = "dev"
-    kind = "outside"          # joins over the Hall's API (Claude Code, say); the Hall can't ask it
+    kind = "outside"          # joins over the colony's API (Claude Code, say); the colony can't ask it
     head = 1                  # first in line to be the head agent while it is available
 
     [[edge]]
@@ -46,7 +46,7 @@ POLICIES = ("floor", "inherit", "full_bypass")  # what a seat may do on its own:
 # OpenRig's edge kinds, and ours from before (reviews, delegates, reports_to)
 EDGE_KINDS = ("reviews", "delegates", "reports_to", "delegates_to", "spawned_by", "can_observe", "collaborates_with",
               "escalates_to")
-# pool: its own agent on the pool; outside: joins over the API (Claude Code); cloud: a free OpenRouter model the Hall
+# pool: its own agent on the pool; outside: joins over the API (Claude Code); cloud: a free OpenRouter model the colony
 # asks itself, through the tokenizer, so a rig runs on a computer without a pool or a GPU.
 # agent: its own full agent in its own container (rigagent.py), every tool the owner's agent has, on a free
 # OpenRouter model: what a seat is in OpenRig. The default.
@@ -62,7 +62,7 @@ class SpecError(Exception):
         self.errors = errors
 
 
-def hall_id(rig: str, local: str) -> str:
+def colony_id(rig: str, local: str) -> str:
     return f"{rig}-{local}"
 
 
@@ -79,7 +79,7 @@ def parse(text: str) -> dict:
 
 
 def validate(data: dict) -> dict:
-    """The spec as the Hall stores it, or SpecError with everything wrong at once."""
+    """The spec as the colony stores it, or SpecError with everything wrong at once."""
     errors: list[str] = []
     rig = data.get("rig") if isinstance(data.get("rig"), dict) else {}
     name = str(rig.get("name") or "")
@@ -121,9 +121,9 @@ def validate(data: dict) -> dict:
         pod = str(seat.get("pod") or "")
         if pod and pod not in seen_pods:
             errors.append(f"seat {local}: there is no pod {pod!r}")
-        if name and not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,39}", hall_id(name, local)):
-            errors.append(f"seat {local}: {hall_id(name, local)!r} is too long for a seat id (40 at most)")
-        seats.append({"local": local, "id": hall_id(name, local), "address": address(name, local), "pod": pod,
+        if name and not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,39}", colony_id(name, local)):
+            errors.append(f"seat {local}: {colony_id(name, local)!r} is too long for a seat id (40 at most)")
+        seats.append({"local": local, "id": colony_id(name, local), "address": address(name, local), "pod": pod,
                       "role": str(seat.get("role") or "")[:80], "kind": kind, "model": model, "capability": capability,
                       "policy": policy, "head_rank": head, "guidance": str(seat.get("guidance") or "")[:2000]})
     if len(seats) > MAX_SEATS:
@@ -138,14 +138,14 @@ def validate(data: dict) -> dict:
         if src not in seen or dst not in seen or src == dst or kind not in EDGE_KINDS:
             errors.append(f"edge {src!r} -> {dst!r}: two different seats of this rig, and a kind of {', '.join(EDGE_KINDS)}")
             continue
-        edges.append({"src": hall_id(name, src), "dst": hall_id(name, dst), "kind": kind})
+        edges.append({"src": colony_id(name, src), "dst": colony_id(name, dst), "kind": kind})
     if errors:
         raise SpecError(errors)
     return {"name": name, "culture": culture, "pods": pods, "seats": seats, "edges": edges}
 
 
 def plan(spec: dict, existing: dict[str, dict]) -> dict:
-    """What applying `spec` would do, given the Hall's seats now (id -> seat): the `--plan` of a rig."""
+    """What applying `spec` would do, given the colony's seats now (id -> seat): the `--plan` of a rig."""
     wanted = {s["id"]: s for s in spec["seats"]}
     mine = {i: s for i, s in existing.items() if s.get("rig") == spec["name"]}
     changed = lambda w, e: any(str(w[k]) != str(e.get(k) or "") for k in ("model", "capability", "pod", "role", "policy"))  # noqa: E731
@@ -174,19 +174,19 @@ def briefing(rig: dict | None, pod: dict | None, seat: dict) -> str:
 
 
 def askable(seat: dict) -> bool:
-    """The Hall can ask it any time: a pool seat (it has an API) or a cloud seat (the Hall calls its model)."""
+    """The colony can ask it any time: a pool seat (it has an API) or a cloud seat (the colony calls its model)."""
     return seat.get("port") is not None or seat.get("kind") == "cloud"
 
 
 def pick_head(seats: list[dict], presence: dict[str, dict], now: float) -> dict:
     """The head agent: the first seat in line (head_rank) that is there and not worn out, else the strongest seat
-    the Hall can ask itself, else the chair. A seat that isn't run by the pool (Claude, say) is there while it
+    the colony can ask itself, else the chair. A seat that isn't run by the pool (Claude, say) is there while it
     keeps sending a heartbeat with status "ok"; "limited" means its usage is spent, so the next one steps in."""
     line = sorted((s for s in seats if s.get("head_rank")), key=lambda s: (s["head_rank"], -float(s.get("weight") or 0)))
     states = []
     for seat in line:
         beat = presence.get(seat["id"])
-        if askable(seat):  # the Hall can ask it any time
+        if askable(seat):  # the colony can ask it any time
             state = "ready"
         elif not beat or now - float(beat["at"]) > FRESH:
             state = "away"
@@ -198,7 +198,7 @@ def pick_head(seats: list[dict], presence: dict[str, dict], now: float) -> dict:
             return {"head": entry["seat"], "reason": f"first in line that is here (rank {entry['rank']})", "line": states}
     asked = sorted((s for s in seats if askable(s)), key=lambda s: -float(s.get("weight") or 0))
     if asked:
-        return {"head": asked[0]["id"], "reason": "nobody in line is here, so the strongest seat the Hall can ask steps in", "line": states}
+        return {"head": asked[0]["id"], "reason": "nobody in line is here, so the strongest seat the colony can ask steps in", "line": states}
     chair = next((s for s in seats if s.get("chair")), None)
     return {"head": chair["id"] if chair else None, "reason": "nobody else is here" if chair else "no seats", "line": states}
 

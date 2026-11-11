@@ -29,14 +29,14 @@ ENV UV_TOOL_DIR=/opt/nanobot/tools \
     PYTHONUNBUFFERED=1
 # The council's tools (nanoborealis_council) go into nanobot's own environment, where its loader
 # finds them through the nanobot.tools entry points. They stay off unless the agent is a council
-# seat (NANOBOREALIS_HALL_URL and NANOBOREALIS_HALL_TOKEN set). The api extra is `nanobot serve`,
+# seat (NANOBOREALIS_COLONY_URL and NANOBOREALIS_COLONY_TOKEN set). The api extra is `nanobot serve`,
 # which is how seats run.
 COPY council/ /opt/nanobot-council/
 RUN uv tool install --no-cache --python 3.12 "nanobot-ai[api]==${NANOBOT_VERSION}" --with /opt/nanobot-council \
  && chown -R nanobot:nanobot /opt/nanobot \
  && nanobot --version \
  && /opt/nanobot/tools/nanobot-ai/bin/python -c "from importlib.metadata import entry_points; \
-assert 'hall_read' in {e.name for e in entry_points(group='nanobot.tools')}, 'council tools missing'"
+assert 'colony_read' in {e.name for e in entry_points(group='nanobot.tools')}, 'council tools missing'"
 
 COPY entrypoint.sh /usr/local/bin/nanobot-entrypoint
 COPY seed/ /opt/nanobot-seed/

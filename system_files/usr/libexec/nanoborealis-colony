@@ -1,16 +1,16 @@
 #!/usr/bin/python3
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (C) 2026 korxspyre
-"""The Hall: where the council's seats meet (docs/rigs/README.md).
+"""The colony: where the council's seats meet (docs/rigs/README.md).
 
-One SQLite database holds the seats, the rooms (Hall chats) and their messages, the task board, the
+One SQLite database holds the seats, the rooms (Colony chats) and their messages, the task board, the
 votes, the trust ledger and the council's settings. Everything is JSON over HTTP, and every request
 needs `Authorization: Bearer <token>`: the admin token (the computer's own services, like
 nanoborealis-remote for the app) or a seat's own token (the council tools in that seat's agent).
 Seats speak only as themselves; seats and people are managed with the admin token alone.
 
-    nanoborealis-hall      # NANOBOREALIS_HALL_STATE (default /var/lib/nanoborealis/hall),
-                           # NANOBOREALIS_HALL_LISTEN (default 127.0.0.1:11437)
+    nanoborealis-colony      # NANOBOREALIS_COLONY_STATE (default /var/lib/nanoborealis/colony),
+                           # NANOBOREALIS_COLONY_LISTEN (default 127.0.0.1:11437)
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ sys.path.insert(0, os.environ.get("NANOBOREALIS_TOOLS", "/usr/share/nanoborealis
 try:
     import mixer  # several free models answering one question together
     import sources  # one question to one source, tokenized if it is on the internet
-    import tokenizer  # what keeps personal details off the internet when the Hall asks a cloud model
+    import tokenizer  # what keeps personal details off the internet when the colony asks a cloud model
 except ImportError:  # without them nothing goes to the cloud: advise() sends only through the tokenizer
     mixer = sources = tokenizer = None
 try:
@@ -42,8 +42,8 @@ except ImportError:
 # The owner's switch (also the relay's): with it set, no question leaves for a cloud model at all.
 CLOUD_OFF = os.environ.get("NANOBOREALIS_MIX_SENSITIVITY") == "local-only"
 
-STATE =Path(os.environ.get("NANOBOREALIS_HALL_STATE", "/var/lib/nanoborealis/hall"))
-LISTEN = os.environ.get("NANOBOREALIS_HALL_LISTEN", "127.0.0.1:11437")
+STATE =Path(os.environ.get("NANOBOREALIS_COLONY_STATE", "/var/lib/nanoborealis/colony"))
+LISTEN = os.environ.get("NANOBOREALIS_COLONY_LISTEN", "127.0.0.1:11437")
 MAX_BODY = 1024 * 1024
 TEXT_LIMIT = 64 * 1024
 
@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS seats (
     created REAL NOT NULL, seen REAL
 );
 CREATE TABLE IF NOT EXISTS rooms (
-    id INTEGER PRIMARY KEY, title TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'hall', created REAL NOT NULL
+    id INTEGER PRIMARY KEY, title TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'colony', created REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY, room INTEGER NOT NULL REFERENCES rooms(id), author TEXT NOT NULL,
@@ -121,15 +121,15 @@ CREATE INDEX IF NOT EXISTS turns_session ON turns (seat, session, id);
 CLOUD_TURNS = 12  # how much of a cloud seat's conversation in one room, task or inbox it is shown again
 MIGRATIONS = [
     ("seats", "port", "INTEGER"),  # where its API is, on this computer (nanobot serve); none for the chair
-    ("seats", "api_key", "TEXT"),  # the Hall's key to that API
+    ("seats", "api_key", "TEXT"),  # the colony's key to that API
     ("rooms", "seat", "TEXT"),  # a one-on-one room's seat
-    # An outside seat: an agent that joins over the API (Claude Code, say) and isn't run by the pool. The Hall
-    # can't ask it, so a vote doesn't wait for it; and it sees the Hall tokenized (see handler()).
+    # An outside seat: an agent that joins over the API (Claude Code, say) and isn't run by the pool. The colony
+    # can't ask it, so a vote doesn't wait for it; and it sees the colony tokenized (see handler()).
     ("seats", "external", "INTEGER NOT NULL DEFAULT 0"),
     # Where a seat sits in a rig (rigs.py), and its place in line to be the head agent.
     ("seats", "rig", "TEXT"), ("seats", "pod", "TEXT"), ("seats", "role", "TEXT"), ("seats", "policy", "TEXT"),
     ("seats", "address", "TEXT"), ("seats", "guidance", "TEXT"), ("seats", "head_rank", "INTEGER"),
-    # pool, outside or cloud (rigs.KINDS). A cloud seat is a free OpenRouter model the Hall asks itself.
+    # pool, outside or cloud (rigs.KINDS). A cloud seat is a free OpenRouter model the colony asks itself.
     ("seats", "kind", "TEXT"),
 ]
 
@@ -170,10 +170,14 @@ def text(value: object, what: str, limit: int = TEXT_LIMIT, required: bool = Tru
     return value.strip()
 
 
-class Hall:
+class Colony:
     def __init__(self, state: Path):
         state.mkdir(parents=True, exist_ok=True)
-        self.path = state / "hall.sqlite"
+        self.path = state / "colony.sqlite"
+        if not self.path.exists() and (state / "hall.sqlite").exists():  # made under the old name: carried over
+            for suffix in ("", "-wal", "-shm"):
+                if (state / f"hall.sqlite{suffix}").exists():
+                    (state / f"hall.sqlite{suffix}").rename(state / f"colony.sqlite{suffix}")
         self.lock = threading.Lock()  # one writer at a time; SQLite's own locking backs it up
         self.db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self.db.row_factory = sqlite3.Row
@@ -182,6 +186,12 @@ class Hall:
         for table, column, kind in MIGRATIONS:  # columns added after a database was first made
             if column not in {r["name"] for r in self.db.execute(f"PRAGMA table_info({table})")}:
                 self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+        # Rows written under the old name: its chats and the messages and mail it sent itself.
+        for statement in ("UPDATE rooms SET kind = 'colony' WHERE kind = 'hall'",
+                          "UPDATE messages SET author = 'colony' WHERE author = 'hall'",
+                          "UPDATE inbox SET sender = 'colony' WHERE sender = 'hall'",
+                          "UPDATE task_notes SET author = 'colony' WHERE author = 'hall'"):
+            self.db.execute(statement)
         self.events: list[tuple] = []  # what the orchestrator should act on, once the change is saved
         token_file = state / "admin.token"
         if not token_file.exists():
@@ -252,7 +262,7 @@ class Hall:
 
     def scorecard(self, model: str, now: float | None = None) -> dict:
         """{area: {score, lo, hi, n}, "overall": {...}} for a model, in percent, from the last BENCH_DAYS days.
-        lo and hi are the 95% Wilson interval: a few items give a wide one, and the Hall trusts the low end."""
+        lo and hi are the 95% Wilson interval: a few items give a wide one, and the colony trusts the low end."""
         now = now or time.time()
         card, total_passed, total_n = {}, 0, 0
         for row in self.db.execute("SELECT area, SUM(passed) AS p, SUM(n) AS n FROM benchmarks WHERE model = ? AND at > ? "
@@ -388,7 +398,7 @@ class Hall:
             self.db.execute("UPDATE seats SET port = ? WHERE id = ?", (port, seat_id))
         port = self.db.execute("SELECT port FROM seats WHERE id = ?", (seat_id,)).fetchone()["port"]
         api_key = None
-        if token and port is not None:  # the Hall's key to the seat's API, new with every token
+        if token and port is not None:  # the colony's key to the seat's API, new with every token
             api_key = secrets.token_urlsafe(32)
             self.db.execute("UPDATE seats SET api_key = ? WHERE id = ?", (api_key, seat_id))
         found = self.seat(seat_id)
@@ -697,7 +707,7 @@ class Hall:
         return {"ok": True}
 
     def head(self) -> dict:
-        """Who leads now: the first seat in line that is here, else the strongest the Hall can ask, else the chair."""
+        """Who leads now: the first seat in line that is here, else the strongest the colony can ask, else the chair."""
         self.need_rigs()
         presence = {r["seat"]: dict(r) for r in self.db.execute("SELECT * FROM presence")}
         found = rigs.pick_head(self.seats(), presence, time.time())
@@ -708,7 +718,7 @@ class Hall:
     def watchdog_scan(self, now: float, mail_after: float, task_after: float) -> dict:
         """Look for mail nobody has taken and work nobody has touched. Returns what to deliver again, and what it did."""
         self.need_rigs()
-        # Only mail for seats the Hall can ask: an outside seat's mail waits for it, however long that takes.
+        # Only mail for seats the colony can ask: an outside seat's mail waits for it, however long that takes.
         items = [dict(r) for r in self.db.execute("SELECT inbox.* FROM inbox JOIN seats ON seats.id = inbox.recipient "
                                                   "WHERE inbox.state = 'new' AND (seats.port IS NOT NULL OR seats.kind = 'cloud')")]
         again, give_up = rigs.overdue_mail(items, now, mail_after)
@@ -717,7 +727,7 @@ class Hall:
         for item in give_up:
             self.db.execute("UPDATE inbox SET state = 'dead' WHERE id = ?", (item["id"],))
             if item["recipient"] != "you":
-                self.send("hall", {"to": "head", "text": f"Mail {item['id']} from {item['sender']} to {item['recipient']} was never taken: "
+                self.send("colony", {"to": "head", "text": f"Mail {item['id']} from {item['sender']} to {item['recipient']} was never taken: "
                                                          f"{item['text'][:200]}"}) if self.seats() else None
         held = []
         for t in self.db.execute("SELECT * FROM tasks WHERE state = 'claimed'"):
@@ -727,9 +737,9 @@ class Hall:
                          "last_word": max(t["updated"], word or 0), "nudges": nudges})
         nudge, reopen = rigs.stale_tasks(held, now, task_after)
         for task in nudge:
-            self.note(task["id"], "hall", "nudge", "Still on this? Say where it stands, or hand it in.")
+            self.note(task["id"], "colony", "nudge", "Still on this? Say where it stands, or hand it in.")
             self.db.execute("UPDATE tasks SET updated = ? WHERE id = ?", (now, task["id"]))
-            self.send("hall", {"to": task["claimed_by"], "kind": "nudge", "text": f"Task {task['id']} ({task['title']}) has been quiet. Say where it stands."})
+            self.send("colony", {"to": task["claimed_by"], "kind": "nudge", "text": f"Task {task['id']} ({task['title']}) has been quiet. Say where it stands."})
         for task in reopen:
             self.reopen(task["id"])
             self.events.append(("task", task["id"]))  # offered to the seats again
@@ -743,9 +753,9 @@ class Hall:
 
     def new_room(self, data: dict) -> dict:
         title = text(data.get("title"), "The room's title", 200)
-        kind = data.get("kind", "hall")
-        if kind not in ("hall", "task", "direct"):
-            raise Refused(400, "A room is a hall, a task or a direct (one-on-one) room.")
+        kind = data.get("kind", "colony")
+        if kind not in ("colony", "task", "direct"):
+            raise Refused(400, "A room is a colony, a task or a direct (one-on-one) room.")
         seat = None
         if kind == "direct":  # you and one seat: only it answers
             seat = self.seat(text(data.get("seat"), "The seat", 40))["id"]
@@ -904,7 +914,7 @@ class Hall:
         found["leading"] = ranked[0][0] if weight else None
         found["margin"] = round(margin, 4)
         found["split"] = bool(weight) and margin < self.settings()["split_margin"]
-        # The chair and outside seats may vote, but a vote doesn't wait for them: the Hall can't ask them.
+        # The chair and outside seats may vote, but a vote doesn't wait for them: the colony can't ask them.
         waiting = {s["id"] for s in self.seats() if not s["chair"] and not s["external"]} - {b["seat"] for b in ballots}
         found["waiting_for"] = sorted(waiting)
         return found
@@ -973,20 +983,20 @@ class Hall:
 # each other down. It talks to seats through their API (nanobot serve, one session per room) and to
 # the escalation model through OpenRouter, with the database lock held only for database work.
 
-SEAT_HOST = os.environ.get("NANOBOREALIS_HALL_SEAT_HOST", "127.0.0.1")
-OPENROUTER_URL = os.environ.get("NANOBOREALIS_HALL_OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
-SEAT_TIMEOUT = float(os.environ.get("NANOBOREALIS_HALL_SEAT_TIMEOUT", "1800"))  # a CPU pool is slow to read
-CONTINUOUS_EVERY = float(os.environ.get("NANOBOREALIS_HALL_CONTINUOUS_EVERY", "300"))
-WATCHDOG_EVERY = float(os.environ.get("NANOBOREALIS_HALL_WATCHDOG_EVERY", "60"))
-MAIL_AFTER = float(os.environ.get("NANOBOREALIS_HALL_MAIL_AFTER", "600"))  # mail a seat hasn't taken for this long is tried again
-TASK_AFTER = float(os.environ.get("NANOBOREALIS_HALL_TASK_AFTER", "1800"))  # a task held and quiet for this long is nudged
+SEAT_HOST = os.environ.get("NANOBOREALIS_COLONY_SEAT_HOST", "127.0.0.1")
+OPENROUTER_URL = os.environ.get("NANOBOREALIS_COLONY_OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
+SEAT_TIMEOUT = float(os.environ.get("NANOBOREALIS_COLONY_SEAT_TIMEOUT", "1800"))  # a CPU pool is slow to read
+CONTINUOUS_EVERY = float(os.environ.get("NANOBOREALIS_COLONY_CONTINUOUS_EVERY", "300"))
+WATCHDOG_EVERY = float(os.environ.get("NANOBOREALIS_COLONY_WATCHDOG_EVERY", "60"))
+MAIL_AFTER = float(os.environ.get("NANOBOREALIS_COLONY_MAIL_AFTER", "600"))  # mail a seat hasn't taken for this long is tried again
+TASK_AFTER = float(os.environ.get("NANOBOREALIS_COLONY_TASK_AFTER", "1800"))  # a task held and quiet for this long is nudged
 CONTEXT_MESSAGES = 20  # the room's newest messages a seat is shown when it's asked to speak
 # Every ask is a full agent turn (often several model requests), and the free providers allow a few thousand a day,
-# so the Hall asks as few seats as will do: the ones a message names or whose role fits, not everyone in turn.
-CHAT_SEATS = int(os.environ.get("NANOBOREALIS_HALL_CHAT_SEATS", "2"))  # seats that answer a message in a Hall room
-TASK_OFFERS = int(os.environ.get("NANOBOREALIS_HALL_TASK_OFFERS", "3"))  # seats a task is offered to, best fit first
-REOFFER_EVERY = float(os.environ.get("NANOBOREALIS_HALL_REOFFER_EVERY", "3600"))  # continuous mode: a task again after
-REOFFERS = int(os.environ.get("NANOBOREALIS_HALL_REOFFERS", "3"))  # ...and at most this many times
+# so the colony asks as few seats as will do: the ones a message names or whose role fits, not everyone in turn.
+CHAT_SEATS = int(os.environ.get("NANOBOREALIS_COLONY_CHAT_SEATS", "2"))  # seats that answer a message in a colony chat
+TASK_OFFERS = int(os.environ.get("NANOBOREALIS_COLONY_TASK_OFFERS", "3"))  # seats a task is offered to, best fit first
+REOFFER_EVERY = float(os.environ.get("NANOBOREALIS_COLONY_REOFFER_EVERY", "3600"))  # continuous mode: a task again after
+REOFFERS = int(os.environ.get("NANOBOREALIS_COLONY_REOFFERS", "3"))  # ...and at most this many times
 WORD = re.compile(r"[a-z]{4,}")
 
 
@@ -1047,23 +1057,23 @@ def cloud_choice(answer: str, options: list[str]) -> tuple[str, str] | None:
 
 
 # Who is at work right now, for the app's live map of the crew. In memory: it is about this moment.
-BUSY: dict[str, dict] = {}   # seat -> {"session": "task-5", "since": when the Hall asked it}
+BUSY: dict[str, dict] = {}   # seat -> {"session": "task-5", "since": when the colony asked it}
 STEPS: dict[str, dict] = {}  # seat -> {"note": the tool it is using, "at": when}: sent by the seat's own agent
 
 
 def doing(session: str) -> tuple[str, int | None]:
-    """A session's name ("task-5", "hall-3", "mail-x", "vote-2", "direct-4") in words, and its task if it is one."""
+    """A session's name ("task-5", "colony-3", "mail-x", "vote-2", "direct-4") in words, and its task if it is one."""
     kind, _, rest = session.partition("-")
     number = int(rest) if rest.isdigit() else None
-    words = {"task": f"working on task {rest}", "hall": "answering in a chat", "direct": "talking with you",
+    words = {"task": f"working on task {rest}", "colony": "answering in a chat", "direct": "talking with you",
              "mail": "reading messages", "vote": "voting"}.get(kind, "thinking")
     return words, number if kind == "task" else None
 
 
 class Orchestrator:
-    def __init__(self, hall: Hall):
+    def __init__(self, colony: Colony):
         import queue
-        self.hall = hall
+        self.colony = colony
         self.jobs: queue.Queue = queue.Queue()
         self.busy = False
         self._vault = None
@@ -1096,7 +1106,7 @@ class Orchestrator:
                     for item_id in self.db(lambda h: h.watchdog_scan(time.time(), MAIL_AFTER, TASK_AFTER))["again"]:
                         self.jobs.put(("inbox", item_id))
             except Exception as e:
-                print(f"nanoborealis-hall: the watchdog failed: {type(e).__name__}", file=sys.stderr, flush=True)
+                print(f"nanoborealis-colony: the watchdog failed: {type(e).__name__}", file=sys.stderr, flush=True)
 
     def kick(self, events: list[tuple]) -> None:
         for event in events:
@@ -1106,17 +1116,17 @@ class Orchestrator:
         return not self.busy and self.jobs.empty()
 
     def db(self, fn):
-        """fn(hall) in one transaction, under the lock."""
-        with self.hall.lock:
-            self.hall.db.execute("BEGIN IMMEDIATE")
+        """fn(colony) in one transaction, under the lock."""
+        with self.colony.lock:
+            self.colony.db.execute("BEGIN IMMEDIATE")
             try:
-                result = fn(self.hall)
-                self.hall.db.execute("COMMIT")
+                result = fn(self.colony)
+                self.colony.db.execute("COMMIT")
             except BaseException:
-                self.hall.db.execute("ROLLBACK")
-                self.hall.events = []  # nothing happened, so there's nothing to act on
+                self.colony.db.execute("ROLLBACK")
+                self.colony.events = []  # nothing happened, so there's nothing to act on
                 raise
-            events, self.hall.events = self.hall.events, []
+            events, self.colony.events = self.colony.events, []
         self.kick(events)
         return result
 
@@ -1126,13 +1136,13 @@ class Orchestrator:
             self.busy = True
             try:
                 getattr(self, f"on_{job[0]}")(*job[1:])
-            except Exception as e:  # one failed job never stops the Hall
-                print(f"nanoborealis-hall: {job[0]} {job[1:]} failed: {e}", file=sys.stderr, flush=True)
+            except Exception as e:  # one failed job never stops the colony
+                print(f"nanoborealis-colony: {job[0]} {job[1:]} failed: {e}", file=sys.stderr, flush=True)
             finally:
                 self.busy = False
 
     def continuous(self) -> None:
-        """In continuous mode, open tasks are offered again every few minutes while the Hall is idle."""
+        """In continuous mode, open tasks are offered again every few minutes while the colony is idle."""
         while True:
             time.sleep(CONTINUOUS_EVERY)
             try:
@@ -1144,13 +1154,13 @@ class Orchestrator:
                             times.append(now)
                             self.jobs.put(("task", task["id"]))
             except Exception as e:
-                print(f"nanoborealis-hall: the continuous round failed: {e}", file=sys.stderr, flush=True)
+                print(f"nanoborealis-colony: the continuous round failed: {e}", file=sys.stderr, flush=True)
 
     # -- Talking to seats and the advisor ----------------------------------------------------------------
 
     def seats(self, exclude: tuple = ()) -> list[dict]:
-        """The seats the Hall can ask (they have an API: every seat but the chair), weightiest first."""
-        def find(h: Hall) -> list[dict]:
+        """The seats the colony can ask (they have an API: every seat but the chair), weightiest first."""
+        def find(h: Colony) -> list[dict]:
             rows = {r["id"]: r for r in h.db.execute("SELECT id, port, api_key FROM seats WHERE port IS NOT NULL OR kind = 'cloud'")}
             found = [{**h.seat(i), "port": r["port"], "api_key": r["api_key"]} for i, r in rows.items() if i not in exclude]
             return sorted(found, key=lambda s: -s["weight"])
@@ -1161,7 +1171,7 @@ class Orchestrator:
         if rigs is None or not seat.get("rig"):
             return ""
 
-        def find(h: Hall):
+        def find(h: Colony):
             rig = h.db.execute("SELECT name, culture FROM rigs WHERE name = ?", (seat["rig"],)).fetchone()
             pod = h.db.execute("SELECT id, guidance FROM pods WHERE rig = ? AND id = ?", (seat["rig"], seat.get("pod"))).fetchone()
             return (dict(rig) if rig else None, dict(pod) if pod else None)
@@ -1172,7 +1182,7 @@ class Orchestrator:
         """Tell the head agent, if the rig has put anyone in line to be one."""
         try:
             if rigs is not None and self.db(lambda h: h.head())["line"]:
-                self.db(lambda h: h.send("hall", {"to": "head", "text": words}))
+                self.db(lambda h: h.send("colony", {"to": "head", "text": words}))
         except Refused:
             pass
 
@@ -1198,7 +1208,7 @@ class Orchestrator:
                                {"model": seat["model"], "session_id": session,
                                 "messages": [{"role": "user", "content": prompt}]}, seat["api_key"], SEAT_TIMEOUT)
         except Exception as e:
-            print(f"nanoborealis-hall: {seat['id']} didn't answer: {e}", file=sys.stderr, flush=True)
+            print(f"nanoborealis-colony: {seat['id']} didn't answer: {e}", file=sys.stderr, flush=True)
             return ""
         return reply_text(answer)
 
@@ -1212,10 +1222,10 @@ class Orchestrator:
 
     def ask_cloud(self, seat: dict, session: str, prompt: str, brief: str) -> str:
         """One turn of a cloud seat: its model is asked directly, with its briefing and its recent turns in this
-        session (the Hall keeps them, as a seat's own agent would). It has no tools: the Hall acts on its answer."""
+        session (the colony keeps them, as a seat's own agent would). It has no tools: the colony acts on its answer."""
         source = self.cloud_source()
         if source is None:
-            print(f"nanoborealis-hall: {seat['id']} is a cloud seat, and there's no OpenRouter key or the cloud is off",
+            print(f"nanoborealis-colony: {seat['id']} is a cloud seat, and there's no OpenRouter key or the cloud is off",
                   file=sys.stderr, flush=True)
             return ""
         past = self.db(lambda h: [dict(r) for r in h.db.execute(
@@ -1232,7 +1242,7 @@ class Orchestrator:
                                        timeout=SEAT_TIMEOUT).strip()
         except Exception as e:  # never print the prompt: only what went wrong
             # The error's status and kind only (SourceError carries no prompt text).
-            print(f"nanoborealis-hall: {seat['id']} didn't answer: {type(e).__name__} {e if isinstance(e, sources.SourceError) else ''}",
+            print(f"nanoborealis-colony: {seat['id']} didn't answer: {type(e).__name__} {e if isinstance(e, sources.SourceError) else ''}",
                   file=sys.stderr, flush=True)
             return ""
         if answer:
@@ -1271,7 +1281,7 @@ class Orchestrator:
             task = mixer.Task(messages, kind="reasoning", stakes="high")  # several makes answer, one combines, another checks
             return mixer.Mixer(members, call, self.ledger, self.stats).run(task).answer.strip()
         except Exception as e:  # never print the question: only what went wrong
-            print(f"nanoborealis-hall: escalation failed: {type(e).__name__}", file=sys.stderr, flush=True)
+            print(f"nanoborealis-colony: escalation failed: {type(e).__name__}", file=sys.stderr, flush=True)
             return ""
 
     def say(self, room: int, author: str, text: str) -> None:
@@ -1283,7 +1293,7 @@ class Orchestrator:
     # -- Jobs ----------------------------------------------------------------------------------------
 
     def on_room(self, room_id: int) -> None:
-        """You spoke in a room: in a one-on-one room its seat answers; in the Hall, every seat in turn,
+        """You spoke in a room: in a one-on-one room its seat answers; in the colony, every seat in turn,
         each seeing what the others said before it."""
         room = self.db(lambda h: h.room(room_id))
         if room["kind"] == "direct":
@@ -1306,7 +1316,7 @@ class Orchestrator:
                     "then give the finished work." if seat.get("kind") == "cloud" and "[open]" in work else "")
             prompt = (f"Colony chat {room_id}: {room['title']}\n\n{board}{work}{lines}\n\nYou are {seat['id']}. Reply to "
                       f"the room in a few sentences if you add something new, or answer exactly PASS.{take}")
-            answer = self.ask(seat, f"hall-{room_id}", prompt)
+            answer = self.ask(seat, f"colony-{room_id}", prompt)
             claimed = re.match(r"\s*CLAIM\s+#?(\d+)\s*\n(.*)", answer or "", re.S | re.I)
             if claimed and seat.get("kind") == "cloud":
                 task_id, work_done = int(claimed.group(1)), claimed.group(2).strip()
@@ -1366,7 +1376,7 @@ class Orchestrator:
         task = self.db(lambda h: h.task(task_id))
         if task["state"] != "review":
             return
-        # A rig can name who reviews whom (an edge of kind "reviews"). A named reviewer the Hall can ask is asked;
+        # A rig can name who reviews whom (an edge of kind "reviews"). A named reviewer the colony can ask is asked;
         # one it can't (an outside seat, Claude's) gets the review as mail and takes it from its inbox.
         edge = self.db(lambda h: h.db.execute("SELECT src FROM edges WHERE dst = ? AND kind = 'reviews' LIMIT 1",
                                               (task["claimed_by"],)).fetchone())
@@ -1374,7 +1384,7 @@ class Orchestrator:
         askable = self.seats(exclude=(task["claimed_by"],))
         reviewer = next((s for s in askable if s["id"] == named), None) or (None if named else next(iter(askable), None))
         if named and reviewer is None:
-            self.db(lambda h: h.send("hall", {"to": named, "kind": "task", "text":
+            self.db(lambda h: h.send("colony", {"to": named, "kind": "task", "text":
                     f"Please review task {task_id} ({task['title']}), handed in by {task['claimed_by']}:\n\n{task['result']}\n\n"
                     "Accept it or reject it with your reasons, on the task."}))
             return
@@ -1427,8 +1437,8 @@ class Orchestrator:
         self.notify_head(f"Task {task_id} ({task['title']}) failed review twice" + (", and outside advice is on the task." if advice else "."))
 
     def on_inbox(self, item_id: int) -> None:
-        """Mail for a seat the Hall can ask: it is asked to act on it, and its answer goes back to the sender. A seat the
-        Hall can't ask (an outside seat, the chair, you) takes its mail from its inbox itself."""
+        """Mail for a seat the colony can ask: it is asked to act on it, and its answer goes back to the sender. A seat the
+        Colony can't ask (an outside seat, the chair, you) takes its mail from its inbox itself."""
         item = self.db(lambda h: (lambda r: dict(r) if r else None)(h.db.execute("SELECT * FROM inbox WHERE id = ?", (item_id,)).fetchone()))
         if item is None or item["state"] != "new":
             return
@@ -1444,7 +1454,7 @@ class Orchestrator:
             self.db(lambda h: h.db.execute("UPDATE inbox SET state = 'new' WHERE id = ?", (item_id,)))
             return
         self.db(lambda h: h.ack(item_id, "admin", "done"))
-        if sender != "hall" and item["kind"] != "reply":
+        if sender != "colony" and item["kind"] != "reply":
             try:
                 self.db(lambda h: h.send(seat["id"], {"to": sender, "kind": "reply", "text": answer[:8000], "reply_to": item_id}))
             except Refused:
@@ -1478,7 +1488,7 @@ class Orchestrator:
             return
         reasons = "\n".join(f"- {b['seat']} chose {b['choice']}: {b['reason']}" for b in vote["ballots"])
         self.notify_head(f"The colony split on: {vote['question']}\n{reasons}")
-        self.db(lambda h: h.post(vote["room"], "hall", {"kind": "escalation", "text":
+        self.db(lambda h: h.post(vote["room"], "colony", {"kind": "escalation", "text":
                                  f"The colony split on: {vote['question']}\n{reasons}\nWhich is right, and why?"}))
 
     def on_escalation(self, room_id: int, message_id: int) -> None:
@@ -1496,7 +1506,7 @@ def number(value: str, what: str) -> int:
     return int(value)
 
 
-def route(hall: Hall, who: str, method: str, parts: list[str], query: dict, data: dict):
+def route(colony: Colony, who: str, method: str, parts: list[str], query: dict, data: dict):
     admin = who == "admin"
     me = "you" if admin else who  # people speak through the admin token, as "you"
 
@@ -1506,59 +1516,59 @@ def route(hall: Hall, who: str, method: str, parts: list[str], query: dict, data
 
     match method, parts:
         case "GET", ["me"]:
-            return {"admin": True} if admin else hall.seat(who)
+            return {"admin": True} if admin else colony.seat(who)
         case "GET", ["settings"]:
-            return hall.settings()
+            return colony.settings()
         case "POST", ["settings"]:
             admin_only()
-            return hall.set_settings(data)
+            return colony.set_settings(data)
         case "GET", ["rigs"]:
-            return {"rigs": hall.rig_list()}
+            return {"rigs": colony.rig_list()}
         case "POST", ["rigs"]:
             admin_only()
-            return hall.rig_apply(data)
+            return colony.rig_apply(data)
         case "GET", ["rigs", name]:
-            return hall.rig(name)
+            return colony.rig(name)
         case "DELETE", ["rigs", name]:
             admin_only()
-            return hall.rig_down(name, data.get("snapshot", True) is not False)
+            return colony.rig_down(name, data.get("snapshot", True) is not False)
         case "POST", ["rigs", name, "redeploy"]:
             admin_only()
-            return hall.rig_redeploy(name)
+            return colony.rig_redeploy(name)
         case "POST", ["rigs", name, "snapshot"]:
             admin_only()
-            return hall.rig_snapshot(name, data.get("label", ""))
+            return colony.rig_snapshot(name, data.get("label", ""))
         case "POST", ["rigs", name, "restore"]:
             admin_only()
-            return hall.rig_restore(name, data)
+            return colony.rig_restore(name, data)
         case "POST", ["inbox"]:
             # The computer's own services send for the owner's agent ("from": "agent"); a member sends as itself.
-            return hall.send("agent" if admin and data.get("from") == "agent" else me, data)
+            return colony.send("agent" if admin and data.get("from") == "agent" else me, data)
         case "GET", ["inbox"]:
-            return {"mail": hall.mail(query["seat"] if admin and query.get("seat") else me, query.get("state"))}
+            return {"mail": colony.mail(query["seat"] if admin and query.get("seat") else me, query.get("state"))}
         case "POST", ["inbox", item, "ack"]:
-            return hall.ack(number(item, "mail"), who, data.get("state", "done"))
+            return colony.ack(number(item, "mail"), who, data.get("state", "done"))
         case "POST", ["presence"]:
             if admin:
                 raise Refused(403, "Only seats send a heartbeat.")
-            return hall.beat(who, data)
+            return colony.beat(who, data)
         case "GET", ["activity"]:
             try:
                 since = float(query.get("since") or 0)
             except ValueError:
                 since = 0.0
-            return hall.activity(since)
+            return colony.activity(since)
         case "POST", ["activity"]:
             if admin:
                 raise Refused(403, "Only seats say what they are doing.")
-            return hall.step(who, data)
+            return colony.step(who, data)
         case "GET", ["head"]:
-            return hall.head()
+            return colony.head()
         case "POST", ["benchmarks"]:
             admin_only()  # the computer's own services run the tests; a seat can't mark its own work
-            return hall.bench_record(data)
+            return colony.bench_record(data)
         case "GET", ["benchmarks"]:
-            return {"benchmarks": hall.benchmarks(query.get("model"))}
+            return {"benchmarks": colony.benchmarks(query.get("model"))}
         case "POST", ["escalation-key"]:
             # The OpenRouter key escalation uses: the chair's own, copied here by `council apply` and
             # whenever the app sets a new one. Used for free models only.
@@ -1571,55 +1581,55 @@ def route(hall: Hall, who: str, method: str, parts: list[str], query: dict, data
             path.write_text(key + "\n")
             return {"saved": True}
         case "GET", ["seats"]:
-            return {"seats": hall.seats()}
+            return {"seats": colony.seats()}
         case "POST", ["seats"]:
             admin_only()
-            return hall.put_seat(data)
+            return colony.put_seat(data)
         case "DELETE", ["seats", seat_id]:
             admin_only()
-            return hall.remove_seat(seat_id)
+            return colony.remove_seat(seat_id)
         case "POST", ["feedback"]:
             admin_only()
-            return hall.feedback(data)
+            return colony.feedback(data)
         case "GET", ["rooms"]:
-            return {"rooms": hall.rooms()}
+            return {"rooms": colony.rooms()}
         case "POST", ["rooms"]:
             admin_only()
-            return hall.new_room(data)
+            return colony.new_room(data)
         case "GET", ["rooms", room, "messages"]:
-            return {"messages": hall.messages(number(room, "room"), int(query.get("after", "0") or 0))}
+            return {"messages": colony.messages(number(room, "room"), int(query.get("after", "0") or 0))}
         case "POST", ["rooms", room, "messages"]:
-            return hall.post(number(room, "room"), me, data)
+            return colony.post(number(room, "room"), me, data)
         case "GET", ["tasks"]:
-            return {"tasks": hall.tasks(query.get("state"))}
+            return {"tasks": colony.tasks(query.get("state"))}
         case "POST", ["tasks"]:
-            return hall.new_task(me, data)
+            return colony.new_task(me, data)
         case "GET", ["tasks", task]:
-            return hall.task(number(task, "task"))
+            return colony.task(number(task, "task"))
         case "POST", ["tasks", task, "reopen"]:
             admin_only()
-            return hall.reopen(number(task, "task"))
+            return colony.reopen(number(task, "task"))
         case "POST", ["tasks", task, "review"]:
-            return hall.review(number(task, "task"), me, data)
+            return colony.review(number(task, "task"), me, data)
         case "POST", ["tasks", task, action] if action in ("claim", "update", "submit"):
             if admin:
                 raise Refused(403, "Seats claim and work on tasks; people post and review them.")
             task_id = number(task, "task")
-            return {"claim": lambda: hall.claim(task_id, who), "update": lambda: hall.update(task_id, who, data),
-                    "submit": lambda: hall.submit(task_id, who, data)}[action]()
+            return {"claim": lambda: colony.claim(task_id, who), "update": lambda: colony.update(task_id, who, data),
+                    "submit": lambda: colony.submit(task_id, who, data)}[action]()
         case "GET", ["votes"]:
-            return {"votes": hall.votes(open_only=query.get("open") == "1")}
+            return {"votes": colony.votes(open_only=query.get("open") == "1")}
         case "POST", ["votes"]:
-            return hall.new_vote(me, data)
+            return colony.new_vote(me, data)
         case "GET", ["votes", vote]:
-            return hall.vote(number(vote, "vote"))
+            return colony.vote(number(vote, "vote"))
         case "POST", ["votes", vote, "ballot"]:
             if admin:
                 raise Refused(403, "Only seats vote.")
-            return hall.ballot(number(vote, "vote"), who, data)
+            return colony.ballot(number(vote, "vote"), who, data)
         case "POST", ["votes", vote, "close"]:
             admin_only()
-            return hall.close(number(vote, "vote"))
+            return colony.close(number(vote, "vote"))
     raise Refused(404, "No such endpoint.")
 
 
@@ -1634,9 +1644,9 @@ def shield(vault, node, scope: str):
     return node
 
 
-def handler(hall: Hall, orchestrator: Orchestrator) -> type[BaseHTTPRequestHandler]:
+def handler(colony: Colony, orchestrator: Orchestrator) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "nanoborealis-hall"
+        server_version = "nanoborealis-colony"
 
         def log_message(self, fmt: str, *args) -> None:  # requests aren't logged; changes are in the database
             pass
@@ -1652,8 +1662,8 @@ def handler(hall: Hall, orchestrator: Orchestrator) -> type[BaseHTTPRequestHandl
         def handle_any(self) -> None:
             try:
                 auth = self.headers.get("Authorization", "")
-                with hall.lock:
-                    who = hall.who(auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else "")
+                with colony.lock:
+                    who = colony.who(auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else "")
                 if who is None:
                     raise Refused(401, "Unknown token.")
                 length = int(self.headers.get("Content-Length") or 0)
@@ -1667,8 +1677,8 @@ def handler(hall: Hall, orchestrator: Orchestrator) -> type[BaseHTTPRequestHandl
                 query = {k: v[-1] for k, v in parse_qs(url.query).items()}
                 outside = who != "admin" and orchestrator.db(lambda h: h.seat(who)["external"])
                 if outside:
-                    # An outside seat is an agent in someone else's cloud, so the Hall is the privacy boundary:
-                    # it is shown the Hall tokenized (with placeholders of its own), what it writes is restored
+                    # An outside seat is an agent in someone else's cloud, so the colony is the privacy boundary:
+                    # it is shown the colony tokenized (with placeholders of its own), what it writes is restored
                     # before the council reads it, and with no tokenizer it isn't served at all.
                     if tokenizer is None:
                         raise Refused(503, "Outside seats need the tokenizer, which isn't installed.")
@@ -1689,11 +1699,11 @@ def handler(hall: Hall, orchestrator: Orchestrator) -> type[BaseHTTPRequestHandl
 
 def main() -> None:
     host, _, port = LISTEN.rpartition(":")
-    hall = Hall(STATE)
-    orchestrator = Orchestrator(hall)
+    colony = Colony(STATE)
+    orchestrator = Orchestrator(colony)
     orchestrator.start()
-    server = ThreadingHTTPServer((host or "127.0.0.1", int(port)), handler(hall, orchestrator))
-    print(f"nanoborealis-hall: the council's Hall on {LISTEN}", file=sys.stderr, flush=True)
+    server = ThreadingHTTPServer((host or "127.0.0.1", int(port)), handler(colony, orchestrator))
+    print(f"nanoborealis-colony: the colony on {LISTEN}", file=sys.stderr, flush=True)
     server.serve_forever()
 
 

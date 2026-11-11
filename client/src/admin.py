@@ -158,20 +158,20 @@ def hands_run(machine: Machine, device: str, command: str, request: str, folders
 
 
 def rigs(machine: Machine) -> dict[str, Any]:
-    """{"hall": running?, "rigs": [...], "specs": rigs that ship with the OS, "problem": why not running}."""
+    """{"colony": running?, "rigs": [...], "specs": rigs that ship with the OS, "problem": why not running}."""
     return _call(machine, "GET", "/nanoborealis/rigs")
 
 
 def rig_up(machine: Machine, name: str = "", spec: str = "", dry_run: bool = False) -> dict[str, Any]:
-    """Bring up a rig that ships with the OS (name) or one written here (spec, TOML); starts the Hall if it must."""
+    """Bring up a rig that ships with the OS (name) or one written here (spec, TOML); starts the colony if it must."""
     return _call(machine, "POST", "/nanoborealis/rigs/up", {"name": name, "spec": spec, "dry_run": dry_run}, timeout=120)
 
 
-# The Hall (docs/rigs/README.md): rigs, rooms, the task board, votes and seats, where you speak as "you".
+# The colony (docs/rigs/README.md): rigs, rooms, the task board, votes and seats, where you speak as "you".
 # NotPaired and AdminError as for the rest; a computer without a rig says so.
 
-def hall(machine: Machine, method: str, path: str, body: dict | None = None, timeout: float = 30) -> dict[str, Any]:
-    return _call(machine, method, "/nanoborealis/hall" + path, body if method == "POST" else None, timeout=timeout)
+def colony(machine: Machine, method: str, path: str, body: dict | None = None, timeout: float = 30) -> dict[str, Any]:
+    return _call(machine, method, "/nanoborealis/colony" + path, body if method == "POST" else None, timeout=timeout)
 
 
 def providers(machine: Machine) -> dict[str, Any]:

@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (C) 2026 korxspyre
-"""The colony in the app (docs/rigs/README.md): Hall chats, the task board, and one-on-one chats
+"""The colony in the app (docs/rigs/README.md): Colony chats, the task board, and one-on-one chats
 with a colony seat. The chair, the agent you already have, keeps its own chats (workspace.py).
 
-Everything goes through the computer's pairing service to its Hall (admin.hall), where you speak
-as "you". A Hall room refreshes itself while it's open: the seats answer one after another, and
+Everything goes through the computer's pairing service to its Colony (admin.colony), where you speak
+as "you". A colony chat refreshes itself while it's open: the seats answer one after another, and
 on a pool of ordinary computers each answer can take a while.
 """
 
@@ -55,7 +55,7 @@ class ColonyView:
         self.follower: object | None = None
 
     async def call(self, method: str, path: str, body: dict | None = None) -> dict[str, Any]:
-        return await asyncio.to_thread(admin.hall, self.app.machine, method, path, body)
+        return await asyncio.to_thread(admin.colony, self.app.machine, method, path, body)
 
     async def load(self) -> None:
         """The rooms, tasks and seats for the sidebar; a problem instead when there's no colony."""
@@ -73,7 +73,7 @@ class ColonyView:
             return "You"
         if seat_id == "advisor":
             return "Advisor"
-        if seat_id == "hall":
+        if seat_id == "colony":
             return "Your colony"
         return next((s["name"] for s in self.seats if s["id"] == seat_id), seat_id)
 
@@ -100,7 +100,7 @@ class ColonyView:
         def empty(text: str) -> ft.Control:
             return ft.Container(t.muted(text, size=12.5), padding=ft.Padding.only(left=12, right=8, top=4))
         rooms = [self.side_row(r["title"], f"room:{r['id']}", ft.Icons.GROUPS_OUTLINED)
-                 for r in self.rooms if r["kind"] == "hall"]
+                 for r in self.rooms if r["kind"] == "colony"]
         board = [self.side_row(x["title"], f"task:{x['id']}", ft.Icons.TASK_ALT_ROUNDED,
                                t.badge(x["state"].upper(), STATE_COLORS.get(x["state"], t.MUTED))) for x in self.tasks]
         seats = [self.side_row(s["name"].split("@")[0].capitalize(), (lambda room: f"room:{room['id']}" if room else f"seat:{s['id']}")(
@@ -127,7 +127,7 @@ class ColonyView:
 
     # -- Starting things --------------------------------------------------------------------------------
 
-    async def new_hall_chat(self) -> None:
+    async def new_colony_chat(self) -> None:
         """A new chat with every seat: an empty conversation with its composer, like a new chat with your agent.
         The first message makes it (and names it)."""
         await self.workspace.show_section("colony:new")
@@ -256,7 +256,7 @@ class ColonyView:
                      (ft.Icons.REFRESH_ROUNDED, "Send it again", lambda: self.page.run_task(self.resend, room, text))] if room else []
             return transcript.user_message(text, actions=[copy, *again, task])
         name = self.seat_name(author)
-        actions = [] if author in ("advisor", "hall") else [
+        actions = [] if author in ("advisor", "colony") else [
             (ft.Icons.REPLY_ROUNDED, f"Reply to {name}", lambda: self.edit_into_box(f"{name}, ")),
             (ft.Icons.REFRESH_ROUNDED, f"Ask {name} again",
              lambda: self.page.run_task(self.resend, room, f"{name}, please answer that again, another way.")),
@@ -268,7 +268,7 @@ class ColonyView:
              lambda a=author: self.page.run_task(self.feedback, a, False))]
         answer = transcript.Answer(text, on_copy=self.workspace.copy_later, actions=actions)
         answer.finish()  # code blocks get their header and copy button
-        tape = ft.Row([t.badge(self.seat_name(author).upper(), t.WARN if author in ("advisor", "hall") else t.VIOLET),
+        tape = ft.Row([t.badge(self.seat_name(author).upper(), t.WARN if author in ("advisor", "colony") else t.VIOLET),
                        *([t.muted("asks for outside advice", size=11.5)] if kind == "escalation" else []),
                        t.muted(stamp(message.get("at")), size=11)], spacing=8)
         return ft.Column([tape, answer.view], spacing=4)
@@ -313,7 +313,7 @@ class ColonyView:
         listing = ft.Column([self.bubble(m) for m in messages], spacing=10)
         if not messages:
             listing.controls.append(t.muted("Say something to start."))
-        box = t.field(hint="Message your colony (Enter sends, Shift+Enter for a new line)" if room["kind"] == "hall"
+        box = t.field(hint="Message your colony (Enter sends, Shift+Enter for a new line)" if room["kind"] == "colony"
                       else f"Message {self.seat_name(room['seat'])}", multiline=True)
         box.max_lines = 6
         box.shift_enter = True
@@ -336,11 +336,11 @@ class ColonyView:
         actions: list[ft.Control] = [ft.Container(box, expand=True),
                                      ft.IconButton(ft.Icons.ARROW_UPWARD_ROUNDED, tooltip="Send (Enter)", bgcolor=t.ACCENT,
                                                    icon_color=t.ON_ACCENT, on_click=send)]
-        if room["kind"] == "hall":
+        if room["kind"] == "colony":
             actions.insert(1, t.icon_button(ft.Icons.HOW_TO_VOTE_OUTLINED, "Ask the crew to vote",
                                             on_click=lambda _e: self.page.run_task(self.new_vote, room_id, listing)))
         self.page.run_task(self.follow_room, room_id, listing, messages[-1]["id"] if messages else 0)
-        title = room["title"] if room["kind"] == "hall" else self.seat_name(room.get("seat") or "")
+        title = room["title"] if room["kind"] == "colony" else self.seat_name(room.get("seat") or "")
         composer = ft.Column([working.view, ft.Row(actions, spacing=8, vertical_alignment=ft.CrossAxisAlignment.END)],
                              spacing=6, tight=True)
         return title, self.frame([listing], composer)

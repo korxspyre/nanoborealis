@@ -2,9 +2,9 @@
 # Copyright (C) 2026 korxspyre
 [Unit]
 Description=NanoBorealis crew benchmarks (each crew model tested by code; the results are its trust)
-After=network-online.target nanoborealis-hall.service nanoborealis-router.service
+After=network-online.target nanoborealis-colony.service nanoborealis-router.service
 Wants=network-online.target
-ConditionPathExists=/var/lib/nanoborealis/hall/admin.token
+ConditionPathExists=/var/lib/nanoborealis/colony/admin.token
 
 [Service]
 Type=oneshot

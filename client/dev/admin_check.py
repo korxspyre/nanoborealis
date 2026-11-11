@@ -248,10 +248,10 @@ def main(address: str, pin_file: str, home: str) -> None:
           "pool: the pool's name, exo's exact version, and where its node bundles are")
     pool_page(machine)
     coordinator(machine)
-    check("no rig yet" in refused(admin.hall, machine, "GET", "/rooms"),
+    check("no rig yet" in refused(admin.colony, machine, "GET", "/rooms"),
           "rigs: a computer without one says how to bring one up")
     rigs = admin.rigs(machine)
-    check(rigs["hall"] is False and rigs["rigs"] == [], "rigs: the page knows the Hall isn't running")
+    check(rigs["colony"] is False and rigs["rigs"] == [], "rigs: the page knows the colony isn't running")
     hands_flow(machine)
 
     listed = admin.devices(machine)

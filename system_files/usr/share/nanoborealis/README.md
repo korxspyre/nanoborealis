@@ -36,7 +36,7 @@ The sandbox is minimal on purpose. It is there so the agent can't damage the sys
 | Dedicated `nanobot-agent` account | Owns nothing but the agent. Anything that escapes the container lands in an empty account, not yours |
 | Rootless Podman | Root inside the container is an unprivileged user on the host |
 | One shared folder | The only host path the agent sees is the projects folder |
-| Network guard | `nanoborealis-firewall.service` loads at boot, before any user services start. It always closes the pool node's API to the agent. With `nanoborealis lan off` it also drops the agent's traffic to private, link-local and CGNAT addresses, except this computer's own pool relay, which offers chat only, and the Hall |
+| Network guard | `nanoborealis-firewall.service` loads at boot, before any user services start. It always closes the pool node's API to the agent. With `nanoborealis lan off` it also drops the agent's traffic to private, link-local and CGNAT addresses, except this computer's own pool relay, which offers chat only, and the colony |
 | Snapshots | Hourly read-only copies of the homes and the projects folder, owned by root, so anything an agent does can be undone |
 | SELinux | Enforcing, and the projects folder is labeled for container use |
 | Loopback-only WebUI | The agent's own page listens on this machine only. Other devices reach it only after pairing: `nanoborealis-remote` shows a 6-digit PIN on this screen, then lets that device in over TLS with a long password of its own |
@@ -67,7 +67,7 @@ The sandbox is minimal on purpose. It is there so the agent can't damage the sys
 | `nanoborealis devices` / `devices remove <id>` | List the devices paired with this computer, or unpair one |
 | `nanoborealis pool join` / `serve` / `stop` / `status` / `logs` / `leave` | Pool this computer with others on your network so together they run models too big for any one of them. See [Pooling computers](#pooling-computers) |
 | `nanoborealis pool nodes` / `plan` / `apply` / `drain` / `undrain` / `bench` / `scores` / `policy` | Run as many models on the pool at once as it can, each fast enough for an agent. See [A council of models](#a-council-of-models) |
-| `nanoborealis council apply` / `status` / `autonomy` / `escalation` / `remove` | Seat one agent per model of the pool's loadout, meeting in the Hall. See [A council of models](#a-council-of-models) |
+| `nanoborealis council apply` / `status` / `autonomy` / `escalation` / `remove` | Seat one agent per model of the pool's loadout, meeting in the colony. See [A council of models](#a-council-of-models) |
 | `nanoborealis pool gpu` / `coordinate` | Show whether this computer would run the NVIDIA node or the processor one; run a pool coordinator without lending this computer |
 | `nanoborealis set-key` | Swap the OpenRouter key |
 | `nanoborealis rebuild [X.Y.Z]` | Rebuild the agent's container, optionally at a new nanobot version |
@@ -124,9 +124,9 @@ nanoborealis pool drain laptop   # move the models off a computer so it can leav
 - **What it knows.** Speeds start as estimates per kind of hardware and are corrected by every `bench` run, which also checks each model makes a correct tool call; a model that fails is left out. Capability comes from [LiveBench](https://livebench.ai), whose newest leaderboard the planner downloads every two weeks (`scores refresh` does it now), matched only to the same model version and size; otherwise it's a guess from the model's size, marked ≈. Scores in `~/.local/state/nanoborealis/pool/overrides.json` win over both.
 - **Your settings.** `policy` shows and changes them: the speed floors, memory kept free on every computer (`headroom_gb`), how many models and computers per model, and models to pin or ban, e.g. `nanoborealis pool policy min_gen_tps=15 banned=mlx-community/Qwen3-4B-4bit`.
 
-### Seats and the Hall
+### Seats and the colony
 
-With a pool running, `nanoborealis council apply` goes one step further: each model of the loadout becomes a **seat**, a persistent agent with its own container, home and memory, and the agent you already have is the chair. The seats meet in the Hall (`nanoborealis-hall`, port 11437), where they share a floor and a task board, vote with weights from capability and earned trust, and ask a free OpenRouter model when stuck. In the app, every new chat picks **Agent**, **Hall** or **Task**. `council autonomy continuous` lets seats pick up open tasks by themselves; `council escalation off` stops them asking OpenRouter. Seats can reach the Hall and the pool relay but, like the chair, not your local network. Seats can also be free cloud models with no pool at all: `nanoborealis rig up /usr/share/nanoborealis/rigs/starter.toml` brings up a team of them. The full design is in [`docs/rigs`](https://github.com/korxspyre/nanoborealis/blob/main/docs/rigs/README.md).
+With a pool running, `nanoborealis council apply` goes one step further: each model of the loadout becomes a **seat**, a persistent agent with its own container, home and memory, and the agent you already have is the chair. The seats meet in the colony (`nanoborealis-colony`, port 11437), where they share a floor and a task board, vote with weights from capability and earned trust, and ask a free OpenRouter model when stuck. In the app, every new chat picks **Agent**, **Colony** or **Task**. `council autonomy continuous` lets seats pick up open tasks by themselves; `council escalation off` stops them asking OpenRouter. Seats can reach the colony and the pool relay but, like the chair, not your local network. Seats can also be free cloud models with no pool at all: `nanoborealis rig up /usr/share/nanoborealis/rigs/starter.toml` brings up a team of them. The full design is in [`docs/rigs`](https://github.com/korxspyre/nanoborealis/blob/main/docs/rigs/README.md).
 
 ## Changing things
 
