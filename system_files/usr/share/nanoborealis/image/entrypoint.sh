@@ -60,6 +60,21 @@ if isinstance(p, dict):
 EOF
 fi
 
+# Skills that can't run here (their programs aren't in the image) or are one-time setup are kept out of the
+# instructions every request carries. The owner can turn one back on by removing it from disabledSkills.
+if [ -f "$state/config.json" ]; then
+    python3 - "$state/config.json" <<'EOF' || true
+import json, sys
+path = sys.argv[1]
+config = json.load(open(path, encoding="utf-8"))
+d = config.setdefault("agents", {}).setdefault("defaults", {})
+if not d.get("_lean_skills"):
+    d["disabledSkills"] = sorted(set(d.get("disabledSkills") or []) | {"github", "summarize", "tmux", "update-setup"})
+    d["_lean_skills"] = True
+    open(path, "w", encoding="utf-8").write(json.dumps(config, indent=2) + "\n")
+EOF
+fi
+
 # The collective's shared knowledge base: one folder the owner's agent and every colony member read and write.
 if [ -d "$HOME/projects" ] && [ -w "$HOME/projects" ]; then
     mkdir -p "$HOME/projects/knowledge"

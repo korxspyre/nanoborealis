@@ -29,6 +29,7 @@ crew_members = "nanoborealis_council.crew:CrewMembers"
 crew_send = "nanoborealis_council.crew:CrewSend"
 crew_inbox = "nanoborealis_council.crew:CrewInbox"
 todo = "nanoborealis_council.todo:TodoWrite"
+tools_load = "nanoborealis_council.lean:ToolsLoad"
 
 [build-system]
 requires = ["setuptools>=68"]

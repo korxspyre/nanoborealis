@@ -38,6 +38,10 @@ RUN uv tool install --no-cache --python 3.12 "nanobot-ai[api]==${NANOBOT_VERSION
  && /opt/nanobot/tools/nanobot-ai/bin/python -c "from importlib.metadata import entry_points; \
 assert 'colony_read' in {e.name for e in entry_points(group='nanobot.tools')}, 'council tools missing'"
 
+# nanobot's tool notes go with every request (about 1,300 tokens): a short version instead, which also tells the
+# agent about tools on demand (nanoborealis_council/lean.py).
+COPY tool_contract.md /opt/nanobot/tools/nanobot-ai/lib/python3.12/site-packages/nanobot/templates/agent/tool_contract.md
+
 COPY entrypoint.sh /usr/local/bin/nanobot-entrypoint
 COPY seed/ /opt/nanobot-seed/
 RUN sed -i 's/\r$//' /usr/local/bin/nanobot-entrypoint \

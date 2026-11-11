@@ -250,8 +250,10 @@ class Escalate(CouncilTool):
 # Permission modes for the agent's own shell and file tools (gate.py). nanobot imports this module when it loads
 # its plugin tools, before any tool runs, so this is where the gate goes in.
 from . import gate as _gate  # noqa: E402
+from . import lean as _lean  # noqa: E402  (tools on demand)
 
 _gate.install()
+_lean.install()
 
 
 # -- The rig: OpenRig's agent tools (rig_ps, rig_send, rig_inbox), on the colony --------------------------------
