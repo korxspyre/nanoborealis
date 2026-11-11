@@ -212,17 +212,36 @@ def pinned(asked: str) -> tuple[str | None, str]:
     return (head, rest) if sep and head in BUILT_IN and rest else (None, asked)
 
 
+def pinned_refusal(name: str, size: int) -> str:
+    """Why the named provider can't take a request of this size now ("" when it can)."""
+    with lock:
+        p = providers().get(name) or {}
+        if not p.get("key"):
+            return f"{p.get('label', name)} has no key yet: add one in Mission control, Providers"
+        if not p.get("enabled"):
+            return f"{p['label']} is switched off in Providers"
+        if p.get("max_request") and size > int(p["max_request"]):
+            return (f"this chat is about {size:,} tokens and {p['label']}'s free plan takes about {int(p['max_request']):,}"
+                    " a request: pick a model from another provider for this chat")
+        rest, why = usage.rest_left(name)
+        if rest > 0:
+            return f"{p['label']} is resting for {int(rest) // 60 + 1} min: {why}"
+        daily, used = int(p.get("daily") or 0), usage.day(name)["requests"]
+        if daily and used >= daily:
+            return f"{p['label']}'s requests for today are used up"
+        if p.get("per_minute") and usage.this_minute(name) >= int(p["per_minute"]):
+            return f"{p['label']} is at its limit for this minute: try again shortly"
+    return ""
+
+
 def candidates(asked: str, size: int) -> list[tuple[dict, str]]:
     """The providers that can take this request now: the one the model names first, then the one with most of its
     day left (each with the model it should be asked for)."""
     chosen, model_asked = pinned(asked)
     if chosen:
-        rest = [(p, m) for p, m in candidates(model_asked, size) if p["name"] != chosen]
-        with lock:
-            p = providers()[chosen]
-            free_now = (p.get("enabled") and p.get("key") and usage.rest_left(chosen)[0] <= 0
-                        and not (p.get("max_request") and size > int(p["max_request"])))
-        return ([(p, model_asked)] if free_now else []) + rest
+        # A model picked with its provider is that model there, or nothing: another provider would answer with a
+        # different model under the same name (pinned_refusal says why it couldn't go).
+        return [(providers()[chosen], model_asked)] if not pinned_refusal(chosen, size) else []
     found = []
     with lock:
         for name, p in providers().items():
@@ -311,7 +330,10 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, AttributeError):
             return self.reply(400, {"error": {"message": "Bad request."}})
         size = len(raw) // 4  # tokens, near enough to know what fits where
-        exact = (self.headers.get("X-NanoBorealis-Exact") or "") == "1" and pinned(asked)[0] is not None
+        chosen = pinned(asked)[0]
+        if chosen and (why := pinned_refusal(chosen, size)):
+            return self.reply(429, {"error": {"message": f"{asked} can't answer: {why}.", "type": "rate_limit_error"}})
+        exact = chosen is not None
         tried: list[str] = []
         for _attempt in range(1 if exact else 6):
             options = [(p, m) for p, m in candidates(asked, size) if p["name"] not in tried][:1 if exact else None]
