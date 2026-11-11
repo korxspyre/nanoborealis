@@ -11,6 +11,7 @@ on a pool of ordinary computers each answer can take a while.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -241,23 +242,31 @@ class ColonyView:
                                 padding=ft.Padding.symmetric(vertical=4))
         if kind == "pass":
             return t.muted(f"{self.seat_name(author)} passes", size=12)
-        mine = author == "you"
-        tape = ft.Row([t.badge(self.seat_name(author).upper(),
-                               t.ACCENT if mine else t.WARN if author in ("advisor", "hall") else t.VIOLET),
+        text = message["text"]
+        copy = (ft.Icons.CONTENT_COPY_ROUNDED, "Copy", lambda: self.workspace.copy_later(text))
+        if author == "you":  # your message: as in the agent chat, a bubble on the right with copy and send again
+            room = message.get("room")
+            again = [(ft.Icons.REFRESH_ROUNDED, "Send it again", lambda: self.page.run_task(self.resend, room, text))] if room else []
+            return transcript.user_message(text, actions=[copy, *again])
+        actions = [] if author in ("advisor", "hall") else [
+            (ft.Icons.THUMB_UP_OUTLINED, "Good answer: more trust for this crew member",
+             lambda a=author: self.page.run_task(self.feedback, a, True)),
+            (ft.Icons.THUMB_DOWN_OUTLINED, "Poor answer: less trust",
+             lambda a=author: self.page.run_task(self.feedback, a, False))]
+        answer = transcript.Answer(text, on_copy=self.workspace.copy_later, actions=actions)
+        answer.finish()  # code blocks get their header and copy button
+        tape = ft.Row([t.badge(self.seat_name(author).upper(), t.WARN if author in ("advisor", "hall") else t.VIOLET),
+                       *([t.muted("asks for outside advice", size=11.5)] if kind == "escalation" else []),
                        t.muted(stamp(message.get("at")), size=11)], spacing=8)
-        body = ft.Text(message["text"], size=14, selectable=True, color=t.TEXT) if mine else transcript.markdown(message["text"])
-        controls: list[ft.Control] = [tape, body]
-        if kind == "escalation":
-            controls.insert(1, t.muted("asks for outside advice", size=11.5))
-        if not mine and author not in ("advisor", "hall"):
-            controls.append(ft.Row([
-                t.icon_button(ft.Icons.THUMB_UP_OUTLINED, "Good answer: more trust for this crew member", size=14,
-                              on_click=lambda _e, a=author: self.page.run_task(self.feedback, a, True)),
-                t.icon_button(ft.Icons.THUMB_DOWN_OUTLINED, "Poor answer: less trust", size=14,
-                              on_click=lambda _e, a=author: self.page.run_task(self.feedback, a, False)),
-            ], spacing=0))
-        return ft.Container(ft.Column(controls, spacing=4), padding=12, border_radius=t.RADIUS_LG,
-                            bgcolor=t.RAISED if mine else t.PANEL, border=ft.Border.all(1, t.LINE))
+        return ft.Column([tape, answer.view], spacing=4)
+
+    async def resend(self, room_id: int, text: str) -> None:
+        try:
+            await self.call("POST", f"/rooms/{room_id}/messages", {"text": text})
+        except PairingError as e:
+            self.workspace.toast(str(e))
+            return
+        self.workspace.toast("Sent again.")
 
     async def feedback(self, seat: str, good: bool) -> None:
         try:
@@ -278,10 +287,12 @@ class ColonyView:
         listing = ft.Column([self.bubble(m) for m in messages], spacing=10)
         if not messages:
             listing.controls.append(t.muted("Say something to start."))
-        box = t.field(hint="Message every seat" if room["kind"] == "hall" else f"Message {self.seat_name(room['seat'])}",
-                      multiline=True)
+        box = t.field(hint="Message your colony (Enter sends, Shift+Enter for a new line)" if room["kind"] == "hall"
+                      else f"Message {self.seat_name(room['seat'])}", multiline=True)
         box.max_lines = 6
         box.shift_enter = True
+        working = transcript.StatusLine()
+        listing.data = {"working": working}
 
         async def send(_event=None) -> None:
             text = (box.value or "").strip()
@@ -295,18 +306,23 @@ class ColonyView:
             await self.refresh_room(room_id, listing)
 
         box.on_submit = send
-        actions: list[ft.Control] = [ft.Container(box, expand=True), t.primary_button("Send", on_click=send)]
+        actions: list[ft.Control] = [ft.Container(box, expand=True),
+                                     ft.IconButton(ft.Icons.ARROW_UPWARD_ROUNDED, tooltip="Send (Enter)", bgcolor=t.ACCENT,
+                                                   icon_color=t.ON_ACCENT, on_click=send)]
         if room["kind"] == "hall":
             actions.insert(1, t.icon_button(ft.Icons.HOW_TO_VOTE_OUTLINED, "Ask the crew to vote",
                                             on_click=lambda _e: self.page.run_task(self.new_vote, room_id, listing)))
         self.page.run_task(self.follow_room, room_id, listing, messages[-1]["id"] if messages else 0)
         title = room["title"] if room["kind"] == "hall" else self.seat_name(room.get("seat") or "")
-        return title, self.frame([listing], ft.Row(actions, spacing=8, vertical_alignment=ft.CrossAxisAlignment.END))
+        composer = ft.Column([working.view, ft.Row(actions, spacing=8, vertical_alignment=ft.CrossAxisAlignment.END)],
+                             spacing=6, tight=True)
+        return title, self.frame([listing], composer)
 
     async def refresh_room(self, room_id: int, listing: ft.Column) -> None:
         messages = (await self.call("GET", f"/rooms/{room_id}/messages"))["messages"]
         listing.controls = [self.bubble(m) for m in messages]
-        listing.data = {m["id"] for m in messages}  # shown already: the follower doesn't add them again
+        listing.data = {**(listing.data if isinstance(listing.data, dict) else {}),
+                        "shown": {m["id"] for m in messages}}  # shown already: the follower doesn't add them again
         self.page.update()
 
     async def follow_room(self, room_id: int, listing: ft.Column, last: int) -> None:
@@ -317,19 +333,35 @@ class ColonyView:
             await asyncio.sleep(POLL_SECONDS)
             try:
                 fresh = (await self.call("GET", f"/rooms/{room_id}/messages?after={last}"))["messages"]
+                busy = (await self.call("GET", f"/activity?since={time.time():.0f}")).get("busy", [])
             except PairingError:
                 continue
-            if fresh and self.follower is follower and self.showing == key:
+            if self.follower is not follower or self.showing != key:
+                break
+            state = listing.data if isinstance(listing.data, dict) else {}
+            working = state.get("working")
+            answering = [b for b in busy if b.get("doing") in ("answering in a chat", "talking with you")]
+            if working is not None:  # who is answering now, and the tool in use: the agent chat's "Working..." line
+                if answering:
+                    b = answering[0]
+                    verb = f"{self.seat_name(b['seat'])} is answering" + (f" · {b['step']}" if b.get("step") else "")
+                    if not working.view.visible:
+                        working.start(verb)
+                    else:
+                        working.set_verb(verb)
+                elif working.view.visible:
+                    working.stop()
+            if fresh:
                 last = fresh[-1]["id"]
-                shown = listing.data if isinstance(listing.data, set) else set()
+                shown = state.get("shown", set())
                 fresh = [m for m in fresh if m["id"] not in shown]  # your own message was shown when you sent it
-                if not fresh:
-                    continue
-                if listing.controls and isinstance(listing.controls[0], ft.Text):
-                    listing.controls.clear()
-                listing.controls.extend(self.bubble(m) for m in fresh)
-                listing.data = shown | {m["id"] for m in fresh}
-                self.page.update()
+                if fresh:
+                    if listing.controls and isinstance(listing.controls[0], ft.Text):
+                        listing.controls.clear()
+                    listing.controls.extend(self.bubble(m) for m in fresh)
+                    state["shown"] = shown | {m["id"] for m in fresh}
+                    listing.data = state
+            self.page.update()
 
     async def new_vote(self, room_id: int, listing: ft.Column) -> None:
         question = t.field("The question", hint="Tabs or spaces?")

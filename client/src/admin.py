@@ -183,6 +183,11 @@ def provider_key(machine: Machine, provider: str, key: str) -> dict[str, Any]:
     return _call(machine, "POST", "/nanoborealis/providers/key", {"provider": provider, "key": key})
 
 
+def provider_models(machine: Machine) -> list[dict[str, Any]]:
+    """Every model the router's providers serve: [{id: "groq:openai/gpt-oss-120b", model, provider, label, name, context}]."""
+    return _call(machine, "GET", "/nanoborealis/providers/models").get("models", [])
+
+
 def provider_set(machine: Machine, provider: str, field: str, value: Any) -> dict[str, Any]:
     return _call(machine, "POST", "/nanoborealis/providers/set", {"provider": provider, "field": field, "value": value})
 

@@ -14,6 +14,7 @@ OpenRouter is asked with max_price 0, and the others are their free plans.
                                            smart MODEL, fast MODEL
     nanoborealis-router status             what each provider has left today, as JSON
     nanoborealis-router token              the token clients use (made on first use)
+    nanoborealis-router models             every model each provider serves, as JSON
 
 How it chooses, for each request:
   1. Providers that are on, have a key, aren't resting after a refusal, have requests left today and this minute,
@@ -21,6 +22,10 @@ How it chooses, for each request:
   2. Of those, the one with the largest share of its day left.
   3. A refusal (429, 413, a server error, no answer) rests that provider (a minute, or what it says; until
      midnight UTC when it says the day is used up) and the request goes to the next.
+
+Choosing a provider: a model written "<provider>:<model>" (groq:openai/gpt-oss-120b, nim:nvidia/...) goes to that
+provider first, and to the others only if it refuses. `nanoborealis-router models` lists every model each provider
+with a key serves (OpenRouter's free ones only), written that way.
 
 Models: a request names a model the way OpenRouter does. OpenRouter gets it as it is when it is a free one.
 The others have a "smart" and a "fast" model each, picked from what the provider serves when its key is stored
@@ -171,8 +176,23 @@ def model_for(provider: dict, asked: str) -> str | None:
     return provider.get(tier(asked)) or provider.get("smart") or None
 
 
+def pinned(asked: str) -> tuple[str | None, str]:
+    """("groq", "openai/gpt-oss-120b") for "groq:openai/gpt-oss-120b"; (None, asked) when no provider is named."""
+    head, sep, rest = asked.partition(":")
+    return (head, rest) if sep and head in BUILT_IN and rest else (None, asked)
+
+
 def candidates(asked: str, size: int) -> list[tuple[dict, str]]:
-    """The providers that can take this request now, the one with most of its day left first."""
+    """The providers that can take this request now: the one the model names first, then the one with most of its
+    day left (each with the model it should be asked for)."""
+    chosen, model_asked = pinned(asked)
+    if chosen:
+        rest = [(p, m) for p, m in candidates(model_asked, size) if p["name"] != chosen]
+        with lock:
+            p = providers()[chosen]
+            free_now = (p.get("enabled") and p.get("key") and usage.rest_left(chosen)[0] <= 0
+                        and not (p.get("max_request") and size > int(p["max_request"])))
+        return ([(p, model_asked)] if free_now else []) + rest
     found = []
     with lock:
         for name, p in providers().items():
@@ -243,8 +263,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed():
             return self.reply(401, {"error": {"message": "Not the router's token."}})
         if self.path.rstrip("/") == "/v1/models":
-            ids = sorted({m for p in providers().values() if p.get("key") for m in (p.get("smart"), p.get("fast")) if m})
-            return self.reply(200, {"object": "list", "data": [{"id": i, "object": "model"} for i in ids]})
+            return self.reply(200, {"object": "list", "data": [{"id": m["id"], "object": "model", "owned_by": m["provider"]}
+                                                               for m in all_models()]})
         if self.path.rstrip("/") == "/status":
             return self.reply(200, status())
         self.reply(404, {"error": {"message": "No such endpoint."}})
@@ -333,6 +353,52 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
 
+MODEL_CACHE: dict[str, tuple[float, list[dict]]] = {}
+NOT_CHAT = re.compile(r"embed|rerank|whisper|tts|guard|safety|vision-only|clip|parse|ocr|retriev|reward|"
+                      r"playai|distil-whisper|orpheus|prompt-guard|nemoretriever|-detector|cosmos|flux|sdxl|stable-diffusion", re.I)
+
+
+def provider_models(name: str) -> list[dict]:
+    """The chat models one provider serves (cached for an hour); OpenRouter's free ones only."""
+    p = providers()[name]
+    if not p.get("key"):
+        return []
+    cached = MODEL_CACHE.get(name)
+    if cached and time.time() - cached[0] < 3600:
+        return cached[1]
+    try:
+        request = urllib.request.Request(p["url"] + "/models", headers={"Authorization": f"Bearer {p['key']}",
+                                                                        "User-Agent": "nanoborealis-router"})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            data = [m for m in json.loads(response.read()).get("data", []) if isinstance(m, dict) and m.get("id")]
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        print(f"couldn't list {name}'s models: {error}", file=sys.stderr)
+        return cached[1] if cached else []
+    found = []
+    for m in data:
+        mid = str(m["id"])
+        if NOT_CHAT.search(mid):
+            continue
+        if name == "openrouter":
+            pricing = m.get("pricing") or {}
+            if not mid.endswith(":free") and any(str(v) not in ("0", "0.0", "", "None") for v in pricing.values()):
+                continue
+            if "tools" not in (m.get("supported_parameters") or ["tools"]):
+                continue
+        found.append({"id": f"{name}:{mid}", "model": mid, "provider": name, "label": p["label"],
+                      "name": str(m.get("name") or mid), "context": int(m.get("context_length") or m.get("context_window") or 0)})
+    MODEL_CACHE[name] = (time.time(), found)
+    return found
+
+
+def all_models() -> list[dict]:
+    out = []
+    for name, p in providers().items():
+        if p.get("enabled") and p.get("key"):
+            out += provider_models(name)
+    return out
+
+
 def discover(name: str) -> dict:
     """Ask a provider which models it serves and pick its smart and fast ones."""
     p = providers()[name]
@@ -386,6 +452,9 @@ def main(argv: list[str]) -> int:
         return 0
     if argv == ["status"]:
         print(json.dumps(status()))
+        return 0
+    if argv == ["models"]:
+        print(json.dumps({"models": all_models()}))
         return 0
     if argv == ["token"]:
         print(client_token())

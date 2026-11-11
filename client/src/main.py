@@ -634,6 +634,8 @@ class NanoBorealisApp:
         await self.pref_set(PREF_LAST_MACHINE, machine.key)
         self.machine = machine
         self.link = link
+        self.catalog.router_source = lambda m=machine: admin.provider_models(m)  # NIM's and Groq's models too
+        self.catalog.fetched = 0.0
         self.was_up = False
         self.show_chat()
         self.page.run_task(self.keep_linked, link)

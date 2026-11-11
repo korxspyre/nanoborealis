@@ -1270,6 +1270,15 @@ async def crew_to_router() -> list[str]:
     return moved
 
 
+async def providers_models(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
+    """Every model the router's providers serve, for the app's model picker: "groq:openai/gpt-oss-120b" and so on."""
+    done = await router_run("models")
+    try:
+        return 200, json.loads(done.stdout)
+    except ValueError:
+        return 502, {"error": f"The router didn't answer: {done.stderr.strip()[-300:]}"}
+
+
 async def providers_overview(data: dict, query: dict, owner: str, device_id: str) -> tuple[int, dict]:
     """What each free provider has left today, whether it has a key, and whether the router is running."""
     first = not await router_has_token()
@@ -2216,6 +2225,7 @@ ADMIN_ROUTES = {
     ("GET", "/nanoborealis/rigs"): rigs_overview,
     ("POST", "/nanoborealis/rigs/up"): rigs_up,
     ("GET", "/nanoborealis/providers"): providers_overview,
+    ("GET", "/nanoborealis/providers/models"): providers_models,
     ("POST", "/nanoborealis/providers/key"): providers_key,
     ("POST", "/nanoborealis/providers/set"): providers_set,
     ("GET", "/nanoborealis/agent"): agent_overview,

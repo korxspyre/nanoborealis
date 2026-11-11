@@ -59,7 +59,9 @@ def preset_model(settings: dict[str, Any], name: str | None) -> str | None:
 
 def preset_name(model_id: str) -> str:
     """A preset name for an OpenRouter model id: "qwen/qwen3.8-27b:free" -> "qwen3.8-27b-free"."""
-    name = re.sub(r"[^a-z0-9.\-]+", "-", model_id.split("/", 1)[-1].lower()).strip("-.")
+    via, sep, rest = model_id.partition(":")  # "groq:openai/gpt-oss-120b": another provider's, named apart
+    prefix = f"{via}-" if sep and via in ("nim", "groq") else ""
+    name = re.sub(r"[^a-z0-9.\-]+", "-", prefix + (rest if prefix else model_id).split("/", 1)[-1].lower()).strip("-.")
     return (name or "model")[:48].rstrip("-.") if name != "default" else "default-model"
 
 

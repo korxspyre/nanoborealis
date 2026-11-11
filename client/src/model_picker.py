@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (C) 2026 korxspyre
-"""Choosing the agent's model from everything on OpenRouter.
+"""Choosing the agent's model from every provider: OpenRouter's catalog, and NVIDIA NIM's and Groq's free models
+through the NanoBorealis computer's router.
 
 A search box over the whole catalog, with "Free only" on by default: free models cost nothing, and
 every other one shows its price before it can be chosen, and asks once more. Models that can't use
@@ -27,7 +28,7 @@ class ModelPicker:
                  title: str = "Choose a model", note: str | None = None):
         self.page, self.catalog, self.current, self.on_choose = page, catalog, current, on_choose
         self.query = ft.TextField(
-            hint_text="Search every model on OpenRouter", autofocus=True, dense=True, text_size=14,
+            hint_text="Search every model", autofocus=True, dense=True, text_size=14,
             prefix_icon=ft.Icons.SEARCH_ROUNDED, border_radius=t.RADIUS, border_color=t.LINE_HI,
             focused_border_color=t.ACCENT, bgcolor=t.BG, on_change=self.refresh,
         )
@@ -42,10 +43,13 @@ class ModelPicker:
                      ft.DropdownOption("price", "Cheapest"), ft.DropdownOption("name", "Name")],
             on_select=self.refresh,
         )
+        self.provider = ft.Dropdown(
+            value="", dense=True, width=170, text_size=13, border_radius=t.RADIUS, border_color=t.LINE_HI,
+            options=[ft.DropdownOption("", "Every provider")], on_select=self.refresh)
         self.count = t.muted("")
         self.results = ft.ListView(spacing=2, expand=True)
         self.status = ft.Row([ft.ProgressRing(width=16, height=16, stroke_width=2),
-                              t.muted("Loading OpenRouter's models...")], spacing=10)
+                              t.muted("Loading every provider's models...")], spacing=10)
         header = [t.muted(note, size=13)] if note else []
         self.dialog = ft.AlertDialog(
             modal=False, bgcolor=t.PANEL, shape=ft.RoundedRectangleBorder(radius=t.RADIUS_LG),
@@ -54,7 +58,7 @@ class ModelPicker:
                 *header,
                 self.query,
                 ft.Row([self.free_only, self.tools_only], spacing=16),
-                ft.Row([ft.Container(self.count, expand=True), self.sort],
+                ft.Row([ft.Container(self.count, expand=True), self.provider, self.sort],
                        vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 self.status,
                 self.results,
@@ -71,6 +75,8 @@ class ModelPicker:
             self.page.update()
             return
         self.status.visible = False
+        self.provider.options = [ft.DropdownOption("", "Every provider"),
+                                 *(ft.DropdownOption(key, label) for key, label in self.catalog.providers())]
         self.refresh()
 
     def close(self, _event=None) -> None:
@@ -80,7 +86,8 @@ class ModelPicker:
         if not self.catalog.models:
             return
         found = self.catalog.search(self.query.value or "", free_only=bool(self.free_only.value),
-                                    tools_only=bool(self.tools_only.value), sort=self.sort.value or "newest")
+                                    tools_only=bool(self.tools_only.value), sort=self.sort.value or "newest",
+                                    provider=self.provider.value or "")
         self.count.value = (f"{len(found)} of {len(self.catalog.models)} models"
                             + (" · all free" if self.free_only.value else ""))
         self.results.controls = [self.row(m) for m in found[:200]]
@@ -91,7 +98,8 @@ class ModelPicker:
 
     def row(self, model: models_catalog.Model) -> ft.Control:
         chosen = model.id == self.current
-        tags: list[ft.Control] = [t.badge("FREE", t.GOOD) if model.free else t.badge(model.price_label(), t.WARN)]
+        tags: list[ft.Control] = [t.badge("FREE", t.GOOD) if model.free else t.badge(model.price_label(), t.WARN),
+                                  t.badge(model.provider_label, t.ACCENT_HI)]
         if model.context_label():
             tags.append(t.badge(model.context_label(), t.MUTED))
         if model.reasoning:
