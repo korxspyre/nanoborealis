@@ -2165,6 +2165,19 @@ async def agent_hands(method: str, path: str, headers: list[tuple[str, str]], re
         return await reply(writer, 200, {"mode": agent_mode(str(query.get("chat") or "default"))})
     if route == "/nanoborealis/agent-hands/crew" and method == "GET":
         query = {k: v[-1] for k, v in urllib.parse.parse_qs(query_string).items()}
+        if query.get("what") == "inbox":  # mail the crew sent the owner's agent
+            status, payload = await asyncio.to_thread(hall_proxy, "GET", "/inbox", "seat=agent", None)
+            return await reply(writer, status, payload)
+        if query.get("what") == "members":  # who is in the colony, and what each is doing right now
+            status, seats = await asyncio.to_thread(hall_proxy, "GET", "/seats", "", None)
+            _s, now = await asyncio.to_thread(hall_proxy, "GET", "/activity", f"since={time.time():.0f}", None)
+            busy = {b["seat"]: b for b in (now.get("busy") or [])} if _s == 200 else {}
+            members = [{"id": s["id"], "name": s.get("address") or s["name"], "role": s.get("role") or "",
+                        "group": s.get("pod") or "", "model": s.get("model"), "trust": s.get("trust"),
+                        "doing": (busy.get(s["id"]) or {}).get("doing") or "idle",
+                        "tool": (busy.get(s["id"]) or {}).get("step")}
+                       for s in (seats.get("seats") or []) if not s.get("chair")] if status == 200 else []
+            return await reply(writer, status, {"members": members} if status == 200 else seats)
         path = f"/tasks/{int(query['task'])}" if str(query.get("task") or "").isdigit() else "/tasks"
         status, payload = await asyncio.to_thread(hall_proxy, "GET", path, "", None)
         if status == 200 and "tasks" in payload:
@@ -2184,6 +2197,13 @@ async def agent_hands(method: str, path: str, headers: list[tuple[str, str]], re
         return await reply(writer, 400, {"error": "Bad request."})
     if route == "/nanoborealis/agent-hands/ask":
         status, payload = await agent_ask(data)
+    elif route == "/nanoborealis/agent-hands/crew" and isinstance(data.get("done"), int):  # crew_inbox: dealt with
+        status, payload = await asyncio.to_thread(hall_proxy, "POST", f"/inbox/{data['done']}/ack", "", {"state": "done"})
+    elif route == "/nanoborealis/agent-hands/crew" and data.get("to"):  # crew_send: mail a member, or everyone
+        status, payload = await asyncio.to_thread(hall_proxy, "POST", "/inbox", "", {
+            "from": "agent", "to": str(data["to"])[:100], "text": str(data.get("text") or "")[:8000],
+            "kind": "reply" if isinstance(data.get("reply_to"), int) else "message",
+            **({"reply_to": data["reply_to"]} if isinstance(data.get("reply_to"), int) else {})})
     elif route == "/nanoborealis/agent-hands/crew":  # the agent hands the colony a task (its crew_task tool)
         title = str(data.get("title") or "").strip()[:200]
         if not title:

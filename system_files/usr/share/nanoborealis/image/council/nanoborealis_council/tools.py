@@ -285,7 +285,8 @@ class RigSend(CouncilTool):
     name = "rig_send"
     description = ("Mail another member directly: one seat (its id or name@rig), a whole institution "
                    "(\"pod:rig/pod\"), the whole rig (\"rig:name\", a broadcast), the head agent (\"head\"), or the "
-                   "owner (\"you\"). It waits in their inbox until they deal with it.")
+                   "owner (\"you\"), the owner's own agent (\"agent\"), or every member and the agent at once "
+                   "(\"everyone\"). It waits in their inbox until they deal with it.")
     parameters = schema({"to": {"type": "string"}, "text": {"type": "string"},
                          "kind": {"type": "string", "enum": ["message", "task", "nudge", "reply"]},
                          "reply_to": {"type": "integer", "description": "The mail you answer, if any."}}, ["to", "text"])

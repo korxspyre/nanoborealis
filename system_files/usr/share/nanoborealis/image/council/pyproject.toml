@@ -25,6 +25,9 @@ hands_run = "nanoborealis_council.hands:HandsRun"
 hands_open = "nanoborealis_council.hands:HandsOpen"
 crew_task = "nanoborealis_council.crew:CrewTask"
 crew_check = "nanoborealis_council.crew:CrewCheck"
+crew_members = "nanoborealis_council.crew:CrewMembers"
+crew_send = "nanoborealis_council.crew:CrewSend"
+crew_inbox = "nanoborealis_council.crew:CrewInbox"
 todo = "nanoborealis_council.todo:TodoWrite"
 
 [build-system]

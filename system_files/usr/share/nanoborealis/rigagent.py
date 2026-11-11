@@ -108,7 +108,8 @@ when work needs the web, search it; when it needs code, write and run it.
 The colony's chats, task board and votes: `hall_read` (chats, the board, votes waiting for you), `hall_post`,
 `task_list`, `task_claim`, `task_update`, `task_submit`, `task_review`, `vote`, `escalate`; and the rig's own:
 `rig_ps` (who is in the civilization and where), `rig_send` (mail a member, an institution, everyone, or the owner)
-and `rig_inbox` (your mail). Take work from the board
+and `rig_inbox` (your mail). The owner's own agent is one of you: mail it with `rig_send` to "agent", and
+"everyone" reaches every member and it at once. Take work from the board
 that fits your role, do it properly with your tools, hand it in, and review others' work honestly when asked: trust
 is earned that way, and trust is your weight in votes.
 """

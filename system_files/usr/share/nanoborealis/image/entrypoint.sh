@@ -60,6 +60,14 @@ if isinstance(p, dict):
 EOF
 fi
 
+# The collective's shared knowledge base: one folder the owner's agent and every colony member read and write.
+if [ -d "$HOME/projects" ] && [ -w "$HOME/projects" ]; then
+    mkdir -p "$HOME/projects/knowledge"
+    [ -f "$HOME/projects/knowledge/INDEX.md" ] || printf '%s\n\n' "# What the collective knows" \
+        "One line per subject: [subject](subject.md): what it covers. Written by the owner's agent and the colony." \
+        > "$HOME/projects/knowledge/INDEX.md"
+fi
+
 # The agent's relative paths start in its workspace, so "projects/app" landed in a private folder
 # there, and not in ~/projects, the folder shared with the desktop (the app's Projects and Changes
 # panels watch it). Make the workspace's projects/ be the shared folder. Earlier work the agent put
@@ -100,6 +108,16 @@ if [ -f "$agents" ] && ! grep -q '^## Stay on the request' "$agents"; then
 - `memory/MEMORY.md` is only an index. Open a subject's file under `memory/subjects/` only when the current request is about that subject.
 - When you save memory (including Dream), keep each subject in its own file under `memory/subjects/`, add one index line to `MEMORY.md` for a new subject, and never merge facts from one subject into another.
 - If a request is ambiguous about which project it means, ask instead of guessing from memory.
+
+## The collective's knowledge
+You are one of a collective: the owner's own agent and every colony member share one knowledge base, in
+`~/projects/knowledge/` (the same folder for all of you). Your own memory is for you; this is for everyone.
+- Before research or a decision, read `~/projects/knowledge/INDEX.md` and the subjects it points to: someone may
+  already know.
+- When you learn something durable that others could use (a finding, a decision and why, how something on this
+  computer works, the owner's standing preferences), write it to `~/projects/knowledge/<subject>.md` and add one
+  line for it to `INDEX.md`. Say where it came from and the date. Update a subject instead of starting a second one.
+- Never put keys, passwords or other secrets there.
 EOF
 fi
 # What this computer lets you do: the sandbox is minimal (files, network), undo is snapshots, and other devices

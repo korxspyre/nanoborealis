@@ -599,6 +599,11 @@ class Hall:
         reply_to = data.get("reply_to") if isinstance(data.get("reply_to"), int) else None
         if to == "you":
             targets = [("you", None)]
+        elif to in ("agent", "your agent", "the agent"):  # the owner's own agent: it reads this with crew_inbox
+            targets = [("agent", None)]
+        elif to in ("everyone", "all", "colony"):  # every member, and the owner's agent unless it is the sender
+            rows = self.db.execute("SELECT id, rig FROM seats WHERE id != ? AND chair = 0", (sender,)).fetchall()
+            targets = [(r["id"], r["rig"]) for r in rows] + ([("agent", None)] if sender != "agent" else [])
         elif to == "head":
             head = self.head()["head"]
             if not head:
@@ -1520,7 +1525,8 @@ def route(hall: Hall, who: str, method: str, parts: list[str], query: dict, data
             admin_only()
             return hall.rig_restore(name, data)
         case "POST", ["inbox"]:
-            return hall.send(me, data)
+            # The computer's own services send for the owner's agent ("from": "agent"); a member sends as itself.
+            return hall.send("agent" if admin and data.get("from") == "agent" else me, data)
         case "GET", ["inbox"]:
             return {"mail": hall.mail(query["seat"] if admin and query.get("seat") else me, query.get("state"))}
         case "POST", ["inbox", item, "ack"]:
