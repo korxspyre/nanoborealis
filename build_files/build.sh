@@ -26,9 +26,6 @@ chmod 0755 /usr/libexec/nanoborealis-firstrun \
            /usr/share/nanoborealis/nanoborealis \
            /usr/share/nanoborealis/image/entrypoint.sh
 ln -sf /usr/share/nanoborealis/nanoborealis /usr/bin/nanoborealis
-# Earlier names, so existing habits, scripts and desktop icons keep working.
-ln -sf /usr/share/nanoborealis/nanoborealis /usr/bin/nanoaurora
-ln -sf /usr/share/nanoborealis/nanoborealis /usr/bin/nanobot-os
 
 systemctl enable nanoborealis-firewall.service nanoborealis-migrate.service nanoborealis-wifi-resume.service
 

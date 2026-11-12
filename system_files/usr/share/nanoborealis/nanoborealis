@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (C) 2026 korxspyre
-# Manage NanoBorealis and its agent. `nanoaurora` and `nanobot-os` are older names for it.
+# Manage NanoBorealis and its agent.
 # Run as your normal user; it uses sudo where it needs to.
 set -euo pipefail
 
@@ -33,7 +33,7 @@ Usage: $(basename "$0") <command>
   pool ...          pool this computer with others on your network to run models none could alone:
                     join [--private NAME] [--cpu], serve MODEL, stop MODEL, status, logs, leave; and a
                     council of models at once: nodes, plan, apply, drain, undrain, bench, scores, policy
-  council ...       seat a council on the pool's loadout, one agent per model, meeting in the colony:
+  crew ...          seat a council on the pool's loadout, one agent per model, meeting in the colony:
                     apply, status, bench (the council's own benchmarks), seat ID [capability],
                     autonomy on-task|continuous, escalation on|off, remove
   rig ...           teams of agents as a file: up SPEC.toml [--plan], ps [NAME], down NAME, snapshot NAME,
@@ -94,7 +94,6 @@ case "$cmd" in
         for arg in "${@:2}"; do
             case "$arg" in
                 --stable) channel=stable ;;
-                --testing) channel=dev; echo "The testing channel is retired; its builds are on dev now." >&2 ;;
                 --dev) channel=dev ;;
                 --nvidia) edition=-nvidia ;;
                 --standard) edition=standard ;;
@@ -104,9 +103,8 @@ case "$cmd" in
         done
         tracked="$(tracked_image)"
         if [ -z "$channel" ]; then
-            case "$tracked" in  # under this name or an earlier one, in either edition
+            case "$tracked" in  # either edition
                 */nanoborealis:dev|*/nanoborealis-nvidia:dev) channel=dev ;;
-                */nanoborealis:testing|*/nanoborealis-nvidia:testing) channel=dev ;;  # retired: testing builds are dev now
                 *) channel=stable ;;
             esac
         fi
@@ -123,7 +121,7 @@ case "$cmd" in
             want="$tracked"
         fi
         if [ "$tracked" != "$want" ]; then
-            # A new channel, or a system still following an earlier name: switch the tracked image.
+            # A new channel or edition: switch the tracked image.
             echo "This system follows ${tracked:-an unknown image}; updates will come from $want."
             action=(bootc switch --transport registry "$want")
         else
@@ -466,7 +464,7 @@ colony_key() {  # the agent's OpenRouter key to the colony: escalation and cloud
 }
 
 case "$cmd" in
-    council)
+    crew)
         # The council (docs/rigs/README.md): one seat per model of the pool's loadout, each its own
         # agent with its own memory, meeting the others in the colony. The agent you already have is the
         # chair. Seats reach their models through the pool relay, and the colony with a token of their own.
@@ -502,7 +500,7 @@ for s in json.load(sys.stdin): print(s["id"])' 2>/dev/null || true; }
 
                 # The colony, and the firewall opening that lets seats (and only they) reach it.
                 sudo install -d -m 0755 /etc/nanoborealis
-                sudo sh -c 'umask 022 && echo "# written by nanoborealis council apply" > /etc/nanoborealis/council.env'
+                sudo sh -c 'umask 022 && echo "# written by nanoborealis crew apply" > /etc/nanoborealis/council.env'
                 sudo systemctl enable --now --quiet nanoborealis-colony.service
                 sudo systemctl restart nanoborealis-firewall.service
                 for _ in $(seq 1 30); do colony GET /me >/dev/null 2>&1 && break; sleep 1; done
@@ -542,7 +540,7 @@ print(json.dumps({k: s[k] for k in ("id", "name", "model", "family", "capability
                 colony POST /seats '{"id": "chair", "name": "Chair", "model": "your agent'"'"'s own models", "chair": true, "capability": 50, "rotate": true}' \
                     | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"], end="")' | secret chair-colony
                 sudo install -d -o "$AGENT_USER" -g "$AGENT_USER" "$qdir/nanobot.container.d"
-                printf '%s\n' "# The chair's place in the council (nanoborealis council apply)." "[Container]" \
+                printf '%s\n' "# The chair's place in the council (nanoborealis crew apply)." "[Container]" \
                     "Environment=NANOBOREALIS_COLONY_URL=http://host.containers.internal:11437" \
                     "Secret=chair-colony,type=env,target=NANOBOREALIS_COLONY_TOKEN" \
                     | sudo -u "$AGENT_USER" tee "$qdir/nanobot.container.d/council.conf" >/dev/null
@@ -556,7 +554,7 @@ print(json.dumps({k: s[k] for k in ("id", "name", "model", "family", "capability
                 agentctl daemon-reload
                 for id in $keep; do agentctl restart "seat-$id.service"; done
                 agentctl restart nanobot.service
-                echo "The council has $count seat(s), the chair and Claude's outside seat. Talk to it from the app, or see: $me council status" ;;
+                echo "The council has $count seat(s), the chair and Claude's outside seat. Talk to it from the app, or see: $me crew status" ;;
             bench)
                 # NanoBench: the council's own tests, run on each seat's model through the pool and graded by code.
                 # The results go to the colony as the benchmark part of trust, and into what every seat is told.
@@ -566,13 +564,13 @@ print(json.dumps({k: s[k] for k in ("id", "name", "model", "family", "capability
                 # An outside seat: an agent that isn't run by the pool but joins over the colony's API, as Claude
                 # Code does. It sees the colony tokenized (personal details swapped for placeholders), a vote doesn't
                 # wait for it, and its weight is the capability you give it times the trust it earns.
-                [[ "${3:-}" =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]] || { echo "usage: $me council seat <id> [capability 0-100]   (new token each time)" >&2; exit 2; }
+                [[ "${3:-}" =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]] || { echo "usage: $me crew seat <id> [capability 0-100]   (new token each time)" >&2; exit 2; }
                 outside_seat "$3" "$(python3 -c 'import sys; print(sys.argv[1].title())' "$3")" "${4:-50}" \
                     && echo "Seat $3 made. Its token is in /etc/nanoborealis/seats/$3.token (root only). To join: set NANOBOREALIS_COLONY_URL and" \
                             "NANOBOREALIS_COLONY_TOKEN, then: python3 /usr/share/nanoborealis/colonyseat.py me" ;;
             status)
                 if ! systemctl is-active --quiet nanoborealis-colony.service; then
-                    echo "No council yet. Seat one on the pool's loadout with: $me council apply"
+                    echo "No council yet. Seat one on the pool's loadout with: $me crew apply"
                     exit 0
                 fi
                 colony GET /seats | python3 -c 'import json, sys
@@ -587,13 +585,13 @@ print("Autonomy: %s. Escalation: %s." % (s["autonomy"], escalation))' ;;
             autonomy)
                 case "${3:-}" in
                     on-task|continuous) colony POST /settings "{\"autonomy\": \"$3\"}" >/dev/null && echo "Autonomy: $3" ;;
-                    *) echo "usage: $me council autonomy on-task|continuous" >&2; exit 2 ;;
+                    *) echo "usage: $me crew autonomy on-task|continuous" >&2; exit 2 ;;
                 esac ;;
             escalation)
                 case "${3:-}" in
                     on) colony POST /settings '{"escalation": true}' >/dev/null && echo "Escalation is on (free models only)." ;;
                     off) colony POST /settings '{"escalation": false}' >/dev/null && echo "Escalation is off." ;;
-                    *) echo "usage: $me council escalation on|off" >&2; exit 2 ;;
+                    *) echo "usage: $me crew escalation on|off" >&2; exit 2 ;;
                 esac ;;
             remove)
                 for id in $(seat_ids); do
@@ -608,7 +606,7 @@ print("Autonomy: %s. Escalation: %s." % (s["autonomy"], escalation))' ;;
                 sudo systemctl restart nanoborealis-firewall.service
                 echo "The council is dismissed. The seats' memories and the colony's history stay, for next time." ;;
             *)
-                echo "usage: $me council apply | status | bench [--n N] | seat <id> [capability] | autonomy on-task|continuous | escalation on|off | remove" >&2
+                echo "usage: $me crew apply | status | bench [--n N] | seat <id> [capability] | autonomy on-task|continuous | escalation on|off | remove" >&2
                 exit 2 ;;
         esac ;;
     rig)

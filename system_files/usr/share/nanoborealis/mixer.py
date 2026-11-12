@@ -41,8 +41,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-TIER_NAMES = ("reflex", "worker", "specialist", "anchor")
-TIER_LIMITS = (25.0, 45.0, 60.0)  # capability below each limit is the tier of that index
+TIER_LIMITS = (25.0, 45.0, 60.0)  # capability below each limit is the tier of that index (reflex, worker, specialist, anchor)
 DEFAULT_COOL = 60.0  # seconds a member rests after a failure that didn't say how long
 
 

@@ -95,7 +95,7 @@ def main(argv: list[str]) -> None:
             print(f"  token   {line}")
         deploy(answer)
         if not answer.get("dry_run") and "kind = \"pool\"" in spec.replace("'", '"'):
-            print("Seats the pool runs need their agent started: nanoborealis council apply")
+            print("Seats the pool runs need their agent started: nanoborealis crew apply")
     elif action == "ps":
         if args:
             rig = colony("GET", f"/rigs/{args[0]}")

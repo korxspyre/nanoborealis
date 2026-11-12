@@ -241,6 +241,6 @@ def restore_outcomes(snapshot: dict, current: dict[str, dict], models: set[str] 
                         "note": f"its model {seat.get('model')} isn't in the pool now: pick another, or bring that model back"})
         else:
             out.append({"seat": seat["address"] or seat["id"], "outcome": "fresh-primed",
-                        "note": "made again with its open work; start its agent with: nanoborealis council apply"
+                        "note": "made again with its open work; start its agent with: nanoborealis crew apply"
                         if seat.get("kind") == "pool" else "made again with a new token; its open work is waiting in its inbox"})
     return out

@@ -32,14 +32,7 @@ def score_text(seat: dict) -> str:
     return f"{seat['score']:.0f}%" if seat.get("score") is not None else "untested"
 
 
-def score_tip(seat: dict) -> str:
-    """Where the score comes from: LiveBench's leaderboard and this computer's own NanoBench tests."""
-    parts = [seat.get("score_source") or "Benchmark score (tested by code)"]
-    if seat.get("livebench") is not None:
-        parts.append(f"LiveBench {seat['livebench']:.0f}%")
-    if seat.get("nanobench") is not None:
-        parts.append(f"NanoBench {seat['nanobench']:.0f}% (sure at least)")
-    return " \u00b7 ".join(parts)
+SCORE_TIP = "NanoBench score: this computer's own tests, through the same router the crew uses, rerun every week"
 
 
 STATE_COLORS = {"open": t.ACCENT, "claimed": t.VIOLET, "review": t.WARN, "done": t.GOOD, "failed": t.BAD}
@@ -115,7 +108,7 @@ class ColonyView:
                                t.badge(x["state"].upper(), STATE_COLORS.get(x["state"], t.MUTED))) for x in self.tasks]
         seats = [self.side_row(s["name"].split("@")[0].capitalize(), (lambda room: f"room:{room['id']}" if room else f"seat:{s['id']}")(
                      next((r for r in self.rooms if r["kind"] == "direct" and r.get("seat") == s["id"]), None)),
-                     ft.Icons.SMART_TOY_OUTLINED, t.muted(score_text(s), size=11, tooltip=score_tip(s)))
+                     ft.Icons.SMART_TOY_OUTLINED, t.muted(score_text(s), size=11, tooltip=SCORE_TIP))
                  for s in self.seats if not s.get("chair")]
         return [self.side_row("Live map", "map", ft.Icons.HUB_OUTLINED), heading("Chats"), *(rooms or [empty("None yet. Start one with New chat.")]),
                 heading("Tasks"), *(board or [empty("Nothing yet. Give them work above.")]),
@@ -132,7 +125,7 @@ class ColonyView:
             room = next((r for r in self.rooms if r["kind"] == "direct" and r.get("seat") == seat["id"]), None)
             key = f"room:{room['id']}" if room else f"seat:{seat['id']}"
             rows.append(self.side_row(seat["name"].split("@")[0].capitalize(), key, ft.Icons.SMART_TOY_OUTLINED,
-                                      t.muted(score_text(seat), size=11, tooltip=score_tip(seat))))
+                                      t.muted(score_text(seat), size=11, tooltip=SCORE_TIP)))
         return rows
 
     # -- Starting things --------------------------------------------------------------------------------
@@ -261,17 +254,19 @@ class ColonyView:
         copy = (ft.Icons.CONTENT_COPY_ROUNDED, "Copy", lambda: self.workspace.copy_later(text))
         room = message.get("room")
         task = (ft.Icons.ASSIGNMENT_OUTLINED, "Make it a task for the crew", lambda: self.page.run_task(self.new_task, text))
+        branch = [(ft.Icons.CALL_SPLIT_ROUNDED, "Branch: a new chat that continues from here",
+                   lambda: self.page.run_task(self.branch, room, message["id"]))] if room and message.get("id") else []
         if author == "you":  # your message: as in the agent chat, a bubble on the right with its actions
             again = [(ft.Icons.EDIT_OUTLINED, "Edit (back into the message box)", lambda: self.edit_into_box(text)),
                      (ft.Icons.REFRESH_ROUNDED, "Send it again", lambda: self.page.run_task(self.resend, room, text))] if room else []
-            return transcript.user_message(text, actions=[copy, *again, task])
+            return transcript.user_message(text, actions=[copy, *again, *branch, task])
         name = self.seat_name(author)
         actions = [] if author in ("advisor", "colony") else [
             (ft.Icons.REPLY_ROUNDED, f"Reply to {name}", lambda: self.edit_into_box(f"{name}, ")),
             (ft.Icons.REFRESH_ROUNDED, f"Ask {name} again",
              lambda: self.page.run_task(self.resend, room, f"{name}, please answer that again, another way.")),
             (ft.Icons.CHAT_OUTLINED, f"Talk with {name} alone", lambda: self.page.run_task(self.open_direct, author)),
-            task,
+            *branch, task,
             (ft.Icons.THUMB_UP_OUTLINED, "Good answer (goes on their record; only benchmarks set their standing)",
              lambda a=author: self.page.run_task(self.feedback, a, True)),
             (ft.Icons.THUMB_DOWN_OUTLINED, "Poor answer (goes on their record)",
@@ -295,6 +290,18 @@ class ColonyView:
     async def open_direct(self, seat_id: str) -> None:
         room = next((r for r in self.rooms if r["kind"] == "direct" and r.get("seat") == seat_id), None)
         await self.workspace.show_section(f"colony:room:{room['id']}" if room else f"colony:seat:{seat_id}")
+
+    async def branch(self, room_id: int, message_id: int) -> None:
+        """A new chat with this one's messages up to `message_id`; this chat stays as it is."""
+        room = next((r for r in self.rooms if r["id"] == room_id), None) or {"title": "Chat", "kind": "colony"}
+        try:
+            made = await self.call("POST", "/rooms", {"title": f"{room['title']} (branch)", "kind": room["kind"],
+                                                      "seat": room.get("seat"), "from_room": room_id, "upto": message_id})
+        except PairingError as e:
+            self.workspace.toast(f"Couldn't branch: {e}")
+            return
+        await self.load()
+        await self.workspace.show_section(f"colony:room:{made['id']}")
 
     async def resend(self, room_id: int, text: str) -> None:
         try:

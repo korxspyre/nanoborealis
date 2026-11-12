@@ -36,7 +36,6 @@ from pathlib import Path
 # discovery port (exo shares it between the nodes on a computer). Each slot has its own container,
 # WSL system and home, so the two never touch each other's models.
 SLOT_PORTS = {0: (52414, 52415), 1: (52424, 52425)}  # zenoh (TCP), API (TCP)
-EXO_API = "http://127.0.0.1:52415"
 CONTAINER = "nanoborealis-pool"
 VOLUME = "nanoborealis-pool"
 PORTS = "52413-52415 and 52424-52425, and 49152-65535 for model layers"

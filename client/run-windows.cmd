@@ -5,8 +5,6 @@ rem Opens the NanoBorealis client. The first run sets up its own Python environm
 rem later runs update it whenever the client needs new packages.
 setlocal
 set "VENV=%LOCALAPPDATA%\NanoBorealis\client-venv"
-rem A client set up before the rename keeps its environment instead of downloading a second one.
-if not exist "%VENV%\Scripts\pythonw.exe" if exist "%LOCALAPPDATA%\NanoAurora\client-venv\Scripts\pythonw.exe" set "VENV=%LOCALAPPDATA%\NanoAurora\client-venv"
 rem Bump DEPS whenever the package list below changes, so existing installs pick it up.
 set "DEPS=2"
 set "STAMP=%VENV%\nanoborealis-deps.txt"

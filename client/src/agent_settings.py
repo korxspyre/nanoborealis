@@ -93,10 +93,6 @@ async def set_call_order(link: AgentLink, names: list[str]) -> None:
     await link.request("settings.model_call_order.update", {"order": names})
 
 
-async def delete_preset(link: AgentLink, name: str) -> None:
-    await link.request("settings.model_configuration.delete", {"name": name})
-
-
 def openrouter_provider(settings: dict[str, Any]) -> dict[str, Any]:
     for provider in settings.get("providers") or []:
         if isinstance(provider, dict) and (provider.get("name") or provider.get("provider")) == "openrouter":

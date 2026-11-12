@@ -42,7 +42,7 @@ except ImportError:
 # The owner's switch (also the relay's): with it set, no question leaves for a cloud model at all.
 CLOUD_OFF = os.environ.get("NANOBOREALIS_MIX_SENSITIVITY") == "local-only"
 
-STATE =Path(os.environ.get("NANOBOREALIS_COLONY_STATE", "/var/lib/nanoborealis/colony"))
+STATE = Path(os.environ.get("NANOBOREALIS_COLONY_STATE", "/var/lib/nanoborealis/colony"))
 LISTEN = os.environ.get("NANOBOREALIS_COLONY_LISTEN", "127.0.0.1:11437")
 MAX_BODY = 1024 * 1024
 TEXT_LIMIT = 64 * 1024
@@ -55,35 +55,13 @@ DEFAULTS = {
     "split_margin": 0.15,  # a vote won by less than this share of the weight is split
     "review_rejects_to_fail": 2,
 }
-TRUST_MIN, TRUST_MAX = 0.2, 3.0
-TRUST_HALF_LIFE_DAYS = 30.0  # old praise and blame fade, and trust drifts back toward 1
 TRUST_EVENTS = {"accepted": 0.05, "rejected": -0.05, "thumbs_up": 0.1, "thumbs_down": -0.1}
 TASK_STATES = ("open", "claimed", "review", "done", "failed")
 BENCH_AREAS = ("reasoning", "format", "fidelity", "tools", "review")  # nanobench.py's
-BENCH_ABBREVIATIONS = {"reasoning": "reasoning", "format": "format", "fidelity": "fidelity", "tools": "tools", "review": "review"}
 BENCH_DAYS = 30  # results older than this no longer count
 BENCH_MIN_ITEMS = 10  # fewer than this and a score says nothing yet, so it doesn't move trust
-LIVE_MIN = 40.0  # a NanoBench score under this means the model fails here: its LiveBench score doesn't count
-LIVE_UNCHECKED = 0.85  # a LiveBench score not yet confirmed by NanoBench counts for this much of itself
 
 
-def livebench_for(model: str) -> dict | None:
-    """The model's LiveBench entry, {name, overall, categories, release}, from the copy in the colony's state folder
-    (scores.ensure refreshes it every two weeks). None when LiveBench doesn't list it."""
-    try:
-        import scores
-        rows, overrides = scores.load(STATE)
-        if isinstance(overrides.get(model), (int, float)):
-            return {"name": model, "overall": float(overrides[model]), "categories": {}, "release": "set by you"}
-        name = scores.match(model.split(":", 1)[1] if model.split(":", 1)[0] in ("nim", "groq", "openrouter") else model,
-                            list(rows))
-        if name is None:
-            return None
-        release = json.loads((STATE / "livebench.json").read_text()).get("release", "")
-        return {"name": name, "overall": float(rows[name]["overall"]), "categories": rows[name].get("categories", {}),
-                "release": release}
-    except Exception:
-        return None
 SEAT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
 
 SCHEMA = """
@@ -165,7 +143,7 @@ def card_text(card: dict) -> str:
     """Every area of a scorecard, for the council to compare."""
     if not card:
         return "not benchmarked yet"
-    parts = [f"{BENCH_ABBREVIATIONS.get(a, a)} {r['score']:.0f} (>= {r['lo']:.0f})" for a, r in card.items() if a != "overall"]
+    parts = [f"{a} {r['score']:.0f} (>= {r['lo']:.0f})" for a, r in card.items() if a != "overall"]
     overall = card["overall"]
     return ", ".join(parts) + f"; overall {overall['score']:.0f} (>= {overall['lo']:.0f}, {overall['n']} items)"
 
@@ -195,10 +173,6 @@ class Colony:
     def __init__(self, state: Path):
         state.mkdir(parents=True, exist_ok=True)
         self.path = state / "colony.sqlite"
-        if not self.path.exists() and (state / "hall.sqlite").exists():  # made under the old name: carried over
-            for suffix in ("", "-wal", "-shm"):
-                if (state / f"hall.sqlite{suffix}").exists():
-                    (state / f"hall.sqlite{suffix}").rename(state / f"colony.sqlite{suffix}")
         self.lock = threading.Lock()  # one writer at a time; SQLite's own locking backs it up
         self.db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self.db.row_factory = sqlite3.Row
@@ -207,12 +181,6 @@ class Colony:
         for table, column, kind in MIGRATIONS:  # columns added after a database was first made
             if column not in {r["name"] for r in self.db.execute(f"PRAGMA table_info({table})")}:
                 self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
-        # Rows written under the old name: its chats and the messages and mail it sent itself.
-        for statement in ("UPDATE rooms SET kind = 'colony' WHERE kind = 'hall'",
-                          "UPDATE messages SET author = 'colony' WHERE author = 'hall'",
-                          "UPDATE inbox SET sender = 'colony' WHERE sender = 'hall'",
-                          "UPDATE task_notes SET author = 'colony' WHERE author = 'hall'"):
-            self.db.execute(statement)
         self.events: list[tuple] = []  # what the orchestrator should act on, once the change is saved
         token_file = state / "admin.token"
         if not token_file.exists():
@@ -266,41 +234,17 @@ class Colony:
         return self.settings()
 
     def trust(self, seat: str, now: float | None = None) -> float:
-        """How far a member is trusted: its model's measured ability and nothing else. Its score (rating(): LiveBench
-        and NanoBench) as 0.5 (scored nothing) to 1.5 (scored everything); 1.0 until something has measured it. Reviews, thumbs and votes are opinions: they are kept as its
-        record (the trust table) but never move this."""
+        """How far a member is trusted: its model's NanoBench score and nothing else, as 0.5 (scored nothing) to 1.5
+        (scored everything); 1.0 until it has been measured. Reviews, thumbs and votes are opinions: they are kept
+        as its record (the trust table) but never move this."""
         row = self.db.execute("SELECT model FROM seats WHERE id = ?", (seat,)).fetchone()
         score = self.measured(row["model"], now) if row else None
         return 1.0 if score is None else round(0.5 + score / 100, 3)
 
     def measured(self, model: str, now: float | None = None) -> float | None:
-        """A model's score in percent (rating()); None when nothing has measured it yet."""
-        return self.rating(model, now)["score"]
-
-    def rating(self, model: str, now: float | None = None) -> dict:
-        """A model's score from two measurements, each tested by code, never by opinion:
-
-          LiveBench (livebench.ai): the published leaderboard, with questions refreshed monthly so they can't have
-            been learned. Broad ability: reasoning, math, coding, language, data analysis, instruction following.
-          NanoBench: this computer's own tests through its own router (tools, format, fidelity, review), the low
-            end of a 95% interval. Whether the model works here, on the endpoint the crew actually gets.
-
-        Both: their mean, unless NanoBench is under LIVE_MIN; then NanoBench alone, because a model whose endpoint
-        is broken (it happens to free ones without notice) has no use for its published score. LiveBench only:
-        LIVE_UNCHECKED of it, until it is checked here. NanoBench only: that."""
+        """A model's NanoBench score in percent, the low end of its 95% interval; None below BENCH_MIN_ITEMS."""
         overall = self.scorecard(model, now).get("overall")
-        nano = overall["lo"] if overall and overall["n"] >= BENCH_MIN_ITEMS else None
-        live = livebench_for(model)
-        if nano is not None and live is not None:
-            score = nano if nano < LIVE_MIN else (live["overall"] + nano) / 2
-            source = "NanoBench (fails here, so LiveBench doesn't count)" if nano < LIVE_MIN else "LiveBench and NanoBench"
-        elif live is not None:
-            score, source = live["overall"] * LIVE_UNCHECKED, "LiveBench (not yet checked here)"
-        elif nano is not None:
-            score, source = nano, "NanoBench (not on LiveBench)"
-        else:
-            score, source = None, "not measured yet"
-        return {"score": None if score is None else round(score, 1), "source": source, "nanobench": nano, "livebench": live}
+        return overall["lo"] if overall and overall["n"] >= BENCH_MIN_ITEMS else None
 
     # -- Benchmarks ----------------------------------------------------------------------------------
 
@@ -327,14 +271,6 @@ class Colony:
         return {"score": round(100 * p, 1), "lo": round(100 * max(0.0, centre - half), 1),
                 "hi": round(100 * min(1.0, centre + half), 1), "n": n}
 
-    def bench_term(self, model: str, now: float | None = None) -> float:
-        """The benchmark part of trust: the low end of the overall score against a coin flip. Perfect over 30
-        items is about +0.3; a coin flip over 30 is about -0.1; fewer than BENCH_MIN_ITEMS counts for nothing."""
-        overall = self.scorecard(model, now).get("overall")
-        if not overall or overall["n"] < BENCH_MIN_ITEMS:
-            return 0.0
-        return round(max(-0.3, min(0.4, (overall["lo"] / 100 - 0.5) * 0.8)), 4)
-
     def bench_record(self, data: dict) -> dict:
         """One NanoBench run for a model, posted by the computer's own services (a seat can't mark its own work)."""
         model = text(data.get("model"), "The model", 200)
@@ -357,7 +293,7 @@ class Colony:
         summary = ", ".join(f"{a} {r['score']:.0f}% (sure >= {r['lo']:.0f}%)" for a, r in card.items())
         for seat in self.db.execute("SELECT id FROM seats WHERE model = ?", (model,)).fetchall():  # on the ledger, to read
             self.add_trust(seat["id"], 0.0, f"benchmark {suite}: {summary}"[:500])
-        return {"model": model, "scorecard": card, "trust_term": self.bench_term(model)}
+        return {"model": model, "scorecard": card}
 
     def benchmarks(self, model: str | None = None) -> list[dict]:
         rows = self.db.execute("SELECT * FROM benchmarks" + (" WHERE model = ?" if model else "") + " ORDER BY id DESC LIMIT 200",
@@ -384,10 +320,7 @@ class Colony:
         found["external"] = bool(found.get("external"))
         found["scorecard"] = self.scorecard(found["model"])
         found["trust"] = self.trust(seat_id)
-        rated = self.rating(found["model"])
-        found["score"], found["score_source"] = rated["score"], rated["source"]  # score None: not measured yet
-        found["livebench"] = rated["livebench"] and rated["livebench"]["overall"]
-        found["nanobench"] = rated["nanobench"]
+        found["score"] = self.measured(found["model"])  # None: not measured yet
         found["record"] = {r["kind"]: r["n"] for r in self.db.execute(  # what reviews and the owner said: shown, never counted
             "SELECT CASE WHEN delta > 0 THEN 'praised' ELSE 'faulted' END AS kind, COUNT(*) AS n FROM trust "
             "WHERE seat = ? GROUP BY kind", (seat_id,))}
@@ -533,6 +466,22 @@ class Colony:
             raise Refused(409, f"{name} was restored from a snapshot without its file: bring it up again from its file.")
         agents = self.rig_seats(spec).pop("agents", [])
         return {"rig": name, "deploy": {"rig": spec, "agents": agents, "remove": []}}
+
+    def seat_model(self, seat_id: str, model: str) -> dict:
+        """A rig member onto another model: its rig's file (as stored) changes, and the rig is deployed again."""
+        model = text(model, "The model", 200)
+        row = self.db.execute("SELECT rig FROM seats WHERE id = ?", (seat_id,)).fetchone()
+        if not row or not row["rig"]:
+            raise Refused(404, f"No crew member {seat_id} in a rig.")
+        spec = json.loads(self.db.execute("SELECT spec FROM rigs WHERE name = ?", (row["rig"],)).fetchone()["spec"] or "{}")
+        member = next((s for s in spec.get("seats") or [] if s["id"] == seat_id), None)
+        if member is None:
+            raise Refused(409, f"{row['rig']} was restored without its file: bring it up again from its file.")
+        if member["kind"] in ("cloud", "agent") and not model.endswith(":free") and ":" not in model.split("/")[0]:
+            raise Refused(400, "Crew members run on free models only.")
+        member["model"] = model
+        self.db.execute("UPDATE rigs SET spec = ? WHERE name = ?", (json.dumps(spec), row["rig"]))
+        return self.rig_redeploy(row["rig"])
 
     def rig_seats(self, spec: dict) -> dict:
         """Make or update the spec's seats. Returns the tokens of the outside seats made new: shown once. An agent
@@ -788,10 +737,28 @@ class Colony:
             self.db.execute("UPDATE tasks SET updated = ? WHERE id = ?", (now, task["id"]))
             self.send("colony", {"to": task["claimed_by"], "kind": "nudge", "text": f"Task {task['id']} ({task['title']}) has been quiet. Say where it stands."})
         for task in reopen:
-            self.reopen(task["id"])
+            self.reopen(task["id"], "colony")
             self.events.append(("task", task["id"]))  # offered to the seats again
+        # A task nobody took (each seat asked passed, or its model was down) is offered again, and after
+        # REOFFERS rounds it fails with that reason, so nothing sits open on the board unseen.
+        offered, dropped = [], []
+        for t in self.db.execute("SELECT id, title, updated FROM tasks WHERE state = 'open' AND updated < ?",
+                                 (now - task_after,)).fetchall():
+            rounds = self.db.execute("SELECT COUNT(*) FROM task_notes WHERE task = ? AND kind = 'offer'", (t["id"],)).fetchone()[0]
+            if rounds < REOFFERS:
+                self.note(t["id"], "colony", "offer", "nobody took it yet: offered again")
+                self.db.execute("UPDATE tasks SET updated = ? WHERE id = ?", (now, t["id"]))
+                self.events.append(("task", t["id"]))
+                offered.append(t["id"])
+            else:
+                self.note(t["id"], "colony", "fail", f"nobody took it after {rounds + 1} offers")
+                self.db.execute("UPDATE tasks SET state = 'failed', updated = ? WHERE id = ?", (now, t["id"]))
+                self.send("colony", {"to": "you", "text": f"Nobody on the crew took task {t['id']} ({t['title']}) after "
+                                                          f"{rounds + 1} offers, so it's marked failed. Reopen it to try again."})
+                dropped.append(t["id"])
         return {"again": [i["id"] for i in again], "given_up": [i["id"] for i in give_up],
-                "nudged": [t["id"] for t in nudge], "reopened": [t["id"] for t in reopen]}
+                "nudged": [t["id"] for t in nudge], "reopened": [t["id"] for t in reopen],
+                "offered": offered, "dropped": dropped}
 
     # -- Rooms ---------------------------------------------------------------------------------------
 
@@ -801,7 +768,6 @@ class Colony:
     def new_room(self, data: dict) -> dict:
         title = text(data.get("title"), "The room's title", 200)
         kind = data.get("kind", "colony")
-        kind = "colony" if kind == "hall" else kind  # what an app from before the rename asks for
         if kind not in ("colony", "task", "direct"):
             raise Refused(400, "A room is a colony, a task or a direct (one-on-one) room.")
         seat = None
@@ -809,6 +775,13 @@ class Colony:
             seat = self.seat(text(data.get("seat"), "The seat", 40))["id"]
         cur = self.db.execute("INSERT INTO rooms (title, kind, seat, created) VALUES (?, ?, ?, ?)",
                               (title, kind, seat, time.time()))
+        if data.get("from_room") is not None:  # a branch: that chat's messages up to `upto`, then its own way
+            source, upto = data.get("from_room"), data.get("upto")
+            if not isinstance(source, int) or not isinstance(upto, int):
+                raise Refused(400, "A branch names from_room and upto as numbers.")
+            self.room(source)
+            self.db.execute("INSERT INTO messages (room, author, kind, text, reply_to, at) SELECT ?, author, kind, text, NULL, at "
+                            "FROM messages WHERE room = ? AND id <= ? ORDER BY id", (cur.lastrowid, source, upto))
         return dict(self.db.execute("SELECT * FROM rooms WHERE id = ?", (cur.lastrowid,)).fetchone())
 
     def room(self, room_id: int) -> dict:
@@ -934,11 +907,12 @@ class Colony:
             self.events.append(("failed" if failed else "revise", task_id))
         return self.task(task_id)
 
-    def reopen(self, task_id: int) -> dict:
+    def reopen(self, task_id: int, by: str = "you") -> dict:
         self.task(task_id)
-        self.db.execute("UPDATE tasks SET state = 'open', claimed_by = NULL, result = NULL, rejects = 0 WHERE id = ?",
-                        (task_id,))
-        self.note(task_id, "you", "reopen", "opened it again")
+        self.db.execute("UPDATE tasks SET state = 'open', claimed_by = NULL, result = NULL, rejects = 0, updated = ? "
+                        "WHERE id = ?", (time.time(), task_id))
+        self.db.execute("DELETE FROM task_notes WHERE task = ? AND kind = 'offer'", (task_id,))  # a fresh set of offers
+        self.note(task_id, by, "reopen", "opened it again")
         return self.task(task_id)
 
     # -- Votes ---------------------------------------------------------------------------------------
@@ -1580,6 +1554,9 @@ def route(colony: Colony, who: str, method: str, parts: list[str], query: dict, 
         case "DELETE", ["rigs", name]:
             admin_only()
             return colony.rig_down(name, data.get("snapshot", True) is not False)
+        case "POST", ["seats", seat_id, "model"]:
+            admin_only()
+            return colony.seat_model(seat_id, data.get("model"))
         case "POST", ["rigs", name, "redeploy"]:
             admin_only()
             return colony.rig_redeploy(name)
@@ -1618,7 +1595,7 @@ def route(colony: Colony, who: str, method: str, parts: list[str], query: dict, 
         case "GET", ["benchmarks"]:
             return {"benchmarks": colony.benchmarks(query.get("model"))}
         case "POST", ["escalation-key"]:
-            # The OpenRouter key escalation uses: the chair's own, copied here by `council apply` and
+            # The OpenRouter key escalation uses: the chair's own, copied here by `crew apply` and
             # whenever the app sets a new one. Used for free models only.
             admin_only()
             key = text(data.get("key"), "The key", 300)
@@ -1751,15 +1728,6 @@ def main() -> None:
     orchestrator = Orchestrator(colony)
     orchestrator.start()
 
-    def keep_livebench() -> None:  # LiveBench's leaderboard, half of each model's score: fetched when missing or old
-        while True:
-            try:
-                import scores
-                scores.ensure(STATE)
-            except Exception:
-                pass
-            time.sleep(6 * 3600)
-    threading.Thread(target=keep_livebench, daemon=True).start()
     server = ThreadingHTTPServer((host or "127.0.0.1", int(port)), handler(colony, orchestrator))
     print(f"nanoborealis-colony: the colony on {LISTEN}", file=sys.stderr, flush=True)
     server.serve_forever()

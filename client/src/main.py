@@ -171,8 +171,6 @@ class NanoBorealisApp:
     async def update_channel(self) -> str:
         """The owner's choice, or else the channel this build came from."""
         chosen = await self.pref_get(PREF_UPDATE_CHANNEL)
-        if chosen == "testing":  # the retired middle channel: its candidates are dev builds now
-            chosen = "dev"
         return chosen if chosen in updater.CHANNELS else updater.channel_of(VERSION)
 
     async def clean_old_windows(self) -> None:
@@ -347,11 +345,7 @@ class NanoBorealisApp:
 
     async def pref_get(self, key: str) -> str:
         try:
-            value = str(await self.prefs.get(key) or "")
-            if not value and key.startswith("nanoborealis."):
-                # Saved before the rename to NanoBorealis.
-                value = str(await self.prefs.get("nanoaurora." + key.split(".", 1)[1]) or "")
-            return value
+            return str(await self.prefs.get(key) or "")
         except Exception as e:  # storage is a convenience; never let it stop the app
             print(f"nanoborealis-client: could not read {key}: {e}")
             return ""
@@ -722,14 +716,6 @@ class NanoBorealisApp:
 
     # -- Compute sharing -----------------------------------------------------------
 
-    def share_summary(self) -> str:
-        if self.node is not None and self.node.how is not None:
-            return "Sharing GPU and CPU"
-        if self.share.get("pool_consent"):
-            return "Paused. Open to resume."
-        return "Share this device's GPU and CPU"
-
-
     async def load_share(self) -> None:
         raw = await self.pref_get(PREF_COMPUTE)
         try:
@@ -799,7 +785,7 @@ class NanoBorealisApp:
         if self.node is not None and self.node.how is not None:
             self.show_pool_running()
         elif self.share_busy:
-            self.set_share_body([self.working("Starting the pool node; this keeps going in the background.")],
+            self.set_share_body([self.working("Starting to share this device; this keeps going in the background.")],
                                 [ft.TextButton("Hide", on_click=on(self.close_share_dialog))])
         else:
             await self.show_share_consent()
@@ -825,7 +811,7 @@ class NanoBorealisApp:
         if info is not None and chosen.how in ("container", "bundle", "wsl"):
             return self.show_pool_consent(info, chosen)
         reason = (chosen.reason if info is not None else
-                  "Your NanoBorealis computer isn't running a pool yet. On it, run: nanoborealis pool coordinate "
+                  "Your NanoBorealis computer isn't sharing compute yet. On it, run: nanoborealis pool coordinate "
                   "(or nanoborealis pool join, if it has the hardware to lend too). Then come back here.")
         self.set_share_body([ft.Text(reason, size=14)], [ft.FilledButton("Close", on_click=on(self.close_share_dialog))])
 
@@ -848,7 +834,7 @@ class NanoBorealisApp:
             self.bullet("What you share is used fully: leave out the part this computer still needs for "
                         "its own work, like a processor serving your home while its GPU sits idle."),
             self.bullet(chosen.reason),
-            self.bullet(f"It runs a pool node of the pool's own exo version ({info.ref}). The planner on your "
+            self.bullet(f"It runs exo ({info.ref}), the same version as your other computers. The planner on your "
                         "NanoBorealis computer decides which models, or parts of them, run here."),
             self.bullet("The first start downloads the node" + (" (about 8 GB for the NVIDIA build)" if gpu else "")
                         + ", and later the parts of models placed here."),
@@ -856,7 +842,7 @@ class NanoBorealisApp:
                         "may ask to allow that. Only share on networks you trust."),
             *([self.bullet("On Windows it runs in WSL2, as a Linux system of its own that can't see your drives or "
                            "start your programs. The first time, Windows asks for administrator rights once, to "
-                           "install WSL if needed and let the pool's traffic reach it; installing WSL may need a "
+                           "install WSL if needed and let the other computers' traffic reach it; installing WSL may need a "
                            "restart. WSL also restarts once to share the network, which stops any Linux you have "
                            "running in it.")] if chosen.how == "wsl" else []),
             self.bullet("Stop sharing at any time, and delete what it downloaded if you like."),
@@ -898,7 +884,7 @@ class NanoBorealisApp:
         if not self.share["pool_consent"]:
             return self.set_share_body([ft.Text("Nothing is lent: allow the GPU, the processor, or both.", size=13)],
                                        [ft.TextButton("Back", on_click=on(self.show_share_consent))])
-        status = ft.Text("Starting the pool node...", size=13)
+        status = ft.Text("Starting to share this device...", size=13)
         self.set_share_body([ft.Row([ft.ProgressRing(width=16, height=16, stroke_width=2), status], spacing=10)],
                             [ft.TextButton("Hide", on_click=on(self.close_share_dialog))])
         loop = asyncio.get_running_loop()
@@ -938,7 +924,7 @@ class NanoBorealisApp:
             ft.Text("Windows needs a one-time step with administrator rights:", size=14),
             *([self.bullet("Install WSL, Windows' own way of running Linux (no Linux system of its own yet).")]
               if install_wsl else []),
-            self.bullet("Let the pool's traffic into WSL, through the firewall Windows keeps for it."),
+            self.bullet("Let the other computers' traffic into WSL, through the firewall Windows keeps for it."),
             ft.Text("Windows asks you to allow it.", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
         ], [
             ft.TextButton("Not now", on_click=on(self.close_share_dialog)),
@@ -963,7 +949,7 @@ class NanoBorealisApp:
     def show_pool_running(self) -> None:
         self.set_share_body([
             ft.Row([ft.Icon(ft.Icons.CHECK_CIRCLE_OUTLINE_ROUNDED, color=ft.Colors.GREEN_400),
-                    ft.Text("This device is in the pool.", size=14, expand=True)], spacing=10),
+                    ft.Text("This device is sharing its compute.", size=14, expand=True)], spacing=10),
             ft.Text("Put models on it from your NanoBorealis computer: nanoborealis pool plan shows what would "
                     "run where, and nanoborealis pool apply starts it.", size=13),
             ft.Text("It shares while this app is open, and again when you next open it.", size=12,
@@ -977,13 +963,13 @@ class NanoBorealisApp:
     async def stop_pool(self, delete: bool) -> None:
         node, self.node = self.node, None
         if node is not None:
-            self.set_share_body([self.working("Stopping the pool node...")], [])
+            self.set_share_body([self.working("Stopping sharing...")], [])
             await asyncio.to_thread(node.leave, delete)
             await self.check_in_to_pool(False)
         self.share["pool_consent"] = False  # don't start again on the next launch
         await self.save_share()
         self.set_share_body([
-            ft.Text("This device has left the pool" + (", and what it downloaded is deleted." if delete else "."),
+            ft.Text("This device stopped sharing" + (", and what it downloaded is deleted." if delete else "."),
                     size=14),
             ft.Text("Run nanoborealis pool apply on your NanoBorealis computer to move its models elsewhere.",
                     size=12, color=ft.Colors.ON_SURFACE_VARIANT),

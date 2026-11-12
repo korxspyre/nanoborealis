@@ -162,7 +162,7 @@ jobs:
             --add-data "assets${sep}assets" \
             --product-name NanoBorealis --product-version "$NUMERIC" --file-version "$NUMERIC" \
             --file-description "NanoBorealis $VERSION" --company-name "NanoBorealis contributors" \
-            --copyright "Copyright (C) 2026 korxspyre. PolyForm Noncommercial 1.0.0." --bundle-id io.github.more-than-just-kyrion.nanoborealis \
+            --copyright "Copyright (C) 2026 korxspyre. PolyForm Noncommercial 1.0.0." --bundle-id io.github.korxspyre.nanoborealis \
             --distpath ../dist
           ls ../dist
 

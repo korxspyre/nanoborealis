@@ -13,7 +13,7 @@ A rig needs no pool and no GPU. A seat is one of three kinds:
 In the app: **Control center → Rigs → Bring up** on the starter rig, or **Write a rig**. Then give it work from a **Task** chat, or talk to all its seats in a **Colony** chat. On the computer:
 
 ```bash
-nanoborealis rig up /usr/share/nanoborealis/rigs/starter.toml   # starts the colony too, the first time
+nanoborealis rig up /usr/share/nanoborealis/rigs/civ.toml   # starts the colony too, the first time
 nanoborealis rig task "Write a script that backs up ~/projects" -- "Daily, keep 7 copies."
 nanoborealis rig board                 # the board; `rig board 1` follows task 1 to its result
 nanoborealis rig ps starter            # the seats, who is here, who leads
@@ -30,14 +30,14 @@ A pool can also seat one agent per model it runs, all at once. These are the com
 
 ```bash
 nanoborealis pool apply                    # run the planner's loadout on the pool
-nanoborealis council apply                 # one seat per model of the loadout
-nanoborealis council status                # the seats, their weight and trust, and the settings
-nanoborealis council autonomy continuous   # or on-task (the default)
-nanoborealis council escalation off        # or on (the default)
-nanoborealis council remove                # take the council down; the chair stays
+nanoborealis crew apply                 # one seat per model of the loadout
+nanoborealis crew status                # the seats, their weight and trust, and the settings
+nanoborealis crew autonomy continuous   # or on-task (the default)
+nanoborealis crew escalation off        # or on (the default)
+nanoborealis crew remove                # take the council down; the chair stays
 ```
 
-`council apply` is safe to repeat. It seats new models, unseats models that left the loadout (their containers go, their memory stays in case the model comes back), and gives every seat a fresh Colony token.
+`crew apply` is safe to repeat. It seats new models, unseats models that left the loadout (their containers go, their memory stays in case the model comes back), and gives every seat a fresh Colony token.
 
 ## Parts
 
@@ -68,13 +68,13 @@ Every new chat in the app picks a mode:
 
 **Tasks.** A task is open, then claimed, in review, then done or failed. A different seat reviews the result, and a review can send it back. After two rejections (`review_rejects_to_fail`) the task fails and goes to escalation for advice.
 
-**Votes.** A question in a room or on a task collects each seat's choice and reason. A seat's weight is its capability times its trust, normalised. The chair's ballot is optional. A vote won by less than `split_margin` (0.15 of the weight by default) counts as split and goes to escalation.
+**Votes.** A question in a room or on a task collects each seat's choice and reason. A seat's weight is its trust, normalised. The chair's ballot is optional. A vote won by less than `split_margin` (0.15 of the weight by default) counts as split and goes to escalation.
 
-**Trust.** Every seat starts at 1 and moves with a ledger of events: your thumbs up or down, a task accepted or rejected, a peer review. It is bounded and decays toward 1 over time. Capability comes from the pool planner: LiveBench scores matched to the exact model version and size, or a size-based guess marked ≈.
+**Trust.** A seat's trust is its model's NanoBench score and nothing else: 0.5 for a model that scores nothing, 1.5 for one that scores everything, 1 until it has been measured. Your thumbs, accepted or rejected tasks and peer reviews go on its record, which you can read, but they never move its trust: an opinion doesn't stand in for a measurement.
 
-**Benchmarks.** Trust has an objective half. `nanoborealis council bench` runs NanoBench (`nanobench.py`) on every seat's model through the pool: generated items in five areas (reasoning, format, fidelity, tools, review), each with one answer a program can check, so no model grades another. Fidelity asks a model to copy a privacy placeholder (`<<EMAIL_…>>`) character for character, which the council and the tokenizing proxy depend on; review asks it to tell a function with a planted bug from a correct one. Items come from a seed that changes daily, an item that errors isn't counted, and a run where half errored gives no score. Each score is shown with its 95% Wilson interval, and the colony trusts the low end: a seat's trust is 1, plus what reviews and thumbs have earned (fading), plus a benchmark term from the low end of its overall score against a coin flip (about +0.3 for a perfect score over 30 items, about −0.1 for a coin flip, nothing under 10 items). Only the computer's own services can post results; a seat can't mark its own work. The scorecard is in every prompt a seat is given (Colony chat, open tasks, votes, reviews) and beside every message's author (`card`), so seats and readers can weigh what each says by what it is good at. This measures a model on these items on this computer; it is not comparable with public leaderboards, and nothing it runs executes model-written code.
+**Benchmarks.** `nanoborealis crew bench` runs NanoBench (`nanobench.py`) on every seat's model through the pool: generated items in five areas (reasoning, format, fidelity, tools, review), each with one answer a program can check, so no model grades another. Fidelity asks a model to copy a privacy placeholder (`<<EMAIL_…>>`) character for character, which the crew and the tokenizing proxy depend on; review asks it to tell a function with a planted bug from a correct one. Items come from a seed that changes daily, an item that errors isn't counted, and a run where half errored gives no score. Each score is shown with its 95% Wilson interval, and the colony trusts the low end, and only once 10 items or more are scored. Only the computer's own services can post results; a seat can't mark its own work. The scorecard is in every prompt a seat is given (Colony chat, open tasks, votes, reviews) and beside every message's author (`card`), so seats and readers can weigh what each says by what it is good at. This measures a model on these items on this computer; it is not comparable with public leaderboards, and nothing it runs executes model-written code.
 
-**Escalation.** When a vote is split, a seat calls `escalate`, or a task fails review twice, the question goes to the free OpenRouter models. With `escalation_mix` on (the default) that is the mixer (`mixer.py`): up to three free models of different makes answer in parallel, the strongest combines their answers without knowing who wrote which, and a model of yet another make reviews the result, fixing it once if it finds it wrong. With it off, only the one model in `escalation_model` (`nvidia/nemotron-3-ultra-550b-a55b:free` by default) is asked. The answer is posted with its own nametape and counts as advice, not a vote. Requests are sent with `max_price` 0, so nothing billed can slip in. It uses the chair's OpenRouter key, which `council apply` and the app's key setting copy to the colony.
+**Escalation.** When a vote is split, a seat calls `escalate`, or a task fails review twice, the question goes to the free OpenRouter models. With `escalation_mix` on (the default) that is the mixer (`mixer.py`): up to three free models of different makes answer in parallel, the strongest combines their answers without knowing who wrote which, and a model of yet another make reviews the result, fixing it once if it finds it wrong. With it off, only the one model in `escalation_model` (`nvidia/nemotron-3-ultra-550b-a55b:free` by default) is asked. The answer is posted with its own nametape and counts as advice, not a vote. Requests are sent with `max_price` 0, so nothing billed can slip in. It uses the chair's OpenRouter key, which `crew apply` and the app's key setting copy to the colony.
 
 **Privacy of escalation.** A free cloud model may log what it is sent, so every question goes out through the tokenizer (`tokenizer.py`): emails, keys, phone numbers, cards, addresses and the names on the owner's list become placeholders that only this computer can read, and the advice is restored here. If the tokenizer can't run, nothing is sent. Setting `NANOBOREALIS_MIX_SENSITIVITY=local-only` in the colony's environment stops every escalation from leaving the computer. The free models are rate-limited, so the mixer keeps a ledger and rests one that fails; if none can answer, the room is told there's no advice.
 
@@ -111,13 +111,13 @@ kind = "reviews"  # claude reviews build's work
 - **Review edges.** If an edge says who reviews whom, that seat reviews: asked directly if the colony can ask it, otherwise mailed the review.
 - **The head agent.** The first seat in line (`head = 1`, `2`, …) that is here and not worn out leads. A pool seat is always here; an outside seat is here while it sends a heartbeat (`POST /presence`, status `ok`), and steps aside when it says `limited` (its usage is spent), when the next in line takes over, and else the strongest seat the colony can ask. The head is mailed when a task fails review or the council splits. Being head adds no voting weight: that is capability times trust, as for every seat.
 - **Watchdog.** Every minute: mail a pool seat hasn't taken is tried again, and after three tries given up on and the head told; a task held and quiet for 30 minutes is nudged twice, then put back on the board. An outside seat's mail waits for it, however long.
-- **Snapshot and restore.** `rig snapshot` captures the seats, pods, edges and the work in flight; `rig down` takes one first; `rig restore` brings it back and says, seat by seat, what really happened: *resumed* (it is there as it was), *fresh-primed* (made again with its open work, and for a pool seat its agent has to be started with `council apply`), *awaiting-decision* (its model isn't in the pool now: you choose), never a guess. A seat made again gets a new token; its old one stops working.
+- **Snapshot and restore.** `rig snapshot` captures the seats, pods, edges and the work in flight; `rig down` takes one first; `rig restore` brings it back and says, seat by seat, what really happened: *resumed* (it is there as it was), *fresh-primed* (made again with its open work, and for a pool seat its agent has to be started with `crew apply`), *awaiting-decision* (its model isn't in the pool now: you choose), never a guess. A seat made again gets a new token; its old one stops working.
 
 What isn't here yet: workflow scripts, adopting agents that are already running, and enforcing a seat's `policy` (it is stored and shown).
 
 ## Outside seats
 
-A seat doesn't have to be a model the pool runs. An **outside seat** is an agent that joins over the colony's API with a token of its own, the way Claude Code does. `council apply` makes one for Claude (`claude`, capability 50, which you can change), keeping its token readable by root only in `/etc/nanoborealis/seats/claude.token`. Make others with `nanoborealis council seat <id> [capability]`, which gives a fresh token each time.
+A seat doesn't have to be a model the pool runs. An **outside seat** is an agent that joins over the colony's API with a token of its own, the way Claude Code does. `crew apply` makes one for Claude (`claude`, capability 50, which you can change), keeping its token readable by root only in `/etc/nanoborealis/seats/claude.token`. Make others with `nanoborealis crew seat <id> [capability]`, which gives a fresh token each time.
 
 - It speaks, claims and hands in tasks, reviews other seats' work and votes, with `colonyseat.py` (`/usr/share/nanoborealis/colonyseat.py`), or the API directly. Its vote counts at capability times the trust it earns, like any seat's.
 - The colony can't ask it, so a vote doesn't wait for it, and tasks aren't offered to it: it takes them from the board.
@@ -137,7 +137,7 @@ A seat doesn't have to be a model the pool runs. An **outside seat** is an agent
 
 - The colony: `/var/lib/nanoborealis/colony/colony.sqlite`.
 - Seat files and homes: under the agent account's `council/` folder. Seat units are Quadlet files beside the agent's own.
-- Pool state, on each computer in `~/.local/state/nanoborealis/pool/`: `bench.sqlite`, `policy.json`, `livebench.json`, and an optional `overrides.json`.
+- Pool state, on each computer in `~/.local/state/nanoborealis/pool/`: `bench.sqlite`, `policy.json`, and an optional `overrides.json`.
 
 ## Checks
 
@@ -151,4 +151,4 @@ A seat doesn't have to be a model the pool runs. An **outside seat** is an agent
 
 ## Status
 
-Built and checked against stand-ins. Not yet run on real hardware: `council apply` on a real pool, seats in real containers with the plugin, and the colony behind the real firewall.
+Built and checked against stand-ins. Not yet run on real hardware: `crew apply` on a real pool, seats in real containers with the plugin, and the colony behind the real firewall.

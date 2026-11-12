@@ -110,6 +110,9 @@ def run(base: str, admin_token: str) -> None:
           "a seat can't post as the colony")
     check(len(admin("GET", f"/rooms/{room['id']}/messages?after={messages[1]['id']}")[1]["messages"]) == 1,
           "a seat can read only what's new")
+    _, branch = admin("POST", "/rooms", {"title": "Which database? (branch)", "from_room": room["id"], "upto": messages[1]["id"]})
+    check([m["author"] for m in admin("GET", f"/rooms/{branch['id']}/messages")[1]["messages"]] == ["you", "qwen-14b"],
+          "a branch carries the chat up to the message it was made from")
 
     # Weight is measured ability: Qwen's model passes most of its benchmark, Gemma's little.
     admin("POST", "/benchmarks", {"model": "mlx-community/Qwen3-14B-4bit", "suite": "t", "seed": 1,

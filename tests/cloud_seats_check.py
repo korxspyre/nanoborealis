@@ -28,9 +28,8 @@ def check(ok: bool, what: str) -> None:
     failed += not ok
 
 
-starter = rigs.parse((ROOT / "system_files/usr/share/nanoborealis/rigs/starter.toml").read_text(encoding="utf-8"))
-check(all(s["kind"] == "cloud" for s in starter["seats"]), "the starter rig is all cloud seats: it runs without a pool")
-check(all(s["model"].endswith(":free") for s in starter["seats"]), "...and every one is a free model")
+civ = rigs.parse((ROOT / "system_files/usr/share/nanoborealis/rigs/civ.toml").read_text(encoding="utf-8"))
+check(all(s["model"].endswith(":free") for s in civ["seats"]), "the crew that ships runs on free models only")
 
 try:
     rigs.parse('[rig]\nname = "x"\n[[seat]]\nid = "a"\nkind = "cloud"\nmodel = "openai/gpt-5"\n')

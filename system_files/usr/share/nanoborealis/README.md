@@ -55,7 +55,7 @@ The sandbox is minimal on purpose. It is there so the agent can't damage the sys
 
 | Command | Does |
 |---|---|
-| `nanoborealis update` | Check the build this computer follows for something newer, show what's new, and download it if you agree, along with app updates. It takes effect at the next reboot. `--stable` or `--dev` moves the computer to that build: stable is tested releases, dev is every build. (The old testing channel is gone; computers on it move to dev.) `--nvidia` moves it to the NVIDIA edition, with NVIDIA's driver so the pool can use its GPU (a computer with an NVIDIA GPU does this by itself at first login), and `--standard` back |
+| `nanoborealis update` | Check the build this computer follows for something newer, show what's new, and download it if you agree, along with app updates. It takes effect at the next reboot. `--stable` or `--dev` moves the computer to that build: stable is tested releases, dev is every build. `--nvidia` moves it to the NVIDIA edition, with NVIDIA's driver so the pool can use its GPU (a computer with an NVIDIA GPU does this by itself at first login), and `--standard` back |
 | `nanoborealis rollback` | Go back to the build you ran before the last update (then reboot) |
 | `nanoborealis version` | Show which build is running, which one is staged, and which channel this system follows |
 | `nanoborealis open` | Open the NanoBorealis app (`--web`: the WebUI in a browser instead) |
@@ -66,15 +66,13 @@ The sandbox is minimal on purpose. It is there so the agent can't damage the sys
 | `nanoborealis remote on` / `off` / `status` | Let the NanoBorealis app on your other devices pair with this computer (on by default), or keep the agent to this machine only. While it's on, this machine announces itself over mDNS so the app finds it |
 | `nanoborealis devices` / `devices remove <id>` | List the devices paired with this computer, or unpair one |
 | `nanoborealis pool join` / `serve` / `stop` / `status` / `logs` / `leave` | Pool this computer with others on your network so together they run models too big for any one of them. See [Pooling computers](#pooling-computers) |
-| `nanoborealis pool nodes` / `plan` / `apply` / `drain` / `undrain` / `bench` / `scores` / `policy` | Run as many models on the pool at once as it can, each fast enough for an agent. See [A council of models](#a-council-of-models) |
-| `nanoborealis council apply` / `status` / `autonomy` / `escalation` / `remove` | Seat one agent per model of the pool's loadout, meeting in the colony. See [A council of models](#a-council-of-models) |
+| `nanoborealis pool nodes` / `plan` / `apply` / `drain` / `undrain` / `bench` / `scores` / `policy` | Run as many models on the pool at once as it can, each fast enough for an agent. See [Running several models](#running-several-models) |
+| `nanoborealis crew apply` / `status` / `autonomy` / `escalation` / `remove` | Seat one agent per model of the pool's loadout, meeting in the colony. See [The crew](#the-crew) |
 | `nanoborealis pool gpu` / `coordinate` | Show whether this computer would run the NVIDIA node or the processor one; run a pool coordinator without lending this computer |
 | `nanoborealis set-key` | Swap the OpenRouter key |
 | `nanoborealis rebuild [X.Y.Z]` | Rebuild the agent's container, optionally at a new nanobot version |
 | `nanoborealis reset` | **Delete** the agent's home (memory, sessions, settings, tools) and start fresh. Projects are kept |
 | `nanoborealis uninstall` | Remove the agent and its account. Projects are kept |
-
-The earlier names `nanoaurora` and `nanobot-os` still work as well.
 
 **The container is disposable; the home is not.** The agent's home directory, including config, memory, sessions, skills, and anything installed there, lives on the `nanobot-home` volume and survives restarts and rebuilds. Packages installed with apt disappear when the container is recreated, unless they're listed in `~/.config/nanoborealis/apt-packages`.
 
@@ -106,7 +104,7 @@ nanoborealis pool status                                    # the computers, the
 
 **NVIDIA GPUs.** `pool join` runs the NVIDIA build of the node (CUDA 13) on a computer whose GPU can: an RTX 20 series or newer, a driver from the 580 series on, and the NVIDIA Container Toolkit with its CDI spec (`sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml`). exo then splits models by the GPU's memory rather than the computer's, keeping 1 GB for the driver, and the planner puts the models only a GPU runs fast on it. When something is missing, the node runs on the processor and `join` says what to fix; `nanoborealis pool gpu` shows the verdict before joining, and `join --cpu` leaves the GPU out. A laptop's GPU works too while it's plugged in; with 4 to 8 GB it takes a smaller part of a model. Computers without a GPU still help: they hold parts of big models, or run small ones. Another engine, such as a fork of exo, builds from [`pool/Containerfile`](https://github.com/korxspyre/nanoborealis/blob/main/pool/Containerfile) with `EXO_REPO` and `EXO_REF`.
 
-## A council of models
+## Running several models
 
 A pool can run several models at once, each spread over the computers the planner picks. `plan` proposes the most capable set the pool can run with every model fast enough for an agent (by default 10 tokens a second writing and 150 reading), and `apply` makes the pool run it:
 
@@ -121,12 +119,12 @@ nanoborealis pool drain laptop   # move the models off a computer so it can leav
 
 - **How it decides.** exo splits a model's layers over its computers in proportion to their free memory, and the slowest computer in the chain sets the pace, so the planner keeps GPUs together for the models only they can run fast, and gives laptops small models or mixture-of-experts ones (large, but light per token, like Qwen3-30B-A3B). Each extra computer costs every token a network hop, Wi-Fi most of all.
 - **Growing and shrinking.** `apply` keeps what already runs and fills the room around it, so a computer that joins adds models without restarting others; `apply --rebuild` plans everything afresh. `drain <computer>` moves only the models that used it; `undrain` lets the planner use it again.
-- **What it knows.** Speeds start as estimates per kind of hardware and are corrected by every `bench` run, which also checks each model makes a correct tool call; a model that fails is left out. Capability comes from [LiveBench](https://livebench.ai), whose newest leaderboard the planner downloads every two weeks (`scores refresh` does it now), matched only to the same model version and size; otherwise it's a guess from the model's size, marked ≈. Scores in `~/.local/state/nanoborealis/pool/overrides.json` win over both.
+- **What it knows.** Speeds start as estimates per kind of hardware and are corrected by every `bench` run, which also checks each model makes a correct tool call; a model that fails is left out. Capability is a guess from the model's size, marked ≈. Scores in `~/.local/state/nanoborealis/pool/overrides.json` win over the guess.
 - **Your settings.** `policy` shows and changes them: the speed floors, memory kept free on every computer (`headroom_gb`), how many models and computers per model, and models to pin or ban, e.g. `nanoborealis pool policy min_gen_tps=15 banned=mlx-community/Qwen3-4B-4bit`.
 
-### Seats and the colony
+### The crew
 
-With a pool running, `nanoborealis council apply` goes one step further: each model of the loadout becomes a **seat**, a persistent agent with its own container, home and memory, and the agent you already have is the chair. The seats meet in the colony (`nanoborealis-colony`, port 11437), where they share a floor and a task board, vote with weights from capability and earned trust, and ask a free OpenRouter model when stuck. In the app, every new chat picks **Agent**, **Colony** or **Task**. `council autonomy continuous` lets seats pick up open tasks by themselves; `council escalation off` stops them asking OpenRouter. Seats can reach the colony and the pool relay but, like the chair, not your local network. Seats can also be free cloud models with no pool at all: `nanoborealis rig up /usr/share/nanoborealis/rigs/starter.toml` brings up a team of them. The full design is in [`docs/rigs`](https://github.com/korxspyre/nanoborealis/blob/main/docs/rigs/README.md).
+With a pool running, `nanoborealis crew apply` goes one step further: each model of the loadout becomes a **seat**, a persistent agent with its own container, home and memory, and the agent you already have is the chair. The seats meet in the colony (`nanoborealis-colony`, port 11437), where they share chats and a task board, vote with weights from their NanoBench scores, and ask a free cloud model when stuck. In the app, every new chat picks **Agent**, **Colony** or **Task**. `crew autonomy continuous` lets seats pick up open tasks by themselves; `crew escalation off` stops them asking outside. Seats can reach the colony and the pool relay but, like the chair, not your local network. Seats can also be free cloud models with no pool at all: `nanoborealis rig up /usr/share/nanoborealis/rigs/civ.toml` brings up a crew of eight. The full design is in [`docs/rigs`](https://github.com/korxspyre/nanoborealis/blob/main/docs/rigs/README.md).
 
 ## Changing things
 

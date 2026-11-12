@@ -317,7 +317,7 @@ def run(base: str, admin_token: str) -> None:
     check(status == 200 and seat_a["scorecard"]["overall"]["n"] == 45 and seat_a["scorecard"]["tools"]["score"] == 100.0
           and seat_a["scorecard"]["review"]["lo"] < seat_a["scorecard"]["review"]["score"] < seat_a["scorecard"]["review"]["hi"],
           "a benchmark run gives its seats a scorecard, each score with its 95% interval")
-    check(seat_a["trust"] > trust_before and posted["trust_term"] > 0, "...a good result raises trust, from the low end of the interval")
+    check(seat_a["trust"] > trust_before, "...a good result raises trust, from the low end of the interval")
     unbenched = next(s for s in admin("GET", "/seats")["seats"] if s["id"] == "b")
     check(unbenched["scorecard"] == {} and unbenched["trust"] <= 1.0 + 0.2, "...a seat nobody has benchmarked has no scorecard and no benchmark trust")
     trust_b = next(s["trust"] for s in admin("GET", "/seats")["seats"] if s["id"] == "b")

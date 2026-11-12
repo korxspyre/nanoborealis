@@ -8,8 +8,7 @@ umask 002
 
 state="$HOME/.nanobot"
 mkdir -p "$state"
-# Homes seeded under the earlier name carry .nanobot-os-seeded; never seed over them.
-if [ ! -e "$state/.nanoborealis-seeded" ] && [ ! -e "$state/.nanobot-os-seeded" ]; then
+if [ ! -e "$state/.nanoborealis-seeded" ]; then
     cp -R /opt/nanobot-seed/. "$state/"
     touch "$state/.nanoborealis-seeded"
 fi
@@ -121,7 +120,7 @@ if [ -d "$shared" ] && [ ! -L "$ws/projects" ]; then
     [ -e "$ws/projects" ] || ln -s "$shared" "$ws/projects"
 fi
 
-# A council seat (`nanoborealis council apply`): its config and instructions are managed, and come
+# A council seat (`nanoborealis crew apply`): its config and instructions are managed, and come
 # in fresh on every start. What it remembers stays in its own home.
 if [ -n "${NANOBOREALIS_SEAT:-}" ] && [ -f /opt/nanoborealis-seat/config.json ]; then
     cp /opt/nanoborealis-seat/config.json "$state/config.json"
@@ -175,10 +174,6 @@ if ! git config --global --get-all safe.directory 2>/dev/null | grep -qx '\*'; t
 fi
 
 pkgs="$HOME/.config/nanoborealis/apt-packages"
-if [ ! -e "$pkgs" ] && [ -s "$HOME/.config/nanoaurora/apt-packages" ]; then
-    mkdir -p "$(dirname "$pkgs")"
-    mv "$HOME/.config/nanoaurora/apt-packages" "$pkgs"  # the list's earlier home
-fi
 if [ -s "$pkgs" ]; then
     list="$(grep -v '^[[:space:]]*#' "$pkgs" | xargs)"
     if [ -n "$list" ]; then

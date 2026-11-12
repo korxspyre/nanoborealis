@@ -700,8 +700,6 @@ def parse_head(raw: bytes) -> tuple[str, str, str, list[tuple[str, str]]]:
 async def local(method: str, target: str, headers: list[tuple[str, str]], reader: asyncio.StreamReader,
                 writer: asyncio.StreamWriter, address: str) -> None:
     """This service's own endpoints: pairing, unpairing, and a paired device's terminal and commands."""
-    if target.startswith(OLD_COLONY_PREFIX):  # an app from before the rename still asks the colony there
-        target = COLONY_PREFIX + target[len(OLD_COLONY_PREFIX):]
     path = target.split("?", 1)[0]
     if method == "GET" and path == "/nanoborealis/hello":
         return await reply(writer, 200, {"service": "nanoborealis-remote", "pairing": 1, "terminal": 1, "admin": 1,
@@ -1115,7 +1113,6 @@ COLONY_URL = os.environ.get("NANOBOREALIS_REMOTE_COLONY_URL", "http://127.0.0.1:
 
 
 COLONY_PREFIX = "/nanoborealis/colony/"
-OLD_COLONY_PREFIX = "/nanoborealis/" + "hall/"  # its address before the rename, for apps not updated yet
 
 
 def colony_proxy(method: str, path: str, query_string: str, body: dict | None) -> tuple[int, dict]:
@@ -2157,6 +2154,85 @@ async def agent_ask(data: dict) -> tuple[int, dict]:
     return 200, {"id": ask.id, "answer": ask.answer}
 
 
+# -- Setup, for the agent and through it the crew: read how this computer is set up, and change it with the owner's
+# yes. Keys are never shown or changed here: they go in through the app only.
+
+setup_asks: dict[str, tuple[str, dict]] = {}  # an open question's id -> what it would change, as first asked
+
+
+async def setup_overview() -> tuple[int, dict]:
+    done = await router_run("status")
+    try:
+        router = json.loads(done.stdout)
+    except ValueError:
+        router = {"error": "the router isn't set up yet"}
+    providers = {n: {k: v for k, v in p.items() if k not in ("key",)} for n, p in (router.get("providers") or {}).items()}
+    _s, settings = await asyncio.to_thread(colony_proxy, "GET", "/settings", "", None)
+    _m, seats = await asyncio.to_thread(colony_proxy, "GET", "/seats", "", None)
+    members = [{"id": x["id"], "role": x.get("role") or "", "group": x.get("pod") or "", "model": x.get("model"),
+                "score": x.get("score")} for x in (seats.get("seats") or []) if not x.get("chair")] if _m == 200 else []
+    models = await router_run("models")
+    try:
+        served = sorted(m["id"] for m in json.loads(models.stdout).get("models", []))[:400]
+    except (ValueError, KeyError, TypeError):
+        served = []
+    return 200, {"providers": providers, "tokenizing": router.get("tokenizing"), "colony": settings if _s == 200 else {},
+                 "members": members, "models": served,
+                 "changeable": ["provider enabled/daily/per_minute/max_request", "colony autonomy/escalation",
+                                "a member's model"]}
+
+
+def setup_plan(change: dict) -> tuple | str:
+    """(what it does, in words; how to do it) for a change the setup tool may ask for, or why it can't."""
+    if isinstance(change.get("provider"), str):
+        name, field, value = change["provider"], change.get("field"), change.get("value")
+        if name not in ROUTER_PROVIDERS or field not in ("enabled", "daily", "per_minute", "max_request"):
+            return "A provider change is {provider: nim|groq|openrouter, field: enabled|daily|per_minute|max_request, value}."
+        return (f"set {name}'s {field} to {value}",
+                lambda: providers_set({"provider": name, "field": field, "value": value}, {}, AGENT_USER, "agent"))
+    if isinstance(change.get("colony"), dict):
+        wanted = {k: v for k, v in change["colony"].items() if k in ("autonomy", "escalation")}
+        if not wanted:
+            return "A colony change sets autonomy (on-task or continuous) or escalation (true or false)."
+        return (f"set the colony's {', '.join(f'{k} to {v}' for k, v in wanted.items())}",
+                lambda: asyncio.to_thread(colony_proxy, "POST", "/settings", "", wanted))
+    if isinstance(change.get("member"), str) and isinstance(change.get("model"), str):
+        member, model = change["member"], change["model"].strip()[:200]
+        async def move() -> tuple[int, dict]:
+            status, answer = await asyncio.to_thread(colony_proxy, "POST", f"/seats/{urllib.parse.quote(member)}/model", "",
+                                                     {"model": model})
+            if status == 200:
+                await rig_deploy(answer)
+            return status, answer
+        return f"move crew member {member} to the model {model}", move
+    return "Say what to change: {provider, field, value}, {colony: {...}} or {member, model}."
+
+
+async def setup_change(data: dict) -> tuple[int, dict]:
+    """Ask the owner first, then do it. A pending question is polled with its id; the change is the one first asked."""
+    held = setup_asks.get(str(data.get("id") or ""))
+    if held is None:
+        plan = setup_plan(data.get("change") if isinstance(data.get("change"), dict) else {})
+        if isinstance(plan, str):
+            return 400, {"error": plan}
+        what = plan[0]
+        status, answer = await agent_ask({"chat": data.get("chat"), "command": f"Change the setup: {what}",
+                                          "reason": str(data.get("reason") or "")[:500], "request": "setup"})
+        setup_asks[answer["id"]] = (what, data["change"])
+    else:
+        what = held[0]
+        status, answer = await agent_ask({"id": data["id"]})
+    if answer.get("pending"):
+        return 200, answer
+    _what, change = setup_asks.pop(answer["id"], (what, None))
+    if answer.get("answer") not in ("once", "always") or change is None:
+        return 200, {"done": False, "why": answer.get("why") or "the owner said no"}
+    plan = setup_plan(change)
+    status, result = await plan[1]()
+    log(f"the agent changed the setup with its owner's yes: {what}")
+    return status, {"done": status == 200, "what": what, **({"error": result.get("error")} if status != 200 else {})}
+
+
 async def agent_hands(method: str, path: str, headers: list[tuple[str, str]], reader: asyncio.StreamReader,
                       writer: asyncio.StreamWriter) -> None:
     if not hmac.compare_digest(header(headers, AGENT_TOKEN_HEADER).encode(), agent_token().encode()):
@@ -2167,6 +2243,8 @@ async def agent_hands(method: str, path: str, headers: list[tuple[str, str]], re
     if method == "GET" and route == "/nanoborealis/agent-hands/mode":
         query = {k: v[-1] for k, v in urllib.parse.parse_qs(query_string).items()}
         return await reply(writer, 200, {"mode": agent_mode(str(query.get("chat") or "default"))})
+    if route == "/nanoborealis/agent-hands/setup" and method == "GET":
+        return await reply(writer, *await setup_overview())
     if route == "/nanoborealis/agent-hands/crew" and method == "GET":
         query = {k: v[-1] for k, v in urllib.parse.parse_qs(query_string).items()}
         if query.get("what") == "inbox":  # mail the crew sent the owner's agent
@@ -2188,7 +2266,7 @@ async def agent_hands(method: str, path: str, headers: list[tuple[str, str]], re
             payload = {"tasks": [x for x in payload["tasks"] if x.get("state") in ("open", "claimed", "review")][:30]}
         return await reply(writer, status, payload)
     if method != "POST" or route not in ("/nanoborealis/agent-hands/run", "/nanoborealis/agent-hands/ask",
-                                         "/nanoborealis/agent-hands/crew"):
+                                         "/nanoborealis/agent-hands/crew", "/nanoborealis/agent-hands/setup"):
         return await reply(writer, 404, {"error": "No such endpoint."})
     try:
         length = int(header(headers, "content-length") or 0)
@@ -2201,6 +2279,8 @@ async def agent_hands(method: str, path: str, headers: list[tuple[str, str]], re
         return await reply(writer, 400, {"error": "Bad request."})
     if route == "/nanoborealis/agent-hands/ask":
         status, payload = await agent_ask(data)
+    elif route == "/nanoborealis/agent-hands/setup":
+        status, payload = await setup_change(data)
     elif route == "/nanoborealis/agent-hands/crew" and isinstance(data.get("done"), int):  # crew_inbox: dealt with
         status, payload = await asyncio.to_thread(colony_proxy, "POST", f"/inbox/{data['done']}/ack", "", {"state": "done"})
     elif route == "/nanoborealis/agent-hands/crew" and data.get("to"):  # crew_send: mail a member, or everyone

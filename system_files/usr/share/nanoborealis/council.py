@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (C) 2026 korxspyre
-"""The council's seats, for `nanoborealis council` (docs/rigs/README.md).
+"""The council's seats, for `nanoborealis crew` (docs/rigs/README.md).
 
 A seat is one model of the pool's loadout, run as its own nanobot agent: its own container, home
 and memory, its model reached through the pool relay, and the council's tools switched on by its
 Colony token. This file works out which seats there should be and writes each one's files; the
-`nanoborealis council` command does the system side (the colony, secrets, containers).
+`nanoborealis crew` command does the system side (the colony, secrets, containers).
 
     python3 council.py seats <plan.json> <seats.json>   the seats the loadout calls for, as JSON
     python3 council.py files <seats.json> <seat-id> <dir>   write a seat's config.json, AGENTS.md
@@ -109,7 +109,7 @@ other seats read what you write, and every word costs the pool time.
 
 
 def quadlet(seat: dict) -> str:
-    return f"""# A council seat: {seat['name']} ({seat['model']}). Written by `nanoborealis council apply`.
+    return f"""# A council seat: {seat['name']} ({seat['model']}). Written by `nanoborealis crew apply`.
 
 [Unit]
 Description=NanoBorealis council seat {seat['name']}

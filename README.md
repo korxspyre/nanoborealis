@@ -69,12 +69,6 @@ sudo bootc switch ghcr.io/korxspyre/nanoborealis:stable
 systemctl reboot
 ```
 
-**Installed before the move from `more-than-just-kyrion` to `korxspyre`?** Images are published under the new name now, so point the computer there once, then update as usual. Keep `-nvidia` if it has it, and use `dev` in place of `stable` if it follows the dev channel (a computer on the retired `testing` channel goes to `dev`):
-
-```bash
-sudo bootc switch ghcr.io/korxspyre/nanoborealis:stable
-```
-
 ## Everyday use
 
 ```bash
@@ -84,9 +78,9 @@ nanoborealis rollback       # go back to the previous version
 nanoborealis devices        # devices paired with the NanoBorealis app (pair: pick this computer in the app)
 nanoborealis compute list   # devices lending their hardware to the agent
 nanoborealis pool join      # pool this computer with others to run bigger models
-nanoborealis rig up /usr/share/nanoborealis/rigs/starter.toml  # a team of free cloud agents
+nanoborealis rig up /usr/share/nanoborealis/rigs/civ.toml  # a crew of eight free cloud agents
 nanoborealis rig task "..."  # give it work; `rig board` follows it
-nanoborealis council bench  # run NanoBench on the seats; scores become their trust
+nanoborealis crew bench  # run NanoBench on the seats; scores become their trust
 nanoborealis rig            # start, snapshot and restore a civilization of seats from one file
 nanoborealis privacy on     # send the agent's own cloud calls through the tokenizing proxy
 nanoborealis snapshot list  # undo: hourly copies of homes and projects; `snapshot restore <id> <path>`
@@ -135,7 +129,7 @@ NanoBorealis is a [bootc](https://containers.github.io/bootc/) image: the whole 
 - **A mesh of every computer you own.** Hands already reach every device the app runs on; next, devices without the app (a Raspberry Pi, a server) lend theirs through a small node.
 - **A flexible inference engine.** Serve the pool from llama.cpp and its forks (ternary models like Bonsai, MoE expert offloading, speculative decoding) as well as exo, so 25 local and 25 cloud agents can run at once on ordinary hardware.
 - **Claude as the head agent.** Claude already develops NanoBorealis through a developer device; next it takes a seat as a rig's head agent, with the rest of the civilization doing the volume work under its review.
-- **Pool seats on real hardware.** Cloud-seat rigs run on a real NanoBorealis computer. Pool seats (`council apply`, seats in their own containers) are tested against stand-ins; the first runs on a real pool are next, as are the NVIDIA, Windows (WSL2) and Android paths.
+- **Pool seats on real hardware.** Cloud-seat rigs run on a real NanoBorealis computer. Pool seats (`crew apply`, seats in their own containers) are tested against stand-ins; the first runs on a real pool are next, as are the NVIDIA, Windows (WSL2) and Android paths.
 - **GPU pools in CI.** CI has no GPU, so the NVIDIA node is built and started there but proven only on real machines.
 - **Login screen and welcome app.** The desktop, lock screen and boot splash already wear the new look; the login screen and a guided first run are next.
 - **Privacy on by default.** The tokenizing proxy works for the pool relay, the colony's escalation and cloud seats and, with `nanoborealis privacy on`, the chair agent's own calls (`tokenizer.py`, `sources.py`, `privacy.py`, mixed across several free models by `mixer.py`). Still to do: making it the default, taking the key out of the agent's reach, and names the owner hasn't listed.
@@ -146,4 +140,3 @@ NanoBorealis is a [bootc](https://containers.github.io/bootc/) image: the whole 
 NanoBorealis stands on [Aurora](https://getaurora.dev) and [Universal Blue](https://universal-blue.org), [nanobot](https://github.com/HKUDS/nanobot) by HKUDS, [exo](https://github.com/exo-explore/exo), [Flet](https://flet.dev) and [OpenRouter](https://openrouter.ai). The wordmark is set in [Inter](https://rsms.me/inter/), and code in the app in [JetBrains Mono](https://www.jetbrains.com/lp/mono/).
 
 Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE). Every source file names its license in an `SPDX-License-Identifier` line: a few build files from the Universal Blue template stay under Apache-2.0, and the Plasma theme under GPL-2.0-or-later. [NOTICE](NOTICE) lists the parts that keep their own licenses, and [LICENSES](LICENSES) holds the text of each license that applies to any part. Every installer, the OS image and the pool node carry the license, and the app links to the source under **App updates**. The name and logo aren't part of that license: see [TRADEMARK](docs/TRADEMARK.md).
-<sub>Formerly known as nanobot OS and NanoAurora. Systems set up under those names move over by themselves.</sub>

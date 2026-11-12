@@ -108,9 +108,13 @@ def install() -> None:
             return everything
         _registry = self
         keep = _core() | _loaded.get(_chat(), set())
+        # With a crew, work handed off goes to it (crew_task), not to nanobot's own background subagents.
+        hidden = {"spawn"} if "crew_task" in self._tools else set()
         sent, listed = [], []
         for schema in everything:
             name = _name(schema)
+            if name in hidden:
+                continue
             if name in keep:
                 sent.append(_shorten(schema) if name in _core() else schema)  # a loaded one comes whole
             else:

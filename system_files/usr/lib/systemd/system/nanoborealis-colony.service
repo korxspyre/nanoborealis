@@ -3,12 +3,11 @@
 [Unit]
 Description=NanoBorealis colony (the crew's chats, task board, mail, votes and benchmark standing)
 Documentation=file:///usr/share/nanoborealis/README.md
-# After the migration, which moves state kept under the colony's old name (nanoborealis-hall).
-After=network-online.target nanoborealis-migrate.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]
-# Started by `nanoborealis council apply`, which hands each seat its token. The admin token stays in
+# Started by `nanoborealis crew apply`, which hands each seat its token. The admin token stays in
 # the state directory, readable by root only (nanoborealis-remote uses it for the app).
 # All addresses, so seats reach it from their containers; nanoborealis-firewall drops it from the network.
 Environment=NANOBOREALIS_COLONY_STATE=/var/lib/nanoborealis/colony NANOBOREALIS_COLONY_LISTEN=0.0.0.0:11437

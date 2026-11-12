@@ -10,7 +10,7 @@
 # Root loads this at boot, so the agent, which has no root on the host, can't undo it.
 # If this computer is in a pool, the agent may also use the pool relay (`nanoborealis pool`),
 # which offers chat only; the pool node's own API (no password) stays out of its reach.
-# If it has a council (`nanoborealis council`), its seats may reach the colony, which needs a token.
+# If it has a council (`nanoborealis crew`), its seats may reach the colony, which needs a token.
 set -euo pipefail
 
 if ! uid="$(id -u nanobot-agent 2>/dev/null)"; then
@@ -43,8 +43,6 @@ if [ ! -e /etc/nanoborealis/agent-lan.off ]; then
 fi
 
 nft -f - <<EOF
-add table inet nanoaurora
-delete table inet nanoaurora
 add table inet nanoborealis
 delete table inet nanoborealis
 table inet nanoborealis {

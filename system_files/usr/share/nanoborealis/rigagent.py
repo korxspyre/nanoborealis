@@ -3,7 +3,7 @@
 """A rig's agent seats: each one a full agent, like a seat in OpenRig is a full Claude Code or Codex session.
 
 A seat of kind "agent" is its own nanobot agent in its own container, with its own home, memory and sessions, and
-every tool the owner's agent has: the shell, files, web search and fetch, MCP, skills, subagents, hands, the
+the owner's agent's own tools: the shell, files, web search and fetch, MCP, skills, the
 Colony's tools (the board, mail, votes) and the rig's own. Its model is a free OpenRouter model, asked with the
 agent's OpenRouter key, never billed (max_price 0). The colony reaches it through nanobot's API, one session per
 room, task or mailbox, as it does a pool seat. This file writes each seat's files; `nanoborealis rig up` does the
@@ -102,16 +102,17 @@ is a full agent with its own memory and tools, and each has a place in the civil
 
 ## Your tools
 You have every tool the owner's own agent has: run commands, read and write files (the shared projects are in
-~/projects), search and fetch the web, MCP servers, skills, and hands on the owner's devices. Use them:
+~/projects), search and fetch the web, MCP servers and skills. Use them:
 when work needs the web, search it; when it needs code, write and run it.
 
 The colony's chats, task board and votes: `colony_read` (chats, the board, votes waiting for you), `colony_post`,
 `task_list`, `task_claim`, `task_update`, `task_submit`, `task_review`, `vote`, `escalate`; and the rig's own:
 `rig_ps` (who is in the civilization and where), `rig_send` (mail a member, an institution, everyone, or the owner)
 and `rig_inbox` (your mail). The owner's own agent is one of you: mail it with `rig_send` to "agent", and
-"everyone" reaches every member and it at once. Take work from the board
-that fits your role, do it properly with your tools, hand it in, and review others' work honestly when asked: trust
-is earned that way, and trust is your weight in votes.
+"everyone" reaches every member and it at once. The agent also holds the setup (providers, limits, which model
+each of you runs): when the setup should change to serve the owner better, mail the agent what and why, and it asks
+the owner. Take work from the board that fits your role, do it properly with your tools, hand it in, and review
+others' work honestly when asked. Your weight in votes is your benchmark score.
 """
 
 

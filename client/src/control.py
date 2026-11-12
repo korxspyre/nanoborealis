@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 import flet as ft
 
 import admin
-from colony import score_tip
+from colony import SCORE_TIP
 import agent_settings
 import host
 import models_catalog
@@ -497,10 +497,17 @@ class ControlCenter:
                 meta.append(f"next {when(state['next_run_at_ms'])}")
             if state.get("last_status"):
                 meta.append(f"last run: {state['last_status']}")
+            # The agent's own schedules can't be switched off here: a greyed-out switch read as "off" while the row
+            # said when it runs next, so they show a fixed mark instead.
+            on = bool(job.get("enabled"))
+            toggle = (ft.Container(ft.Icon(ft.Icons.SCHEDULE_ROUNDED, size=20, color=t.ACCENT if on else t.MUTED), width=48,
+                                   tooltip="Built into the agent: " + ("on" if on else "off"))
+                      if job.get("protected") else
+                      ft.Switch(value=bool(job.get("enabled")), active_color=t.ACCENT,
+                                on_change=lambda e, j=job: self.page.run_task(
+                                    self.job_action, "automation.enable" if e.control.value else "automation.disable", j)))
             rows.append(t.card(ft.Row([
-                ft.Switch(value=bool(job.get("enabled")), active_color=t.ACCENT, disabled=bool(job.get("protected")),
-                          on_change=lambda e, j=job: self.page.run_task(
-                              self.job_action, "automation.enable" if e.control.value else "automation.disable", j)),
+                toggle,
                 ft.Column([ft.Text(str(job.get("name") or message[:60] or job.get("id")), size=14.5,
                                    weight=ft.FontWeight.W_600),
                            t.muted(" · ".join(m for m in meta if m)),
@@ -759,7 +766,7 @@ class ControlCenter:
                                     on_click=lambda _e: self.page.run_task(self.reload, "pool"))]
         if job.get("running"):
             self.page.run_task(self.follow_pool_job, job_box)
-        name = f" · private pool {data['namespace']}" if data.get("namespace") else ""
+        name = f" · private group {data['namespace']}" if data.get("namespace") else ""
         return self.frame(title, subtitle + name, body, actions=actions)
 
     def fill_pool_job(self, box: ft.Column, job: dict[str, Any]) -> None:
@@ -789,8 +796,8 @@ class ControlCenter:
             self.fill_pool_job(box, job)
             self.page.update()
             if not job.get("running"):
-                self.toast(f"The pool is done {job.get('what')}." if job.get("ok") else
-                           f"The pool couldn't finish {job.get('what')}; see what it said.")
+                self.toast(f"Shared compute is done {job.get('what')}." if job.get("ok") else
+                           f"Shared compute couldn't finish {job.get('what')}; see what it said.")
                 await self.reload("pool")
                 return
 
@@ -828,7 +835,7 @@ class ControlCenter:
                 button], spacing=10), padding=ft.Padding.symmetric(vertical=6)))
         return t.card(ft.Column([
             t.muted(f"COMPUTERS · {len(nodes)}", size=11), *rows,
-            t.muted("To grow the pool, run nanoborealis pool join on another computer, or open the NanoBorealis app "
+            t.muted("To add a computer, run nanoborealis pool join on another computer, or open the NanoBorealis app "
                     "there and lend it. Draining a computer moves its models elsewhere, so it can leave.", size=12),
         ], spacing=4))
 
@@ -846,7 +853,7 @@ class ControlCenter:
                 t.muted(f"{placement.get('size_gb')} GB · {speed} · on {where}", size=12.5),
             ], spacing=2), padding=ft.Padding.symmetric(vertical=5)))
         if not rows:
-            rows.append(t.muted("The planner has nothing to run on this pool."))
+            rows.append(t.muted("The planner has nothing to run on these computers."))
         changes: list[ft.Control] = []
         for stop in plan.get("stop") or []:
             changes.append(ft.Row([t.badge("STOP", t.BAD), t.mono(str(stop.get("model")), size=12)], spacing=8))
@@ -856,12 +863,12 @@ class ControlCenter:
         if plan.get("keep"):
             changes.append(t.muted(f"Keeps {len(plan['keep'])} model(s) that already run.", size=12.5))
         if not pending:
-            changes.append(t.muted("The pool already runs this loadout.", size=12.5))
+            changes.append(t.muted("Your computers already run these models.", size=12.5))
         notes = [t.muted(f"· {note}", size=12) for note in plan.get("notes") or []]
         apply = t.primary_button("Rebuild it" if rebuild else "Apply", icon=ft.Icons.PLAY_ARROW_ROUNDED,
                                  disabled=busy or not pending,
                                  on_click=lambda _e: self.page.run_task(self.pool_change, lambda: admin.pool_apply(
-                                     self.app.machine, rebuild), "Changing the pool's models. It takes a few minutes."))
+                                     self.app.machine, rebuild), "Changing which models run. It takes a few minutes."))
         other = (t.quiet_button("Back to keeping what runs", on_click=lambda _e: self.page.run_task(self.reload, "pool"))
                  if rebuild else
                  t.quiet_button("Plan from scratch", on_click=lambda _e: self.page.run_task(self.pool_rebuild)))
@@ -878,7 +885,7 @@ class ControlCenter:
         try:
             self.workspace.control_host.content = await self.pool(rebuild=True)
         except PairingError as e:
-            self.workspace.control_host.content = self.frame("Pool", "", [self.problem(str(e))])
+            self.workspace.control_host.content = self.frame("Shared compute", "", [self.problem(str(e))])
         self.page.update()
 
     def pool_bench(self, rows: list[dict[str, Any]]) -> ft.Control:
@@ -898,7 +905,7 @@ class ControlCenter:
             t.muted("MEASURED", size=11), *lines,
             ft.Row([t.outline_button("Measure what runs", icon=ft.Icons.SPEED_ROUNDED,
                                      on_click=lambda _e: self.page.run_task(self.pool_change, lambda: admin.pool_bench(
-                                         self.app.machine), "Measuring every model the pool serves.")),
+                                         self.app.machine), "Measuring every model your computers serve.")),
                     t.quiet_button("Try a model", on_click=lambda _e: self.page.run_task(self.pool_try))], spacing=10),
         ], spacing=6))
 
@@ -919,7 +926,7 @@ class ControlCenter:
             bgcolor=t.PANEL, shape=ft.RoundedRectangleBorder(radius=t.RADIUS_LG),
             title=ft.Text("Try a model", size=18, weight=ft.FontWeight.W_600),
             content=ft.Container(width=480, content=ft.Column([
-                t.muted("The pool runs it for a moment, measures its speed and checks that it can call tools, then "
+                t.muted("Your computers run it for a moment, measures its speed and checks that it can call tools, then "
                         "stops it. The planner remembers what it learned."), model, on], spacing=12, tight=True)),
             actions=[t.quiet_button("Cancel", on_click=lambda _e: self.page.pop_dialog()),
                      t.primary_button("Try it", on_click=start)],
@@ -1253,9 +1260,7 @@ class ControlCenter:
                         ft.Text(f"{score:.0f}%" if score is not None else "untested", size=12, width=64,
                                 text_align=ft.TextAlign.RIGHT,
                                 color=t.MUTED if score is None else t.GOOD if score >= 60 else t.WARN if score >= 35 else t.BAD,
-                                tooltip="Benchmark score, tested by code: LiveBench's published leaderboard and this "
-                                        "computer's own NanoBench tests every week. It alone sets their standing and "
-                                        "their say in votes.\n" + score_tip(s)),
+                                tooltip=SCORE_TIP + ". It alone sets their standing and their say in votes."),
                     ], spacing=10))
             short = lambda seat_id: seat_id.split("-", 1)[-1].capitalize()  # noqa: E731
             ties = ft.ExpansionTile(

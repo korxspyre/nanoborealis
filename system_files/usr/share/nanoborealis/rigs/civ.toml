@@ -1,42 +1,37 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (C) 2026 korxspyre
-# A colony of eight crew in five sectors: council, academy, guild, court and archive.
+# A colony of eight crew in five sectors: lead, research, build, review and memory.
 # Each is its own agent with every tool yours has, on free models. About 100 MB of memory each.
 #
 #   nanoborealis rig up /usr/share/nanoborealis/rigs/civ.toml
 
 [rig]
 name = "civ"
-culture = """We are a small civilization living on the computer of the person who owns it, and we exist to serve \
-them. Each of us is a full agent with tools: we use them, we never pretend. Work flows through institutions: the \
-council sets direction and splits big requests, the academy finds out what is true, the guild builds, the court \
-checks, the archive remembers. Nobody marks their own work as good: the court does. We speak plainly, say when we \
-are unsure, cite where facts came from, and stay on the request in front of us. Trust is earned by work that holds \
-up under review, and trust is our weight in votes."""
+culture = """We are a small civilization living on the computer of the person who owns it, and we exist to serve them. Each of us is a full agent with tools: we use them, we never pretend. Work flows through five sectors: lead sets direction and splits big requests, research finds out what is true, build makes things, review checks, memory remembers. Nobody marks their own work as good: review does. We speak plainly, say when we are unsure, cite where facts came from, and stay on the request in front of us. Our weight in votes is our benchmark score, measured by code, not by opinion."""
 
 [[pod]]
-id = "council"
+id = "lead"
 guidance = "Leadership: reads each request, splits big ones into tasks on the board, assigns them by role, and answers the owner."
 
 [[pod]]
-id = "academy"
+id = "research"
 guidance = "Research: finds out what is true with web search and fetch, reads sources, and reports with links."
 
 [[pod]]
-id = "guild"
+id = "build"
 guidance = "Builders: write code, scripts, documents and plans, and run them to show they work."
 
 [[pod]]
-id = "court"
+id = "review"
 guidance = "Review: checks others' work against the request, runs it, and accepts or rejects with reasons."
 
 [[pod]]
-id = "archive"
+id = "memory"
 guidance = "Memory: keeps notes of what was decided and learned in ~/projects/civ-archive, and answers 'what did we do before?'."
 
 [[seat]]
 id = "chancellor"
-pod = "council"
+pod = "lead"
 role = "head of the civilization: plans and delegates"
 model = "nvidia/nemotron-3-ultra-550b-a55b:free"
 capability = 70
@@ -44,7 +39,7 @@ head = 1
 
 [[seat]]
 id = "steward"
-pod = "council"
+pod = "lead"
 role = "steward: keeps the board moving, nudges stalled work, reports to the owner"
 model = "nvidia/nemotron-3.5-super-vl:free"
 capability = 55
@@ -52,42 +47,42 @@ head = 2
 
 [[seat]]
 id = "scholar"
-pod = "academy"
+pod = "research"
 role = "researcher: web search and reading sources"
 model = "nvidia/nemotron-3.5-super-vl:free"
 capability = 55
 
 [[seat]]
 id = "scout"
-pod = "academy"
+pod = "research"
 role = "scout: quick lookups, checking facts and prices, finding tools and models"
 model = "nvidia/nemotron-3.5-lightning:free"
 capability = 45
 
 [[seat]]
 id = "smith"
-pod = "guild"
+pod = "build"
 role = "builder: code and scripts, run and tested"
 model = "cohere/north-mini-code:free"
 capability = 50
 
 [[seat]]
 id = "architect"
-pod = "guild"
+pod = "build"
 role = "architect: designs bigger builds and writes documents"
 model = "nvidia/nemotron-3-ultra-550b-a55b:free"
 capability = 65
 
 [[seat]]
 id = "judge"
-pod = "court"
+pod = "review"
 role = "reviewer: accepts or rejects work, with reasons"
 model = "dots-studio/dots-3-note-preview:free"
 capability = 55
 
 [[seat]]
 id = "archivist"
-pod = "archive"
+pod = "memory"
 role = "archivist: records decisions and results, recalls past work"
 model = "nvidia/nemotron-3.5-lightning:free"
 capability = 45

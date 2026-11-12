@@ -8,8 +8,7 @@
 Releases before 0.7.1 were the app's own, tagged client-vX.Y.Z; they still count.
 
 A channel offers its own builds and every more stable one, so dev gets everything. Versions order
-as semver does: 0.3.0-dev.9 < 0.3.0-rc.2 < 0.3.0. (The old -rc builds of the retired testing
-channel still order and count as dev.)
+as semver does: 0.3.0-dev.9 < 0.3.0-rc.2 < 0.3.0.
 
 Only the packaged app updates itself; running from source updates with git. An update is found,
 downloaded, checked against the release's SHA256SUMS, and only then installed:
