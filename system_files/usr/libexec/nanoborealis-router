@@ -636,8 +636,8 @@ CHECK_FIRST = 30  # a paused model is checked this many seconds after its pause 
 CHECK_MOST = 600  # then twice as long after each failed check, up to this
 
 
-def model_answers(provider: dict, model: str) -> bool:
-    """One tiny question to a paused model: a readable answer means it works again."""
+def model_answers(provider: dict, model: str) -> str:
+    """One tiny question to a paused model: "" when it answers readably (it works again), else why not."""
     body = {"model": model, "messages": [{"role": "user", "content": "Reply with the word ok."}], "max_tokens": 200}
     request = urllib.request.Request(provider["url"] + "/chat/completions", data=json.dumps(body).encode(), method="POST",
                                      headers={"Authorization": f"Bearer {provider['key']}", "Content-Type": "application/json",
@@ -645,10 +645,14 @@ def model_answers(provider: dict, model: str) -> bool:
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
             message = (json.loads(response.read()).get("choices") or [{}])[0].get("message") or {}
-    except (urllib.error.URLError, OSError, ValueError, AttributeError, IndexError):
-        return False
+    except urllib.error.HTTPError as error:
+        return f"it answered {error.code}"
+    except (urllib.error.URLError, OSError) as error:
+        return f"it didn't answer ({getattr(error, 'reason', error)})"
+    except (ValueError, AttributeError, IndexError):
+        return "its answer wasn't valid JSON"
     text = str(message.get("content") or message.get("reasoning_content") or message.get("reasoning") or "").strip()
-    return bool(text) and readable(text)
+    return "" if text and readable(text) else ("its answer was empty" if not text else "its answer was unreadable")
 
 
 def provider_models(name: str) -> list[dict]:
@@ -803,7 +807,8 @@ def main(argv: list[str]) -> int:
                 if busy:  # the provider's own limit comes first: never spend its last requests on a check
                     next_check[key] = (now + 30, wait)
                     continue
-                ok = model_answers(provider, model)
+                failed = model_answers(provider, model)
+                ok = not failed
                 with lock:
                     usage.count(name, 20)
                     if ok:
@@ -815,6 +820,8 @@ def main(argv: list[str]) -> int:
                 else:
                     wait = min(wait * 2, CHECK_MOST)
                     next_check[key] = (time.time() + wait, wait)
+                    print(f"nanoborealis-router: {name} {model} still down ({failed}); checked again in "
+                          f"{wait // 60:.0f} min {wait % 60:.0f} s", file=sys.stderr, flush=True)
     threading.Thread(target=check_paused, daemon=True).start()
     server.serve_forever()
     return 0
