@@ -66,7 +66,7 @@ STATE = Path(os.environ.get("NANOBOREALIS_ROUTER_STATE", "/var/lib/nanoborealis/
 LISTEN = os.environ.get("NANOBOREALIS_ROUTER_LISTEN", "0.0.0.0:11438")
 ASK_AGAIN = 3  # a broken answer is asked for again this many times in all, on the same provider, before the next one
 ASK_FOR = 40  # seconds of broken answers before the agent is told, so it moves on to its fallback models
-BROKEN_FOR = 600  # then that model on that provider is left alone this long (seconds), and tried again after
+BROKEN_FOR = 600  # then that model on that provider is left alone at most this long (seconds); checks lift it sooner
 broken_until: dict[tuple[str, str], float] = {}
 
 
@@ -632,6 +632,25 @@ NOT_CHAT = re.compile(r"embed|rerank|whisper|tts|guard|safety|vision-only|clip|p
                       r"playai|distil-whisper|orpheus|prompt-guard|nemoretriever|-detector|cosmos|flux|sdxl|stable-diffusion", re.I)
 
 
+CHECK_FIRST = 30  # a paused model is checked this many seconds after its pause starts,
+CHECK_MOST = 600  # then twice as long after each failed check, up to this
+
+
+def model_answers(provider: dict, model: str) -> bool:
+    """One tiny question to a paused model: a readable answer means it works again."""
+    body = {"model": model, "messages": [{"role": "user", "content": "Reply with the word ok."}], "max_tokens": 200}
+    request = urllib.request.Request(provider["url"] + "/chat/completions", data=json.dumps(body).encode(), method="POST",
+                                     headers={"Authorization": f"Bearer {provider['key']}", "Content-Type": "application/json",
+                                              "User-Agent": "nanoborealis-router"})
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            message = (json.loads(response.read()).get("choices") or [{}])[0].get("message") or {}
+    except (urllib.error.URLError, OSError, ValueError, AttributeError, IndexError):
+        return False
+    text = str(message.get("content") or message.get("reasoning_content") or message.get("reasoning") or "").strip()
+    return bool(text) and readable(text)
+
+
 def provider_models(name: str) -> list[dict]:
     """The chat models one provider serves (cached for an hour); OpenRouter's free ones only."""
     p = providers()[name]
@@ -759,6 +778,44 @@ def main(argv: list[str]) -> int:
             missing = [n for n, p in providers().items() if p.get("key") and not MODEL_CACHE.get(n, (0, []))[1]]
             time.sleep(60 if missing else 3000)
     threading.Thread(target=keep_model_lists, daemon=True).start()
+
+    def check_paused() -> None:
+        """A pause lasts only while the model is still down: each paused model is asked a tiny question now and then
+        (soon at first, then less often), and the first good answer lifts its pause."""
+        next_check: dict[tuple[str, str], tuple[float, float]] = {}  # (provider, model): (when, wait after that)
+        while True:
+            time.sleep(10)
+            now = time.time()
+            with lock:
+                paused = {k for k, v in model_resting.items() if v[0] > now} | {k for k, v in broken_until.items() if v > now}
+            for key in list(next_check):
+                if key not in paused:
+                    del next_check[key]
+            for key in paused:
+                when, wait = next_check.setdefault(key, (now + CHECK_FIRST, CHECK_FIRST))
+                if when > now:
+                    continue
+                name, model = key
+                provider = providers().get(name) or {}
+                with lock:
+                    busy = (not provider.get("key") or usage.rest_left(name)[0] > 0
+                            or (provider.get("per_minute") and usage.this_minute(name) >= provider["per_minute"] - 2))
+                if busy:  # the provider's own limit comes first: never spend its last requests on a check
+                    next_check[key] = (now + 30, wait)
+                    continue
+                ok = model_answers(provider, model)
+                with lock:
+                    usage.count(name, 20)
+                    if ok:
+                        model_resting.pop(key, None)
+                        broken_until.pop(key, None)
+                if ok:
+                    del next_check[key]
+                    print(f"nanoborealis-router: {name} {model} answers again; its pause is lifted", file=sys.stderr, flush=True)
+                else:
+                    wait = min(wait * 2, CHECK_MOST)
+                    next_check[key] = (time.time() + wait, wait)
+    threading.Thread(target=check_paused, daemon=True).start()
     server.serve_forever()
     return 0
 
