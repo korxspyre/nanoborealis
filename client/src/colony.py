@@ -56,6 +56,7 @@ class ColonyView:
         self.problem: str | None = None  # why the colony can't be shown (none on this computer, ...)
         self.showing: str | None = None  # the open room or task: "room:<id>" or "task:<id>"
         self.follower: object | None = None
+        self.side_open = True  # the live map beside the chats and tasks
 
     async def call(self, method: str, path: str, body: dict | None = None) -> dict[str, Any]:
         return await asyncio.to_thread(admin.colony, self.app.machine, method, path, body)
@@ -236,6 +237,40 @@ class ColonyView:
             return await self.task_view(int(ident))
         except (PairingError, ValueError) as e:
             return "Colony", self.frame([t.card(t.muted(str(e)))])
+
+    def with_map(self, body: ft.Control) -> ft.Control:
+        """The colony's page with the live map at its side, folded to a thin strip when you collapse it."""
+        import crewmap
+        holder = ft.Container(width=300 if self.side_open else 44, border=ft.Border.only(left=ft.BorderSide(1, t.LINE)),
+                              padding=ft.Padding.symmetric(horizontal=8, vertical=10))
+        crew = crewmap.CrewMap(self)
+        section = self.workspace.section
+
+        async def fill() -> None:
+            toggle = t.icon_button(ft.Icons.CHEVRON_RIGHT_ROUNDED if self.side_open else ft.Icons.HUB_OUTLINED,
+                                   "Collapse the live map" if self.side_open else "Show the live map",
+                                   on_click=lambda _e: self.page.run_task(flip))
+            if not self.side_open:
+                holder.width, holder.content = 44, ft.Column([toggle])
+                self.page.update()
+                return
+            holder.width = 300
+            try:
+                panel = await crew.side()
+            except PairingError as e:
+                panel = t.muted(str(e), size=12.5)
+            holder.content = ft.Column([ft.Row([ft.Text("Live map", weight=ft.FontWeight.W_600, expand=True), toggle]),
+                                        crew.summary, panel], spacing=8, expand=True)
+            self.page.update()
+            await crew.follow(lambda: self.side_open and self.workspace.section == section)
+
+        async def flip() -> None:
+            self.side_open = not self.side_open
+            await fill()
+
+        self.page.run_task(fill)
+        return ft.Row([ft.Container(body, expand=True), holder], expand=True, spacing=0,
+                      vertical_alignment=ft.CrossAxisAlignment.STRETCH)
 
     def frame(self, body: list[ft.Control], composer: ft.Control | None = None) -> ft.Control:
         column = ft.ListView(body, expand=True, spacing=10, padding=ft.Padding.symmetric(horizontal=24, vertical=16),

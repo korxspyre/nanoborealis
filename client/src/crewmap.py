@@ -85,6 +85,20 @@ class CrewMap:
             t.muted("WHAT HAPPENED", size=10.5, weight=ft.FontWeight.W_600), self.feed,
         ], spacing=12)
 
+    async def side(self) -> ft.Control:
+        """The map narrowed to a side panel beside the colony's chats and tasks: each member, lit while at work, and
+        what happened, newest first."""
+        rigs = (await self.colony.call("GET", "/rigs"))["rigs"]
+        details = await asyncio.gather(*(self.colony.call("GET", f"/rigs/{r['name']}") for r in rigs))
+        cards = []
+        for seat in (s for d in details for s in d["seats"]):
+            card = self.card(seat["id"], short(seat["id"]), (seat.get("role") or "").split(":")[0].strip(), 0, 0)
+            card.left = card.top = card.width = None
+            cards.append(card)
+        await self.refresh()
+        return ft.ListView([*cards, ft.Container(height=6), t.muted("WHAT HAPPENED", size=10.5, weight=ft.FontWeight.W_600),
+                            self.feed], spacing=6, expand=True)
+
     def key(self, color: str, label: str) -> ft.Control:
         return ft.Row([ft.Container(width=18, height=3, bgcolor=color, border_radius=2), t.muted(label, size=11.5)], spacing=6)
 

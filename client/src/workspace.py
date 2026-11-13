@@ -509,7 +509,7 @@ class Workspace:
                 title, body = await colony.view(key)
                 await colony.load()
             self.title_text.value = title
-            self.control_host.content = body
+            self.control_host.content = body if key == "map" or colony.problem else colony.with_map(body)
             self.render_sidebar()
             self.page.update()
             return
