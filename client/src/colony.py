@@ -330,7 +330,7 @@ class ColonyView:
         listing = ft.Column([self.bubble(m) for m in messages], spacing=10)
         if not messages:
             listing.controls.append(t.muted("Say something to start."))
-        box = t.field(hint="Message your colony (Enter sends, Shift+Enter for a new line)" if room["kind"] == "colony"
+        box = t.field(hint="Message your colony, or @ a member to hear only from them (Enter sends)" if room["kind"] == "colony"
                       else f"Message {self.seat_name(room['seat'])}", multiline=True)
         box.max_lines = 6
         box.shift_enter = True
@@ -354,7 +354,17 @@ class ColonyView:
                                      ft.IconButton(ft.Icons.ARROW_UPWARD_ROUNDED, tooltip="Send (Enter)", bgcolor=t.ACCENT,
                                                    icon_color=t.ON_ACCENT, on_click=send)]
         if room["kind"] == "colony":
-            actions.insert(1, t.icon_button(ft.Icons.HOW_TO_VOTE_OUTLINED, "Ask the crew to vote",
+            def mention(seat_id: str):
+                def add(_e) -> None:
+                    box.value = f"@{seat_id.rsplit('-', 1)[-1]} {box.value or ''}"
+                    box.focus()
+                    self.page.update()
+                return add
+            actions.insert(1, ft.PopupMenuButton(
+                icon=ft.Icons.ALTERNATE_EMAIL_ROUNDED, tooltip="Ask one member (only they answer)",
+                items=[ft.PopupMenuItem(content=ft.Text(self.seat_name(s["id"]).split("@")[0].capitalize()), on_click=mention(s["id"]))
+                       for s in self.seats if not s.get("chair")]))
+            actions.insert(1,t.icon_button(ft.Icons.HOW_TO_VOTE_OUTLINED, "Ask the crew to vote",
                                             on_click=lambda _e: self.page.run_task(self.new_vote, room_id, listing)))
         self.page.run_task(self.follow_room, room_id, listing, messages[-1]["id"] if messages else 0)
         title = room["title"] if room["kind"] == "colony" else self.seat_name(room.get("seat") or "")

@@ -1038,6 +1038,14 @@ FREE_ONLY = {"provider": {"max_price": {"prompt": 0, "completion": 0, "request":
 PASS = re.compile(r"^\W*pass\W*$", re.IGNORECASE)
 
 
+def addressed(seats: list[dict], said: str) -> list[dict]:
+    """The members a message names with @ (by id, address, or the id's last part, as @scholar for civ-scholar):
+    only they answer it."""
+    names = {n.lower() for n in re.findall(r"(?<![\w@])@([\w.-]+)", said)}
+    return [s for s in seats
+            if names & {s["id"].lower(), str(s.get("address") or "").lower(), s["id"].lower().rsplit("-", 1)[-1]}]
+
+
 def post_json(url: str, body: dict, key: str, timeout: float) -> dict:
     import urllib.request
     request = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
@@ -1327,7 +1335,8 @@ class Orchestrator:
         seats = self.seats()
         board = self.scoreboard(seats)
         said = self.db(lambda h: h.messages(room_id))[-1:]
-        for seat in best(seats, said[0]["text"] if said else room["title"], CHAT_SEATS):
+        named = addressed(seats, said[0]["text"]) if said else []
+        for seat in named or best(seats, said[0]["text"] if said else room["title"], CHAT_SEATS):
             recent = self.db(lambda h: h.messages(room_id))[-CONTEXT_MESSAGES:]
             lines = "\n".join(f"[{m['author']}{' · ' + m['card'] if m.get('card') else ''}] {m['text']}"
                               for m in recent if m["kind"] != "pass")
@@ -1336,8 +1345,9 @@ class Orchestrator:
             work = self.work_board()
             take = ("\nTo take on an open task yourself, start your reply with CLAIM <its number> on its own line, "
                     "then give the finished work." if seat.get("kind") == "cloud" and "[open]" in work else "")
-            prompt = (f"Colony chat {room_id}: {room['title']}\n\n{board}{work}{lines}\n\nYou are {seat['id']}. Reply to "
-                      f"the room in a few sentences if you add something new, or answer exactly PASS.{take}")
+            ask = ("The owner asked you by name: answer them." if named else
+                   "Reply to the room in a few sentences if you add something new, or answer exactly PASS.")
+            prompt = f"Colony chat {room_id}: {room['title']}\n\n{board}{work}{lines}\n\nYou are {seat['id']}. {ask}{take}"
             answer = self.ask(seat, f"colony-{room_id}", prompt)
             claimed = re.match(r"\s*CLAIM\s+#?(\d+)\s*\n(.*)", answer or "", re.S | re.I)
             if claimed and seat.get("kind") == "cloud":
